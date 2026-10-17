@@ -87,3 +87,15 @@ def migrate(conn: psycopg.Connection, cfg: Config) -> list[str]:
             )
             done.append(m.name)
     return done
+
+
+def q(cfg: Config, query: str) -> sql.Composed:
+    """Format {app}/{meta} in query with the configured, quoted schema names."""
+    return sql.SQL(query).format(app=sql.Identifier(cfg.postgres.application_schema),
+                                 meta=sql.Identifier(cfg.postgres.metadata_schema))
+
+
+def has_ledger(conn: psycopg.Connection, cfg: Config) -> bool:
+    """True once init-db has created the run ledger."""
+    name = sql.SQL("{}.generation_runs").format(sql.Identifier(cfg.postgres.metadata_schema)).as_string(conn)
+    return conn.execute("SELECT to_regclass(%s) IS NOT NULL", (name,)).fetchone() == (True,)

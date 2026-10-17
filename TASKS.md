@@ -1,11 +1,11 @@
 # Tasks
 
 ## Active
+- [ ] `feat/validate` (stacked on PR #6): `validate [--run-id]`; reviewed, 10 findings fixed; awaiting approval to commit/PR
 - [ ] PR #6 `feat/copy-loader-smoke` (stacked on PR #5): COPY loader + chunk ledger + `generate --profile smoke`; reviewed, 10 findings fixed; awaiting merge after #5
 - [ ] PR #5 `feat/deterministic-generation`: pure generator module + tests; reviewed, 8 findings fixed; awaiting merge
 
 ## Next (Phase 1)
-- [ ] `validate --run-id`: order header = Σ items, payments vs order total, product currency = order currency, category cycles
 - [ ] `status` and `resume` (stale `RUNNING` run handling: one-running-run index blocks new runs until resolved)
 - [ ] 10,000-order MVP run; record time, peak RSS, DB size
 
