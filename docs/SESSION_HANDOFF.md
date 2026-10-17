@@ -3,7 +3,7 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-17
-**Branch / commit:** `feat/status-resume`, stacked on `feat/validate` (PR #7) — uncommitted.
+**Branch / commit:** `feat/status-resume` — PR #8 open, base `feat/validate` (PR #7).
 Stack: #5 `feat/deterministic-generation` → #6 `feat/copy-loader-smoke` → #7 `feat/validate` → this. All OPEN on GitHub (checked this session; never assume merged). User: don't merge. After GitHub confirms #5 merged: `gh pr edit 6 --base main`; then #7 after #6, etc.
 
 ## Current phase and task
