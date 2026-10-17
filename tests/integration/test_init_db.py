@@ -4,6 +4,7 @@ import os
 import uuid
 from collections.abc import Iterator
 from dataclasses import replace
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -12,7 +13,7 @@ import psycopg
 import pytest
 from psycopg import errors, sql
 
-from ecomgen import config, db
+from ecomgen import config, db, generate
 from ecomgen.cli import main
 
 ADMIN_URL = os.environ.get("ECOMGEN_TEST_DATABASE_URL", "")
@@ -166,3 +167,24 @@ def test_cli_init_db(db_url: str, monkeypatch: pytest.MonkeyPatch, capsys: pytes
     assert "applied: 0001_core_schema.sql" in capsys.readouterr().out
     assert main(["init-db", str(EXAMPLE)]) == 0
     assert "up to date" in capsys.readouterr().out
+
+
+def test_generated_rows_satisfy_schema(conn: psycopg.Connection) -> None:
+    # The schema's own CHECKs/FKs are the independent judge of the generator (not a loader; that's COPY, next).
+    world = generate.World(1, datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 8, tzinfo=UTC), 10, 60, 40, 150)
+    counts: dict[str, int] = {}
+    with conn.cursor() as cur:
+        for chunk in generate.generate_all(world, 50):
+            for table, rows in chunk.tables.items():
+                counts[table] = counts.get(table, 0) + len(rows)
+                if rows:
+                    fields: tuple[str, ...] = getattr(rows[0], "_fields")  # by name, never positional
+                    cur.executemany(sql.SQL("INSERT INTO commerce.{} ({}) VALUES ({})").format(
+                        sql.Identifier(table),
+                        sql.SQL(", ").join(map(sql.Identifier, fields)),
+                        sql.SQL(", ").join([sql.Placeholder()] * len(fields)),
+                    ), rows)
+    for table, n in counts.items():
+        row = conn.execute(sql.SQL("SELECT count(*) FROM commerce.{}").format(sql.Identifier(table))).fetchone()
+        assert row == (n,), table
+    assert counts["orders"] == 150 and counts["order_items"] >= 150
