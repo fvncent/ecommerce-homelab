@@ -1,7 +1,7 @@
 # Tasks
 
 ## Active
-- [ ] `feat/copy-loader-smoke` (stacked on PR #5, still open): COPY loader + chunk ledger + `generate --profile smoke`; reviewed, 10 findings fixed; awaiting approval to commit/PR
+- [ ] PR #6 `feat/copy-loader-smoke` (stacked on PR #5): COPY loader + chunk ledger + `generate --profile smoke`; reviewed, 10 findings fixed; awaiting merge after #5
 - [ ] PR #5 `feat/deterministic-generation`: pure generator module + tests; reviewed, 8 findings fixed; awaiting merge
 
 ## Next (Phase 1)

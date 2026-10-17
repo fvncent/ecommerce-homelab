@@ -3,10 +3,10 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-17
-**Branch / commit:** `feat/copy-loader-smoke`, stacked on `feat/deterministic-generation` (`0803f94`, PR #5 **still open**) — uncommitted. Rebase onto `main` after #5 merges.
+**Branch / commit:** `feat/copy-loader-smoke`, stacked on `feat/deterministic-generation` (`0803f94`, PR #5 **still open**) — PR #6 open (base: PR #5 branch). After #5 merges, retarget #6 to `main`.
 
 ## Current phase and task
-Phase 1 (CLI + schema MVP) — task 5: bounded-chunk COPY loader + run/chunk ledger + `ecomgen generate [--profile smoke]`. Reviewed (`/code-review high`), 10 findings fixed; needs approval to commit/push/PR.
+Phase 1 (CLI + schema MVP) — task 5: bounded-chunk COPY loader + run/chunk ledger + `ecomgen generate [--profile smoke]`. Reviewed (`/code-review high`), 10 findings fixed; PR #6 open.
 
 ## Completed
 - PRs #1–#4 merged; PR #5 (deterministic generation, reviewed, 8 findings fixed) open.
