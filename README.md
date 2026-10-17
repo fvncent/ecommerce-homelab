@@ -22,6 +22,8 @@ uv run mypy
 
 Migrations live in `src/ecomgen/migrations/NNNN_*.sql` and are applied in one transaction. Never edit an applied migration; add a new one (init-db refuses checksum drift).
 
+Entity generation (`src/ecomgen/generate.py`) is pure and deterministic: entity N is built from its own RNG seeded by `sha256(seed:entity:N)`, so any chunk regenerates alone and output doesn't depend on `chunk_rows`. IDs are `prefix_N`; item/payment IDs use a fixed stride per order (`itm_{(order-1)*5+line}`, `pay_{(order-1)*3+attempt}`), so they are sparse. Order/payment states are the simulated lifecycle as of `clock_end`. Limitations: single currency (USD); uniform customer/product choice (skew is Phase 4); not yet written to the DB (COPY loader is the next task).
+
 > **macOS + iCloud:** if the repo is under an iCloud-synced folder (e.g. `~/Documents`), iCloud hides `.venv/**/*.pth` files and the editable install breaks (`No module named 'ecomgen'`). Keep the venv outside iCloud, e.g. `export UV_PROJECT_ENVIRONMENT=~/.venvs/ecomgen`.
 
 ## What's in this pack

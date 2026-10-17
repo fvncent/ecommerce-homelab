@@ -1,18 +1,15 @@
 # Tasks
 
 ## Active
-- [ ] PR #4 `feat/migrations-init-db`: review fixes applied, awaiting approval to commit/push/open PR
+- [ ] PR #5 `feat/deterministic-generation`: pure generator module + tests; reviewed, 8 findings fixed; awaiting merge
 
 ## Next (Phase 1)
-- [ ] Deterministic entity generation: seeded RNG, canonical IDs (`ord_1`, no leading zeros), FK-safe ordering
 - [ ] Bounded-chunk COPY with `generation_chunks` row in the same transaction; `generate --profile smoke` (1,000 orders)
 - [ ] `validate --run-id`: order header = Σ items, payments vs order total, product currency = order currency, category cycles
 - [ ] `status` and `resume` (stale `RUNNING` run handling: one-running-run index blocks new runs until resolved)
 - [ ] 10,000-order MVP run; record time, peak RSS, DB size
 
 ## Environment / ops
-- [ ] Move repo out of iCloud `~/Documents` to `~/dev/` (needs approval; see SESSION_HANDOFF.md)
-- [ ] After the move: rotate local Postgres password (`.env` was iCloud-synced)
 - [ ] Phase 0: run `scripts/inspect_ubuntu_hardware.sh` on Ubuntu
 - [ ] CI (GitHub Actions): pytest with a Postgres service + mypy; fail if integration tests skip in CI
 
@@ -25,4 +22,5 @@
 - [x] PR #1 workflow rules (CLAUDE.md, handoff, .gitignore fix)
 - [x] PR #2 package skeleton
 - [x] PR #3 config validation + `check-config`
-- [x] Migrations + `init-db` + compose Postgres; independent review, 8 findings fixed (2026-10-17)
+- [x] PR #4 migrations + `init-db` + compose Postgres; independent review, 8 findings fixed (2026-10-17)
+- [x] Repo moved to `~/dev/ecommerce-homelab-planning`; local Postgres password rotated (2026-10-17)
