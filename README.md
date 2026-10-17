@@ -5,6 +5,18 @@
 **Hardware baseline:** Ubuntu Server; AMD Ryzen 5 5600; 16 GB RAM; 2 TB storage (SSD/HDD not yet confirmed).  
 **Goal:** Build a reproducible, realistic e-commerce **source-system simulator**, independently build reliable data engineering pipelines, and **later** use their curated outputs for AI engineering (RAG, recommendations, forecasting and model evaluation).
 
+## Development
+
+Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.12 if missing).
+
+```bash
+uv sync               # create .venv from uv.lock
+uv run pytest         # tests
+uv run mypy           # strict type check
+uv run ecomgen --version
+cp .env.example .env  # then set ECOMMERCE_DATABASE_URL
+```
+
 ## What's in this pack
 
 | File | Purpose |

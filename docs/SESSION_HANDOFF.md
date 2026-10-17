@@ -3,28 +3,32 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones.
 
 **Updated:** 2026-10-17
-**Branch / commit:** `chore/claude-workflow` (see PR)
+**Branch / commit:** `feat/phase1-skeleton` (see `git log`)
 
 ## Current phase and task
-Phase 0 (Inventory) — Claude Code workflow setup.
+Phase 1 (CLI + schema MVP) — task 1 done: package skeleton.
 
 ## Completed
-- Added `CLAUDE.md` (permanent rules) and this handoff file.
-- Fixed `.gitignore` (it contained a literal shell heredoc, so nothing was ignored); now also ignores `.claude/settings.local.json`.
+- PR #1 merged: `CLAUDE.md`, this handoff, fixed `.gitignore`.
+- uv-managed package `ecomgen` (src layout, Python ≥3.12, `uv.lock`), argparse CLI with `--version`, pytest + strict mypy, `.env.example`, README dev section.
 
 ## Key decisions
-- Ponytail plugin at `lite` level; project non-negotiables in `CLAUDE.md` take precedence.
-- No project-specific Skills yet; add one only when a procedure repeats (e.g. migrations).
+- Tooling: uv + hatchling, argparse (stdlib), pytest, mypy `strict`. No linter yet.
+- Zero runtime deps for now; psycopg 3 arrives with `init-db`, PyYAML with config loading.
+- Python 3.12 pinned (`.python-version`) to match Ubuntu 24.04's system Python.
+- Ponytail plugin at `lite`; `CLAUDE.md` non-negotiables take precedence.
 
 ## Files modified
-`.gitignore`, `CLAUDE.md`, `docs/SESSION_HANDOFF.md`
+`pyproject.toml`, `uv.lock`, `.python-version`, `.env.example`, `src/ecomgen/{__init__,__main__,cli}.py`, `src/ecomgen/py.typed`, `tests/test_cli.py`, `README.md`, this file.
 
-## Test results
-No application code yet; nothing to test.
+## Test results (macOS, Python 3.12.14)
+- `uv run pytest`: 2 passed.
+- `uv run mypy`: no issues in 4 files.
 
 ## Known failures / limitations
-- Phase 0 hardware inventory (`scripts/inspect_ubuntu_hardware.sh`) not yet run on Ubuntu.
-- `*.jsonl` is ignored globally; sample fixtures will need a `!tests/fixtures/**` exception.
+- Not run on Ubuntu yet; Phase 0 hardware inventory still pending.
+- No CI workflow.
+- `*.jsonl` ignored globally; fixtures will need a `!tests/fixtures/**` exception.
 
 ## Next step
-Phase 1 task 1: Python package skeleton (`pyproject.toml`, locked deps, pytest + type checker, `.env.example`).
+Phase 1 task 2: config YAML loading + validation (seed, counts, chunk size, env var for DB URL) with tests for bad config.
