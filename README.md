@@ -7,17 +7,22 @@
 
 ## Development
 
-Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.12 if missing).
+Requires [uv](https://docs.astral.sh/uv/) (installs Python 3.12 if missing) and Docker.
 
 ```bash
-uv sync               # create .venv from uv.lock
-uv run pytest         # tests
-uv run mypy           # strict type check
-uv run ecomgen --version
-cp .env.example .env  # then set ECOMMERCE_DATABASE_URL
-set -a; . ./.env; set +a   # .env is not auto-loaded
+uv sync                                  # create .venv from uv.lock
+cp .env.example .env                     # set POSTGRES_PASSWORD and both URLs (port 5433)
+set -a; . ./.env; set +a                 # .env is not auto-loaded
+docker compose up -d --wait              # local PostgreSQL 17 on 127.0.0.1:5433
 uv run ecomgen check-config config/generator.example.yaml
+uv run ecomgen init-db config/generator.example.yaml   # idempotent; applies pending migrations
+uv run pytest                            # integration tests skip unless ECOMGEN_TEST_DATABASE_URL is set
+uv run mypy
 ```
+
+Migrations live in `src/ecomgen/migrations/NNNN_*.sql` and are applied in one transaction. Never edit an applied migration; add a new one (init-db refuses checksum drift).
+
+> **macOS + iCloud:** if the repo is under an iCloud-synced folder (e.g. `~/Documents`), iCloud hides `.venv/**/*.pth` files and the editable install breaks (`No module named 'ecomgen'`). Keep the venv outside iCloud, e.g. `export UV_PROJECT_ENVIRONMENT=~/.venvs/ecomgen`.
 
 ## What's in this pack
 
