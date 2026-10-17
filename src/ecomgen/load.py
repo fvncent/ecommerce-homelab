@@ -5,10 +5,14 @@ durable; no marker means nothing from it was committed. Chunks already marked fo
 is what makes a re-run of the same run (resume) idempotent.
 """
 
+import dataclasses
+import json
 import secrets
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from typing import Any
 
 import psycopg
 from psycopg import sql
@@ -61,9 +65,37 @@ def _write(cur: psycopg.Cursor[tuple[object, ...]], cfg: Config, table: str,
         cur.executemany(sql.SQL("INSERT INTO {} VALUES ({})").format(target, values), rows)
 
 
+# Generation is a pure function of the World, DATA_VERSION and chunk_rows. Resume rebuilds the World from what the
+# run recorded (so config edits to seed/clock/counts can't change it) and requires the rest to match.
+RESUME_MUST_MATCH = ("data_version", "chunk_rows", "application_schema")
+
+
+def resume_fields(cfg: Config, world: generate.World) -> dict[str, object]:
+    """Everything that determines a run's rows, normalized through JSON so it compares equal after a jsonb round trip.
+    Every World field is recorded, so a future generation input (which must be a World field) is covered too."""
+    fields = {
+        "data_version": generate.DATA_VERSION,
+        "world": {f.name: getattr(world, f.name) for f in dataclasses.fields(world)},
+        "chunk_rows": cfg.generator.chunk_rows, "application_schema": cfg.postgres.application_schema,
+    }
+    normalized: dict[str, object] = json.loads(json.dumps(fields, default=datetime.isoformat))
+    return normalized
+
+
+def _recorded_world(recorded: dict[str, object]) -> generate.World:
+    w = recorded.get("world")
+    try:
+        assert isinstance(w, dict)
+        kwargs: dict[str, Any] = {f.name: datetime.fromisoformat(w[f.name]) if f.type is datetime else w[f.name]
+                                  for f in dataclasses.fields(generate.World)}
+        return generate.World(**kwargs)
+    except (AssertionError, KeyError, TypeError, ValueError, generate.GenerationError) as e:
+        raise LoadError(f"run's recorded world is malformed ({w!r}): {e}") from None
+
+
 def _start_run(conn: psycopg.Connection, cfg: Config, profile: str, world: generate.World) -> str:
-    reset_hint = ("`resume` is not implemented yet; to start over, drop and recreate the database (or its "
-                  "application and metadata schemas) and run init-db")
+    reset_hint = ("To finish a RUNNING or FAILED run use `ecomgen resume`; to start over, drop and recreate the "
+                  "database (or its application and metadata schemas) and run init-db")
     with conn.transaction():
         existing = conn.execute(db.q(cfg, "SELECT run_id, state FROM {meta}.generation_runs"
                                         " ORDER BY started_at DESC LIMIT 1")).fetchone()
@@ -78,9 +110,10 @@ def _start_run(conn: psycopg.Connection, cfg: Config, profile: str, world: gener
         run_id = f"run_{datetime.now(UTC):%Y%m%dT%H%M%SZ}_{secrets.token_hex(3)}"
         planned = {e: world.count(e) for e in generate.ENTITY_ORDER}
         conn.execute(db.q(cfg, "INSERT INTO {meta}.generation_runs"
-                             " (run_id, generator_version, seed, config_sha256, profile, state, counts)"
-                             " VALUES (%s, %s, %s, %s, %s, 'RUNNING', %s)"),
-                     (run_id, __version__, cfg.generator.seed, cfg.sha256, profile, Jsonb({"planned": planned})))
+                             " (run_id, generator_version, seed, config_sha256, profile, state, counts, resume_fields)"
+                             " VALUES (%s, %s, %s, %s, %s, 'RUNNING', %s, %s)"),
+                     (run_id, __version__, cfg.generator.seed, cfg.sha256, profile, Jsonb({"planned": planned}),
+                      Jsonb(resume_fields(cfg, world))))
     return run_id
 
 
@@ -124,27 +157,119 @@ def _complete(conn: psycopg.Connection, cfg: Config, run_id: str) -> dict[str, i
 
 def run(conn: psycopg.Connection, cfg: Config, preset: str | None = None) -> RunResult:
     """Start a new run and write every chunk. On error the run is marked FAILED (a hard crash leaves it RUNNING)."""
+    _require_loadable(conn, cfg)
+    world = world_for(cfg, preset)
+    with _run_lock(conn):
+        run_id = _start_run(conn, cfg, preset or cfg.generator.profile, world)
+        return _execute(conn, cfg, run_id, world)
+
+
+def resume(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -> RunResult | None:
+    """Finish a RUNNING (crashed) or FAILED run: write only the chunks not yet in its ledger. None if already
+    COMPLETED. Holding the run lock proves no other process is writing, so a RUNNING run here is stale."""
+    _require_loadable(conn, cfg)
+    with _run_lock(conn):
+        run_id = db.resolve_run(conn, cfg, run_id)
+        row = conn.execute(db.q(cfg, "SELECT state, resume_fields FROM {meta}.generation_runs WHERE run_id = %s"),
+                           (run_id,)).fetchone()
+        assert row is not None
+        state, recorded = row
+        if state == "COMPLETED":
+            return None
+        differs = _resume_mismatch(recorded, cfg)
+        if differs:
+            raise LoadError(f"can't resume run {run_id}: {', '.join(differs)} differ from what it started with, so "
+                            "regenerated chunks wouldn't match committed ones; restore the original config "
+                            "(e.g. git checkout) or generator version")
+        world = _recorded_world(recorded)
+        # error is kept (a later failure overwrites it), so a crash during resume doesn't lose the first reason
+        conn.execute(db.q(cfg, "UPDATE {meta}.generation_runs SET state = 'RUNNING', finished_at = NULL"
+                               " WHERE run_id = %s"), (run_id,))
+        return _execute(conn, cfg, run_id, world)
+
+
+@dataclass(frozen=True)
+class RunStatus:
+    run_id: str
+    state: str
+    profile: str
+    generator_version: str
+    resume_mismatch: list[str]  # row-determining inputs that differ from this config/generator; [] = resumable
+    started_at: datetime
+    finished_at: datetime | None
+    error: str | None
+    progress: dict[str, tuple[int, int]]  # entity -> (rows in ledger, planned rows)
+    writer_pid: int | None  # backend PID holding the run lock (a live writer, or a dead client's lingering session)
+
+
+def status(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -> RunStatus:
+    """Read-only: never takes the run lock (it inspects pg_locks), so it can't block a real run. The lock is
+    checked before and after reading the run, so a writer that starts or finishes meanwhile still counts."""
+    holder = _lock_holder(conn)
+    run_id = db.resolve_run(conn, cfg, run_id)
+    row = conn.execute(db.q(cfg, "SELECT state, profile, generator_version, started_at, finished_at, error,"
+                                 " counts->'planned', resume_fields FROM {meta}.generation_runs WHERE run_id = %s"),
+                       (run_id,)).fetchone()
+    assert row is not None
+    state, profile, version, started_at, finished_at, error, planned, recorded = row
+    mismatch = _resume_mismatch(recorded, cfg)
+    if not isinstance(planned, dict):
+        planned = {}
+    done: dict[str, int] = dict(conn.execute(db.q(cfg, "SELECT entity, sum(row_count)::int FROM {meta}.generation_chunks"
+                                       " WHERE run_id = %s GROUP BY 1"), (run_id,)).fetchall())
+    progress = {e: (done.get(e, 0), int(planned.get(e, 0))) for e in generate.ENTITY_ORDER}
+    holder = holder or _lock_holder(conn)
+    return RunStatus(run_id, state, profile, version, mismatch, started_at, finished_at, error, progress, holder)
+
+
+def _resume_mismatch(recorded: dict[str, object] | None, cfg: Config) -> list[str]:
+    """Names of RESUME_MUST_MATCH fields that differ between the run's record and this config/generator."""
+    if recorded is None:
+        return ["resume fields (run predates migration 0003)"]
+    current = resume_fields(cfg, generate.World.from_config(cfg))
+    return [k for k in RESUME_MUST_MATCH if recorded.get(k) != current[k]]
+
+
+def _lock_holder(conn: psycopg.Connection) -> int | None:
+    # A bigint advisory key shows in pg_locks as classid = high 32 bits, objid = low 32 bits, objsubid = 1.
+    row = conn.execute(
+        "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted AND objsubid = 1"
+        " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+        " AND classid = %s AND objid = %s", (_RUN_LOCK_ID >> 32, _RUN_LOCK_ID & 0xFFFFFFFF)).fetchone()
+    return int(row[0]) if row else None
+
+
+def _require_loadable(conn: psycopg.Connection, cfg: Config) -> None:
     if not conn.autocommit:
         raise LoadError("loader needs an autocommit connection so each chunk commits on its own")
-    world = world_for(cfg, preset)
     if not db.has_ledger(conn, cfg):
         raise LoadError("generator schema not found; run `ecomgen init-db` first")
+
+
+@contextmanager
+def _run_lock(conn: psycopg.Connection) -> Iterator[None]:
     if conn.execute("SELECT pg_try_advisory_lock(%s)", (_RUN_LOCK_ID,)).fetchone() != (True,):
-        raise LoadError("another generate/resume is running against this database")
+        pid = _lock_holder(conn)
+        raise LoadError(f"another generate/resume holds the run lock (backend pid {pid}). If that client is gone "
+                        "(e.g. its host lost power), its session lingers until TCP keepalive drops it; end it with "
+                        f"SELECT pg_terminate_backend({pid})")
     try:
-        run_id = _start_run(conn, cfg, preset or cfg.generator.profile, world)
-        try:
-            written, skipped = write_chunks(conn, cfg, run_id, world)
-            counts = _complete(conn, cfg, run_id)
-        except BaseException as e:
-            _fail(conn, cfg, run_id, e)
-            raise
-        return RunResult(run_id, counts, written, skipped)
+        yield
     finally:
         try:
             conn.execute("SELECT pg_advisory_unlock(%s)", (_RUN_LOCK_ID,))
         except psycopg.Error:
             pass  # connection gone: the server released the session lock with it
+
+
+def _execute(conn: psycopg.Connection, cfg: Config, run_id: str, world: generate.World) -> RunResult:
+    try:
+        written, skipped = write_chunks(conn, cfg, run_id, world)
+        counts = _complete(conn, cfg, run_id)
+    except BaseException as e:
+        _fail(conn, cfg, run_id, e)
+        raise
+    return RunResult(run_id, counts, written, skipped)
 
 
 def _fail(conn: psycopg.Connection, cfg: Config, run_id: str, e: BaseException) -> None:

@@ -25,6 +25,7 @@ def small_cfg(cfg: config.Config) -> config.Config:
 
 
 Migrated = Callable[..., psycopg.Connection]
+Digest = Callable[[psycopg.Connection], dict[str, str]]
 
 
 @pytest.fixture
@@ -36,12 +37,6 @@ def one(conn: psycopg.Connection, query: str) -> object:
     row = conn.execute(query.encode()).fetchone()
     assert row is not None
     return row[0]
-
-
-def table_digest(conn: psycopg.Connection) -> dict[str, str]:
-    """Content hash of every source table (rows sorted by their text form, so order is deterministic)."""
-    return {t: str(one(conn, f"SELECT md5(coalesce(string_agg(x::text, '|' ORDER BY x::text), ''))"
-                             f" FROM commerce.{t} x")) for t in load.TABLES}
 
 
 def reconciliation_errors(conn: psycopg.Connection) -> int:
@@ -85,34 +80,34 @@ def test_chunk_ledger_matches_rows(aconn: psycopg.Connection, small_cfg: config.
     assert result.counts == actual  # child tables too, from the ledger's table_rows
 
 
-def test_same_seed_same_database(migrated: Migrated, small_cfg: config.Config) -> None:
+def test_same_seed_same_database(migrated: Migrated, small_cfg: config.Config, digest: Digest) -> None:
     """T02: two clean databases, same config, identical source data (and chunk size doesn't matter)."""
     big = replace(small_cfg, generator=replace(small_cfg.generator, chunk_rows=5000))
     digests = []
     for cfg in (small_cfg, big):
         c = migrated(cfg)
         load.run(c, cfg, "smoke")
-        digests.append(table_digest(c))
+        digests.append(digest(c))
     assert digests[0] == digests[1]
 
 
-def test_insert_path_matches_copy(migrated: Migrated, small_cfg: config.Config) -> None:
+def test_insert_path_matches_copy(migrated: Migrated, small_cfg: config.Config, digest: Digest) -> None:
     no_copy = replace(small_cfg, postgres=replace(small_cfg.postgres, bulk_copy=False))
     digests = []
     for cfg in (small_cfg, no_copy):
         c = migrated(cfg)
         load.run(c, cfg, "smoke")
-        digests.append(table_digest(c))
+        digests.append(digest(c))
     assert digests[0] == digests[1]
 
 
 def test_failure_leaves_only_whole_chunks_and_rerun_completes_identically(
-    migrated: Migrated, small_cfg: config.Config, monkeypatch: pytest.MonkeyPatch
+    migrated: Migrated, small_cfg: config.Config, monkeypatch: pytest.MonkeyPatch, digest: Digest
 ) -> None:
     """A failing chunk commits nothing; the ledger says exactly what is durable; re-running skips it (T10)."""
     clean = migrated(small_cfg)
     load.run(clean, small_cfg, "smoke")
-    expected = table_digest(clean)
+    expected = digest(clean)
 
     real = generate.generate_chunk
 
@@ -140,9 +135,9 @@ def test_failure_leaves_only_whole_chunks_and_rerun_completes_identically(
     monkeypatch.setattr(generate, "generate_chunk", real)
     run_id = str(one(c, "SELECT run_id FROM generator_meta.generation_runs"))
     assert load.write_chunks(c, small_cfg, run_id, load.world_for(small_cfg, "smoke")) == (2, 7)
-    assert table_digest(c) == expected
+    assert digest(c) == expected
     assert load.write_chunks(c, small_cfg, run_id, load.world_for(small_cfg, "smoke")) == (0, 9)
-    assert table_digest(c) == expected
+    assert digest(c) == expected
 
 
 def test_refuses_uninitialized_database(db_url: str, cfg: config.Config) -> None:

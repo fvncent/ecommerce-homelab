@@ -1,13 +1,13 @@
 # Tasks
 
 ## Active
+- [ ] `feat/status-resume` (stacked on PR #7): `status` + `resume`; reviewed twice, all findings fixed
 - [ ] PR #7 `feat/validate` (base `feat/copy-loader-smoke`): `validate [--run-id]`; reviewed, 10 findings fixed; awaiting merge (order: #5 → #6 → #7)
 - [ ] After #5 merges (GitHub-confirmed): `gh pr edit 6 --base main`; after #6 merges: retarget #7 to `main`
 - [ ] PR #6 `feat/copy-loader-smoke` (stacked on PR #5): COPY loader + chunk ledger + `generate --profile smoke`; reviewed, 10 findings fixed; awaiting merge after #5
 - [ ] PR #5 `feat/deterministic-generation`: pure generator module + tests; reviewed, 8 findings fixed; awaiting merge
 
 ## Next (Phase 1)
-- [ ] `status` and `resume` (stale `RUNNING` run handling: one-running-run index blocks new runs until resolved)
 - [ ] 10,000-order MVP run; record time, peak RSS, DB size
 
 ## Environment / ops

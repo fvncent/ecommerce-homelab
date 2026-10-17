@@ -7,7 +7,7 @@ from dataclasses import replace
 import psycopg
 import pytest
 
-from ecomgen import config, load, validate
+from ecomgen import config, db, load, validate
 from ecomgen.cli import main
 
 ADMIN_URL = os.environ.get("ECOMGEN_TEST_DATABASE_URL", "")
@@ -124,7 +124,7 @@ def test_samples_are_bounded(loaded: psycopg.Connection, small_cfg: config.Confi
 def test_run_selection(loaded: psycopg.Connection, small_cfg: config.Config) -> None:
     latest, _ = validate.validate(loaded, small_cfg)
     assert validate.validate(loaded, small_cfg, latest)[0] == latest
-    with pytest.raises(validate.ValidateError, match="not found"):
+    with pytest.raises(db.RunLookupError, match="not found"):
         validate.validate(loaded, small_cfg, "run_nope")
 
 
@@ -138,7 +138,7 @@ def test_refuses_open_transaction(loaded: psycopg.Connection, small_cfg: config.
 
 
 def test_no_runs(migrated: Callable[..., psycopg.Connection], small_cfg: config.Config) -> None:
-    with pytest.raises(validate.ValidateError, match="no runs recorded"):
+    with pytest.raises(db.RunLookupError, match="no runs recorded"):
         validate.validate(migrated(small_cfg), small_cfg)
 
 

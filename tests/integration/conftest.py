@@ -10,7 +10,7 @@ import psycopg
 import pytest
 from psycopg import sql
 
-from ecomgen import config, db
+from ecomgen import config, db, load
 
 ADMIN_URL = os.environ.get("ECOMGEN_TEST_DATABASE_URL", "")
 EXAMPLE = Path(__file__).parents[2] / "config" / "generator.example.yaml"
@@ -71,3 +71,19 @@ def conn(db_url: str, cfg: config.Config) -> Iterator[psycopg.Connection]:
     with psycopg.connect(db_url) as c:
         db.migrate(c, cfg)
         yield c
+
+
+Digest = Callable[[psycopg.Connection], dict[str, str]]
+
+
+@pytest.fixture
+def digest() -> Digest:
+    """Content hash of every source table (rows sorted by their text form, so order is deterministic)."""
+    def compute(conn: psycopg.Connection) -> dict[str, str]:
+        out = {}
+        for t in load.TABLES:
+            row = conn.execute(f"SELECT md5(coalesce(string_agg(x::text, '|' ORDER BY x::text), ''))"
+                               f" FROM commerce.{t} x".encode()).fetchone()
+            out[t] = str(row[0]) if row else ""
+        return out
+    return compute
