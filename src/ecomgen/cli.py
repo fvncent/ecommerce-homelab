@@ -8,6 +8,15 @@ import psycopg
 from ecomgen import __version__, config, db, generate, load, validate
 
 
+def _connect_cfg(path: str) -> tuple[config.Config, str] | int:
+    try:
+        cfg = config.load(path)
+        return cfg, config.database_url(cfg)
+    except config.ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 2
+
+
 def check_config(path: str) -> int:
     try:
         cfg = config.load(path)
@@ -28,12 +37,10 @@ def check_config(path: str) -> int:
 
 
 def init_db(path: str) -> int:
-    try:
-        cfg = config.load(path)
-        url = config.database_url(cfg)
-    except config.ConfigError as e:
-        print(f"config error: {e}", file=sys.stderr)
-        return 2
+    loaded = _connect_cfg(path)
+    if isinstance(loaded, int):
+        return loaded
+    cfg, url = loaded
     try:
         with psycopg.connect(url) as conn:
             applied = db.migrate(conn, cfg)
@@ -48,12 +55,10 @@ def init_db(path: str) -> int:
 
 
 def generate_cmd(path: str, profile: str | None) -> int:
-    try:
-        cfg = config.load(path)
-        url = config.database_url(cfg)
-    except config.ConfigError as e:
-        print(f"config error: {e}", file=sys.stderr)
-        return 2
+    loaded = _connect_cfg(path)
+    if isinstance(loaded, int):
+        return loaded
+    cfg, url = loaded
     started = time.perf_counter()
     try:
         with psycopg.connect(url, autocommit=True) as conn:
@@ -74,16 +79,14 @@ def generate_cmd(path: str, profile: str | None) -> int:
 
 def validate_cmd(path: str, run_id: str | None) -> int:
     """Exit 0: all checks pass. 1: a check failed (bad data). 2: config error. 3: could not validate."""
-    try:
-        cfg = config.load(path)
-        url = config.database_url(cfg)
-    except config.ConfigError as e:
-        print(f"config error: {e}", file=sys.stderr)
-        return 2
+    loaded = _connect_cfg(path)
+    if isinstance(loaded, int):
+        return loaded
+    cfg, url = loaded
     try:
         with psycopg.connect(url, autocommit=True) as conn:
             run_id, results = validate.validate(conn, cfg, run_id)
-    except validate.ValidateError as e:
+    except (validate.ValidateError, db.RunLookupError) as e:
         print(f"validate error: {e}", file=sys.stderr)
         return 3
     except psycopg.Error as e:
@@ -100,6 +103,68 @@ def validate_cmd(path: str, run_id: str | None) -> int:
     failed = sum(not r.ok for r in results)
     print(f"{len(results) - failed} passed, {failed} failed")
     return 1 if failed else 0
+
+
+def status_cmd(path: str, run_id: str | None) -> int:
+    """Exit 0: status shown. 2: config error. 3: could not read status (no run, run not found, DB error)."""
+    loaded = _connect_cfg(path)
+    if isinstance(loaded, int):
+        return loaded
+    cfg, url = loaded
+    try:
+        with psycopg.connect(url, autocommit=True) as conn:
+            st = load.status(conn, cfg, run_id)
+    except db.RunLookupError as e:
+        print(f"status error: {e}", file=sys.stderr)
+        return 3
+    except psycopg.Error as e:
+        print(f"database error: {type(e).__name__}: {e}".rstrip(), file=sys.stderr)
+        return 3
+    print(f"run {st.run_id}: {st.state} (profile {st.profile}, generator {st.generator_version})")
+    print(f"  started {st.started_at.isoformat()}" + (f", finished {st.finished_at.isoformat()}" if st.finished_at else ""))
+    print("  progress: " + ", ".join(f"{e} {d}/{p}" for e, (d, p) in st.progress.items()))
+    if st.error:
+        print(f"  last error: {st.error}")
+    if st.resume_mismatch and st.state != "COMPLETED":
+        print(f"  note: resume would refuse; differs from the run: {', '.join(st.resume_mismatch)}")
+    if st.writer_pid is not None:
+        print(f"  backend pid {st.writer_pid} holds the run lock (a live generate/resume, or a dead client's"
+              " lingering session)")
+    elif st.state == "RUNNING":
+        print("  no process is writing: the run crashed; run `ecomgen resume`")
+    elif st.state == "FAILED":
+        print("  run `ecomgen resume` to finish it")
+    elif st.state == "FAILED":
+        print("  run `ecomgen resume` to finish it")
+    return 0
+
+
+def resume_cmd(path: str, run_id: str | None) -> int:
+    """Exit 0: completed (or already was). 1: resume failed or refused. 2: config error. 3: no run / run not found."""
+    loaded = _connect_cfg(path)
+    if isinstance(loaded, int):
+        return loaded
+    cfg, url = loaded
+    started = time.perf_counter()
+    try:
+        with psycopg.connect(url, autocommit=True) as conn:
+            result = load.resume(conn, cfg, run_id)
+    except db.RunLookupError as e:
+        print(f"resume error: {e}", file=sys.stderr)
+        return 3
+    except (load.LoadError, generate.GenerationError) as e:
+        print(f"resume error: {e}", file=sys.stderr)
+        return 1
+    except psycopg.Error as e:
+        print(f"database error: {type(e).__name__}: {e}".rstrip(), file=sys.stderr)
+        return 1
+    if result is None:
+        print("run is already COMPLETED; nothing to resume")
+        return 0
+    print(f"run {result.run_id} COMPLETED: {result.chunks_written} chunks written, {result.chunks_skipped} already"
+          f" committed, in {time.perf_counter() - started:.1f}s")
+    print("  " + " ".join(f"{t}={n}" for t, n in result.counts.items()))
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -120,6 +185,12 @@ def main(argv: list[str] | None = None) -> int:
                                    "application schema; --run-id scopes the ledger checks.")
     p.add_argument("config", help="path to generator YAML")
     p.add_argument("--run-id", help="run to check (default: the most recent run)")
+    p = sub.add_parser("status", help="show a run's state and chunk progress (read-only)")
+    p.add_argument("config", help="path to generator YAML")
+    p.add_argument("--run-id", help="run to show (default: the most recent run)")
+    p = sub.add_parser("resume", help="finish a crashed (RUNNING) or FAILED run; committed chunks are skipped")
+    p.add_argument("config", help="path to generator YAML (must be identical to the run's)")
+    p.add_argument("--run-id", help="run to resume (default: the most recent run)")
     args = parser.parse_args(argv)
     if args.command == "check-config":
         return check_config(args.config)
@@ -129,5 +200,9 @@ def main(argv: list[str] | None = None) -> int:
         return generate_cmd(args.config, args.profile)
     if args.command == "validate":
         return validate_cmd(args.config, args.run_id)
+    if args.command == "status":
+        return status_cmd(args.config, args.run_id)
+    if args.command == "resume":
+        return resume_cmd(args.config, args.run_id)
     parser.print_help()
     return 0

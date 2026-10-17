@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from itertools import chain
+from typing import Any
 
 import pytest
 
@@ -14,7 +15,12 @@ WORLD = g.World(seed=42, clock_start=datetime(2026, 1, 1, tzinfo=UTC), clock_end
 # Same patterns as the CHECK constraints in 0001_core_schema.sql
 ID_PATTERNS = {"sellers": "sel", "categories": "cat", "customers": "cus", "products": "prd",
                "orders": "ord", "order_items": "itm", "payment_attempts": "pay"}
-GOLDEN = "f8f22ac9a9f533fdd51aeaa5e2fc60c263eb91d73ec28e5e4d48804cb3454fbc"  # fingerprint(rows())
+# Sparse: few sellers/products, so inactive entities and distinct-line exclusions force _probe's fallback scan.
+SPARSE = replace(WORLD, seed=7, sellers=2, customers=5, products=3, orders=200)
+# fingerprint of rows(WORLD) + rows(SPARSE), per generate.DATA_VERSION. NEVER edit an existing entry for a data change:
+# bump DATA_VERSION and add an entry (resume refuses runs from another data version; an edited entry would let it
+# mix old and new rows). Editing is only right when the test's inputs change, not the generator's output.
+GOLDEN = {1: "6747ce23f4146509c9294cb0b2a755c2a35ce2e3ddb10666f5ce9bbf516776d4"}
 ORDER_FLOW = ["CREATED", "CONFIRMED", "PROCESSING", "SHIPPED", "DELIVERED"]
 
 
@@ -45,9 +51,9 @@ def test_different_seed_different_data(data: dict[str, list[tuple[object, ...]]]
 
 
 def test_golden_fingerprint(data: dict[str, list[tuple[object, ...]]]) -> None:
-    # Changes when generated data changes. If intended, update it and note it in the PR: same seed + new
-    # generator version no longer reproduces old runs.
-    assert fingerprint(data) == GOLDEN
+    # Changes when generated data changes: see the GOLDEN comment (bump DATA_VERSION, don't edit an entry).
+    assert max(GOLDEN) == g.DATA_VERSION
+    assert fingerprint({**data, **{f"sparse.{t}": r for t, r in rows(SPARSE).items()}}) == GOLDEN[g.DATA_VERSION]
 
 
 def test_chunk_regenerates_alone(data: dict[str, list[tuple[object, ...]]]) -> None:
@@ -201,3 +207,17 @@ def test_world_rejects_invalid_inputs(changes: dict[str, object], match: str) ->
 def test_chunk_rows_must_be_positive(chunk_rows: int) -> None:
     with pytest.raises(g.GenerationError, match="chunk_rows must be >= 1"):
         list(g.generate_all(WORLD, chunk_rows))
+
+
+def test_sparse_world_exercises_fallback_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+    real = g._scan
+
+    def counting(*args: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        return real(*args)
+
+    monkeypatch.setattr(g, "_scan", counting)
+    rows(SPARSE)
+    assert calls  # so the golden fingerprint covers the fallback path too

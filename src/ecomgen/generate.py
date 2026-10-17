@@ -26,6 +26,9 @@ from ecomgen.config import Config
 ENTITY_ORDER = ("sellers", "categories", "customers", "products", "orders")
 MAX_LINES = 5
 MAX_ATTEMPTS = 3
+# Bump whenever generated rows change for the same inputs (the golden test is keyed by it): resume refuses
+# runs written under another data version, since regenerated chunks would no longer match committed ones.
+DATA_VERSION = 1
 PROBE_TRIES = 32
 CURRENCY = "USD"  # MVP: single-currency marketplace; per-market currencies come later
 MASTER_DATA_HISTORY = timedelta(days=730)  # master data is created in [clock_start - 730d, clock_start)
@@ -365,6 +368,12 @@ def _probe(
             e = make(n)
             if ok(e):
                 return n, e
+    return _scan(rng, count, make, ok, exclude)
+
+
+def _scan(
+    rng: random.Random, count: int, make: Callable[[int], T], ok: Callable[[T], bool], exclude: set[int]
+) -> tuple[int, T] | None:
     start = int(rng.random() * count)
     for k in range(count):
         n = (start + k) % count + 1

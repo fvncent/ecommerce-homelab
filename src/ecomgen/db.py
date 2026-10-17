@@ -99,3 +99,22 @@ def has_ledger(conn: psycopg.Connection, cfg: Config) -> bool:
     """True once init-db has created the run ledger."""
     name = sql.SQL("{}.generation_runs").format(sql.Identifier(cfg.postgres.metadata_schema)).as_string(conn)
     return conn.execute("SELECT to_regclass(%s) IS NOT NULL", (name,)).fetchone() == (True,)
+
+
+class RunLookupError(RuntimeError):
+    pass
+
+
+def resolve_run(conn: psycopg.Connection, cfg: Config, run_id: str | None) -> str:
+    """The given run if it exists, else the most recent run. Raises RunLookupError."""
+    if not has_ledger(conn, cfg):
+        raise RunLookupError("generator schema not found; run `ecomgen init-db` first")
+    if run_id is None:
+        row = conn.execute(q(cfg, "SELECT run_id FROM {meta}.generation_runs ORDER BY started_at DESC LIMIT 1")).fetchone()
+        if row is None:
+            raise RunLookupError("no runs recorded; run `ecomgen generate` first")
+    else:
+        row = conn.execute(q(cfg, "SELECT run_id FROM {meta}.generation_runs WHERE run_id = %s"), (run_id,)).fetchone()
+        if row is None:
+            raise RunLookupError(f"run {run_id} not found")
+    return str(row[0])

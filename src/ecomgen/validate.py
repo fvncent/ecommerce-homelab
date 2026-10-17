@@ -134,27 +134,11 @@ def _run_check(conn: psycopg.Connection, cfg: Config, check: Check, run_id: str)
     return Result(check, n, samples)
 
 
-def resolve_run(conn: psycopg.Connection, cfg: Config, run_id: str | None) -> str:
-    if not db.has_ledger(conn, cfg):
-        raise ValidateError("generator schema not found; run `ecomgen init-db` first")
-    if run_id is None:
-        row = conn.execute(db.q(cfg, "SELECT run_id FROM {meta}.generation_runs ORDER BY started_at DESC LIMIT 1"
-                                )).fetchone()
-        if row is None:
-            raise ValidateError("no runs recorded; run `ecomgen generate` first")
-    else:
-        row = conn.execute(db.q(cfg, "SELECT run_id FROM {meta}.generation_runs WHERE run_id = %s"),
-                           (run_id,)).fetchone()
-        if row is None:
-            raise ValidateError(f"run {run_id} not found")
-    return str(row[0])
-
-
 def validate(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -> tuple[str, list[Result]]:
     """Run every check in one read-only snapshot. Returns (run_id, results)."""
     if conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
         raise ValidateError("validate needs a connection with no open transaction (it sets its own snapshot)")
     with conn.transaction():
         conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        run_id = resolve_run(conn, cfg, run_id)
+        run_id = db.resolve_run(conn, cfg, run_id)
         return run_id, [_run_check(conn, cfg, c, run_id) for c in CHECKS]

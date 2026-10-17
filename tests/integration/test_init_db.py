@@ -24,7 +24,8 @@ def tables(conn: psycopg.Connection, schema: str) -> set[str]:
 
 def test_migrate_creates_schema_and_is_idempotent(db_url: str, cfg: config.Config) -> None:
     with psycopg.connect(db_url) as c:
-        assert db.migrate(c, cfg) == ["0001_core_schema.sql", "0002_chunk_table_rows.sql"]
+        assert db.migrate(c, cfg) == ["0001_core_schema.sql", "0002_chunk_table_rows.sql", "0003_run_resume_fields.sql",
+                                         "0004_resume_fields_shape.sql"]
         assert db.migrate(c, cfg) == []
         assert tables(c, "commerce") == {
             "sellers", "categories", "customers", "products", "orders", "order_items", "payment_attempts"
