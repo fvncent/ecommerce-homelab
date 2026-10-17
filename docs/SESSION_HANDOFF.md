@@ -3,7 +3,7 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-17
-**Branch / commit:** `chore/homelab-tooling`, stacked on `chore/mvp-run` (PR #9) — PR open (see TASKS.md).
+**Branch / commit:** `chore/homelab-tooling`, stacked on `chore/mvp-run` (PR #9) — PR #10 open.
 Stack: #5 → #6 → #7 → #8 → #9 → this, all OPEN (checked this session; never assume merged).
 User approved Ubuntu plan **option (a)**: merge the stack + tooling into `main`, tag, deploy the tag. Confirm before merging.
 Open decisions from the plan: sibling smoke/crash DBs (defaults used), where Ubuntu's existing `ecommerce_oltp` lives (for `EXISTING_PG_URL`), who executes on Ubuntu (user vs approved SSH), GitHub access (deploy key recommended).

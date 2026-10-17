@@ -2,7 +2,7 @@
 
 ## Active
 - [ ] `chore/mvp-run` (stacked on PR #8): 10k MVP run + restart recorded in `docs/BENCHMARKS.md`; awaiting approval to commit/PR
-- [ ] `chore/homelab-tooling` (stacked on PR #9): configurable compose DB/project, benchmark + snapshot scripts, runbook; awaiting review/PR
+- [ ] PR #10 `chore/homelab-tooling` (base `chore/mvp-run`): compose scoping, benchmark + snapshot scripts, runbook; reviewed, 10 findings fixed
 - [ ] Merge stack #5 → #9 + tooling into `main` and tag (approved: option a; confirm before merging)
 - [ ] Ubuntu: Step 0 inventory, then runbook `docs/HOMELAB_DEPLOYMENT.md` (needs approval to execute)
 - [ ] Phase 2 file feeds (CSV/JSONL + staging + manifests); its acceptance includes checking files on Ubuntu
