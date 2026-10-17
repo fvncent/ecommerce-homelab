@@ -1,0 +1,25 @@
+[project]
+name = "ecomgen"
+version = "0.1.0"
+description = "Synthetic e-commerce source-data generator (PostgreSQL + files)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+ecomgen = "ecomgen.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "mypy>=1.10"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.mypy]
+strict = true
+files = ["src", "tests"]
