@@ -55,6 +55,7 @@ def test_non_utc_offset_is_normalized() -> None:
         ("generator", "typo_key", 1, r"generator: unknown key\(s\): typo_key"),
         ("postgres", "application_schema", "Bad-Name", r"postgres\.application_schema"),
         ("postgres", "metadata_schema", "commerce", "distinct"),
+        ("postgres", "metadata_schema", "pg_meta", r"postgres\.metadata_schema"),
         ("postgres", "connection_url_env", "postgresql://u:p@h/db", r"postgres\.connection_url_env"),
         ("postgres", "bulk_copy", "yes", r"postgres\.bulk_copy"),
         ("filesystem", "root", "relative/dir", r"filesystem\.root"),
@@ -118,6 +119,14 @@ def test_database_url() -> None:
     with pytest.raises(config.ConfigError, match="postgresql:// URL") as exc:
         config.database_url(cfg, {"ECOMMERCE_DATABASE_URL": "mysql://u:secret@h/db"})
     assert "secret" not in str(exc.value)
+    # unencoded '@' or '/' in the password would make libpq echo part of it as a host name
+    for bad in ("postgresql://u:top@SECRETPW@127.0.0.1/db", "postgresql://u:a/SECRETPW@127.0.0.1/db"):
+        with pytest.raises(config.ConfigError, match="percent-encode") as exc:
+            config.database_url(cfg, {"ECOMMERCE_DATABASE_URL": bad})
+        assert "SECRETPW" not in str(exc.value)
+    ok = "postgresql://u:top%40pw%2Fx@127.0.0.1:5433/db?sslmode=disable"
+    assert config.database_url(cfg, {"ECOMMERCE_DATABASE_URL": ok}) == ok
+    assert config.database_url(cfg, {"ECOMMERCE_DATABASE_URL": "postgresql:///db"}) == "postgresql:///db"
 
 
 def test_cli_check_config(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

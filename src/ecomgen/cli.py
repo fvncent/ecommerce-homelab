@@ -1,7 +1,9 @@
 import argparse
 import sys
 
-from ecomgen import __version__, config
+import psycopg
+
+from ecomgen import __version__, config, db
 
 
 def check_config(path: str) -> int:
@@ -23,14 +25,38 @@ def check_config(path: str) -> int:
     return 0
 
 
+def init_db(path: str) -> int:
+    try:
+        cfg = config.load(path)
+        url = config.database_url(cfg)
+    except config.ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 2
+    try:
+        with psycopg.connect(url) as conn:
+            applied = db.migrate(conn, cfg)
+    except db.MigrationError as e:
+        print(f"migration error: {e}", file=sys.stderr)
+        return 1
+    except psycopg.Error as e:
+        print(f"database error: {type(e).__name__}: {e}".rstrip(), file=sys.stderr)
+        return 1
+    print(f"applied: {', '.join(applied)}" if applied else "database schema is up to date")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ecomgen", description="Synthetic e-commerce source-data generator")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command")
     p = sub.add_parser("check-config", help="validate a config file and required environment variables")
     p.add_argument("config", help="path to generator YAML")
+    p = sub.add_parser("init-db", help="create schemas and apply pending migrations")
+    p.add_argument("config", help="path to generator YAML")
     args = parser.parse_args(argv)
     if args.command == "check-config":
         return check_config(args.config)
+    if args.command == "init-db":
+        return init_db(args.config)
     parser.print_help()
     return 0

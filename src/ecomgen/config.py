@@ -16,7 +16,7 @@ RUN_MODES = ("historical", "incremental", "continuous")
 COUNT_KEYS = ("customers", "products", "sellers", "warehouses", "orders", "clickstream_events")
 # Parsed by later phases; accepted unvalidated for now so the example config loads.
 DEFERRED_SECTIONS = ("scenario", "ai_readiness", "safety", "logging")
-_IDENTIFIER = re.compile(r"[a-z_][a-z0-9_]{0,62}")
+_IDENTIFIER = re.compile(r"(?!pg_)[a-z_][a-z0-9_]{0,62}")  # pg_* is reserved by PostgreSQL
 
 
 class ConfigError(ValueError):
@@ -210,4 +210,8 @@ def database_url(cfg: Config, environ: Mapping[str, str] = os.environ) -> str:
         raise ConfigError(f"environment variable {name} is not set (see .env.example)")
     if not url.startswith(("postgresql://", "postgres://")):
         raise ConfigError(f"{name} must be a postgresql:// URL")
+    authority = url.split("://", 1)[1].split("?", 1)[0]
+    if "@" in authority and re.search(r"[@/]", authority.rsplit("@", 1)[0]):
+        # libpq would split there and echo the password tail in its error as a host name
+        raise ConfigError(f"{name}: percent-encode '@' and '/' in the user or password (%40, %2F)")
     return url
