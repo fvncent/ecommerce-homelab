@@ -3,11 +3,16 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-17
-**Branch / commit:** `feat/status-resume` — PR #8 open, base `feat/validate` (PR #7).
-Stack: #5 `feat/deterministic-generation` → #6 `feat/copy-loader-smoke` → #7 `feat/validate` → this. All OPEN on GitHub (checked this session; never assume merged). User: don't merge. After GitHub confirms #5 merged: `gh pr edit 6 --base main`; then #7 after #6, etc.
+**Branch / commit:** `chore/mvp-run`, stacked on `feat/status-resume` (PR #8) — uncommitted (docs only).
+Stack: #5 → #6 → #7 → #8 → this, all OPEN on GitHub (checked this session; never assume merged). User: don't merge. Retarget each to `main` only after GitHub confirms its parent merged.
 
 ## Current phase and task
-Phase 1 (CLI + schema MVP) — task 7: `ecomgen status` + `ecomgen resume`. Reviewed twice (`/code-review high`, then `medium` focused on resume compatibility); all findings fixed.
+Phase 1 exit gate (generate 10k; FK/amount checks pass; restart works) **met on macOS dev**; results in `docs/BENCHMARKS.md`. Ubuntu repeat pending. Previous task (status/resume) is PR #8.
+
+## MVP run (2026-10-17, macOS M1, Docker PG 17.11, commit `1e98a36`)
+- New DB `ecommerce_mvp` (kept for inspection; dev DB `ecommerce_oltp` untouched): 10,000 orders / 18,776 items / 12,265 payments, 6 chunks, 2.04 s wall, 1.2 s CPU, 63 MB peak RSS, 16 MB WAL, 19 MB DB; validate 12/12 in 0.4 s.
+- Restart: separate DB `ecommerce_mvp_crash`, SIGKILL before orders chunk 1 → RUNNING, 5,000 orders; status "crashed"; generate refused; resume 1 written / 5 skipped in 1.0 s; validate 12/12; all 7 tables identical (count + md5) to the clean run. Crash DB dropped afterwards.
+- Scratch scripts (not committed) in the session scratchpad: `mvp_db.py`, `mvp_clean.sh`, `crash_generate.py`, `mvp_crash.sh`.
 
 ## Completed
 - PRs #1–#4 merged; #5 (generation), #6 (COPY loader + ledger + smoke), #7 (validate) open, each reviewed + fixed.
@@ -55,4 +60,4 @@ Focused second review (`/code-review medium`, resume compatibility): DATA_VERSIO
 - No CI (no workflows); not run on Ubuntu; Phase 0 inventory pending.
 
 ## Next step
-10,000-order MVP run on the dev DB: record time, peak RSS, DB size (Phase 1 exit gate: generate 10k, FK/amount checks pass, restart works). Then CI.
+CI (GitHub Actions: pytest with a Postgres service + mypy; fail if integration tests skip). Then Phase 0 on Ubuntu (needs approval) and repeat the MVP run there; then Phase 2 file feeds.

@@ -1,6 +1,8 @@
 # Tasks
 
 ## Active
+- [ ] `chore/mvp-run` (stacked on PR #8): 10k MVP run + restart recorded in `docs/BENCHMARKS.md`; awaiting approval to commit/PR
+- [ ] Repeat the MVP run + restart on the Ubuntu server (needs approval; Phase 0 inventory first)
 - [ ] PR #8 `feat/status-resume` (base `feat/validate`): `status` + `resume`; reviewed twice, all findings fixed; awaiting merge (order: #5 → #6 → #7 → #8)
 - [ ] PR #7 `feat/validate` (base `feat/copy-loader-smoke`): `validate [--run-id]`; reviewed, 10 findings fixed; awaiting merge (order: #5 → #6 → #7)
 - [ ] After #5 merges (GitHub-confirmed): `gh pr edit 6 --base main`; after #6 merges: retarget #7 to `main`
@@ -8,7 +10,6 @@
 - [ ] PR #5 `feat/deterministic-generation`: pure generator module + tests; reviewed, 8 findings fixed; awaiting merge
 
 ## Next (Phase 1)
-- [ ] 10,000-order MVP run; record time, peak RSS, DB size
 
 ## Environment / ops
 - [ ] Phase 0: run `scripts/inspect_ubuntu_hardware.sh` on Ubuntu
