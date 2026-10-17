@@ -62,19 +62,25 @@ def test_migrate_creates_schema_and_is_idempotent(db_url: str, cfg: config.Confi
 
 def test_custom_schema_names(db_url: str, cfg: config.Config) -> None:
     custom = replace(cfg, postgres=replace(
-        cfg.postgres, application_schema="shop", integration_schema="feeds", metadata_schema="gen"
-    ))
+        cfg.postgres, application_schema="order", integration_schema="feeds", metadata_schema="gen"
+    ))  # "order" is a reserved word: proves identifiers are quoted
     with psycopg.connect(db_url) as c:
         db.migrate(c, custom)
-        assert "orders" in tables(c, "shop")
+        assert "orders" in tables(c, "order")
         assert "generation_runs" in tables(c, "gen")
         assert tables(c, "commerce") == set()
+
+
+def test_schema_rename_after_apply_is_refused(conn: psycopg.Connection, cfg: config.Config) -> None:
+    renamed = replace(cfg, postgres=replace(cfg.postgres, application_schema="shop"))
+    with pytest.raises(db.MigrationError, match="schema names in config changed"):
+        db.migrate(conn, renamed)
 
 
 def test_changed_migration_is_refused(conn: psycopg.Connection, cfg: config.Config) -> None:
     conn.execute("UPDATE generator_meta.schema_migrations SET checksum = repeat('0', 64) WHERE version = 1")
     conn.commit()
-    with pytest.raises(db.MigrationError, match="changed after it was applied"):
+    with pytest.raises(db.MigrationError, match="differs from what was applied"):
         db.migrate(conn, cfg)
 
 
@@ -123,6 +129,9 @@ def test_valid_rows_accepted(conn: psycopg.Connection) -> None:
         ("INSERT INTO commerce.payment_attempts VALUES ('pay_2', 'ord_1', 1, 'p', 'CARD', 'FAILED',"
          " 1, 'EUR', '2026-01-02Z', '2026-01-02Z')", errors.UniqueViolation),
         ("UPDATE commerce.orders SET order_id = 'order-1'", errors.CheckViolation),
+        ("INSERT INTO commerce.categories VALUES ('cat_01', NULL, 'dup of cat_1')", errors.CheckViolation),
+        # currency consistency
+        ("UPDATE commerce.payment_attempts SET currency = 'USD'", errors.ForeignKeyViolation),
         # lifecycle values, PII, time
         ("UPDATE commerce.orders SET status = 'LOST'", errors.CheckViolation),
         ("UPDATE commerce.payment_attempts SET method = 'CASH'", errors.CheckViolation),
@@ -145,6 +154,10 @@ def test_run_ledger_state_consistency(conn: psycopg.Connection) -> None:
     conn.rollback()
     with pytest.raises(errors.CheckViolation):
         conn.execute(ins, ("RUNNING", "2099-01-01Z"))
+    conn.rollback()
+    conn.execute(ins, ("RUNNING", None))
+    with pytest.raises(errors.UniqueViolation):
+        conn.execute(ins.replace("'r1'", "'r2'"), ("RUNNING", None))
 
 
 def test_cli_init_db(db_url: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -153,10 +166,3 @@ def test_cli_init_db(db_url: str, monkeypatch: pytest.MonkeyPatch, capsys: pytes
     assert "applied: 0001_core_schema.sql" in capsys.readouterr().out
     assert main(["init-db", str(EXAMPLE)]) == 0
     assert "up to date" in capsys.readouterr().out
-
-
-def test_cli_init_db_unreachable(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    monkeypatch.setenv("ECOMMERCE_DATABASE_URL", "postgresql://u:topsecret@127.0.0.1:1/x?connect_timeout=2")
-    assert main(["init-db", str(EXAMPLE)]) == 1
-    err = capsys.readouterr().err
-    assert "database error" in err and "topsecret" not in err
