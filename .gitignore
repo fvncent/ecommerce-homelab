@@ -1,0 +1,28 @@
+cat > .gitignore <<'EOF'
+# macOS
+.DS_Store
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Runtime data
+data/
+datasets/
+output/
+checkpoints/
+postgres-data/
+*.parquet
+*.jsonl
+*.log
+
+# IDE
+.vscode/
+EOF
