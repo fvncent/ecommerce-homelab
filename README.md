@@ -15,6 +15,8 @@ uv run pytest         # tests
 uv run mypy           # strict type check
 uv run ecomgen --version
 cp .env.example .env  # then set ECOMMERCE_DATABASE_URL
+set -a; . ./.env; set +a   # .env is not auto-loaded
+uv run ecomgen check-config config/generator.example.yaml
 ```
 
 ## What's in this pack
