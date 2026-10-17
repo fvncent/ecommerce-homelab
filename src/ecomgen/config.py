@@ -146,7 +146,7 @@ def parse(raw: bytes) -> Config:
 
     g = top.section("generator")
     version = g.int("version", 1, 1)
-    seed = g.int("seed", 0)
+    seed = g.int("seed", 0, 2**63 - 1)  # stored as PostgreSQL bigint
     run_mode = g.choice("run_mode", RUN_MODES)
     profile = g.choice("profile", PROFILES)
     workers = g.int("workers", 1, 2)  # 16 GB homelab budget; raise only after profiling (Phase 7)

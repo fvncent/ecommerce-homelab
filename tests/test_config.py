@@ -48,6 +48,7 @@ def test_non_utc_offset_is_normalized() -> None:
     [
         ("generator", "seed", -1, r"generator\.seed"),
         ("generator", "seed", True, r"generator\.seed"),
+        ("generator", "seed", 2**63, r"generator\.seed"),
         ("generator", "workers", 3, r"generator\.workers"),
         ("generator", "chunk_rows", 0, r"generator\.chunk_rows"),
         ("generator", "profile", "huge", r"generator\.profile"),

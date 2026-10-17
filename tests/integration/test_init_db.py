@@ -1,48 +1,20 @@
-"""Needs a real PostgreSQL: set ECOMGEN_TEST_DATABASE_URL (see README). Each test gets a throwaway database."""
+"""Needs a real PostgreSQL: set ECOMGEN_TEST_DATABASE_URL (see README). Fixtures are in conftest.py."""
 
 import os
-import uuid
-from collections.abc import Iterator
 from dataclasses import replace
-from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import psycopg
 import pytest
 from psycopg import errors, sql
 
-from ecomgen import config, db, generate
+from ecomgen import config, db
 from ecomgen.cli import main
 
 ADMIN_URL = os.environ.get("ECOMGEN_TEST_DATABASE_URL", "")
 EXAMPLE = Path(__file__).parents[2] / "config" / "generator.example.yaml"
 pytestmark = pytest.mark.skipif(not ADMIN_URL, reason="ECOMGEN_TEST_DATABASE_URL not set")
-
-
-@pytest.fixture
-def db_url() -> Iterator[str]:
-    name = f"ecomgen_test_{uuid.uuid4().hex[:12]}"
-    with psycopg.connect(ADMIN_URL, autocommit=True) as admin:
-        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
-    try:
-        yield urlsplit(ADMIN_URL)._replace(path=f"/{name}").geturl()
-    finally:
-        with psycopg.connect(ADMIN_URL, autocommit=True) as admin:
-            admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
-
-
-@pytest.fixture
-def cfg() -> config.Config:
-    return config.load(EXAMPLE)
-
-
-@pytest.fixture
-def conn(db_url: str, cfg: config.Config) -> Iterator[psycopg.Connection]:
-    with psycopg.connect(db_url) as c:
-        db.migrate(c, cfg)
-        yield c
 
 
 def tables(conn: psycopg.Connection, schema: str) -> set[str]:
@@ -52,7 +24,7 @@ def tables(conn: psycopg.Connection, schema: str) -> set[str]:
 
 def test_migrate_creates_schema_and_is_idempotent(db_url: str, cfg: config.Config) -> None:
     with psycopg.connect(db_url) as c:
-        assert db.migrate(c, cfg) == ["0001_core_schema.sql"]
+        assert db.migrate(c, cfg) == ["0001_core_schema.sql", "0002_chunk_table_rows.sql"]
         assert db.migrate(c, cfg) == []
         assert tables(c, "commerce") == {
             "sellers", "categories", "customers", "products", "orders", "order_items", "payment_attempts"
@@ -168,23 +140,3 @@ def test_cli_init_db(db_url: str, monkeypatch: pytest.MonkeyPatch, capsys: pytes
     assert main(["init-db", str(EXAMPLE)]) == 0
     assert "up to date" in capsys.readouterr().out
 
-
-def test_generated_rows_satisfy_schema(conn: psycopg.Connection) -> None:
-    # The schema's own CHECKs/FKs are the independent judge of the generator (not a loader; that's COPY, next).
-    world = generate.World(1, datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 8, tzinfo=UTC), 10, 60, 40, 150)
-    counts: dict[str, int] = {}
-    with conn.cursor() as cur:
-        for chunk in generate.generate_all(world, 50):
-            for table, rows in chunk.tables.items():
-                counts[table] = counts.get(table, 0) + len(rows)
-                if rows:
-                    fields: tuple[str, ...] = getattr(rows[0], "_fields")  # by name, never positional
-                    cur.executemany(sql.SQL("INSERT INTO commerce.{} ({}) VALUES ({})").format(
-                        sql.Identifier(table),
-                        sql.SQL(", ").join(map(sql.Identifier, fields)),
-                        sql.SQL(", ").join([sql.Placeholder()] * len(fields)),
-                    ), rows)
-    for table, n in counts.items():
-        row = conn.execute(sql.SQL("SELECT count(*) FROM commerce.{}").format(sql.Identifier(table))).fetchone()
-        assert row == (n,), table
-    assert counts["orders"] == 150 and counts["order_items"] >= 150
