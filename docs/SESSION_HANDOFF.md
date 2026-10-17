@@ -2,10 +2,11 @@
 
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
-**Updated:** 2026-10-17
-**Branch / commit:** `chore/homelab-tooling`, stacked on `chore/mvp-run` (PR #9) — PR #10 open.
-Stack: #5 → #6 → #7 → #8 → #9 → this, all OPEN (checked this session; never assume merged).
-User approved Ubuntu plan **option (a)**: merge the stack + tooling into `main`, tag, deploy the tag. Confirm before merging.
+**Updated:** 2026-10-18
+**Branch / commit:** `main` @ `05bccd0`, tagged **`v0.1.0-homelab`** (annotated) — the approved deploy target.
+PRs #5-#10 merged into `main` on 2026-10-18 (user-approved option (a)): merge commits, each pinned to its reviewed head
+(`--match-head-commit`), each retargeted to `main` after its parent merged. `main`'s tree is identical to the tested #10
+head `89d530b`; on `main`: 139 passed / 0 skipped, mypy clean. Old stacked branches remain on GitHub (not deleted).
 Open decisions from the plan: sibling smoke/crash DBs (defaults used), where Ubuntu's existing `ecommerce_oltp` lives (for `EXISTING_PG_URL`), who executes on Ubuntu (user vs approved SSH), GitHub access (deploy key recommended).
 
 ## Current phase and task
@@ -78,4 +79,4 @@ Focused second review (`/code-review medium`, resume compatibility): DATA_VERSIO
 - No CI (no workflows); not run on Ubuntu; Phase 0 inventory pending.
 
 ## Next step
-Fix review findings → PR (base `chore/mvp-run`) → user confirms merging #5…tooling into `main` + tag → user runs Step 0 inventory on Ubuntu → execute runbook only with approval → record results in `docs/BENCHMARKS.md`.
+User answers the open decisions → user runs Step 0 inventory on Ubuntu → execute runbook at `v0.1.0-homelab` only with approval (`EXPECTED_SHA=v0.1.0-homelab`) → record results in `docs/BENCHMARKS.md` via PR. Nothing has run on Ubuntu yet.
