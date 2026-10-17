@@ -42,7 +42,7 @@ Phase 1 (CLI + schema MVP) — task 6: `ecomgen validate CONFIG [--run-id RUN]`.
 ## Test results (macOS, Python 3.12.14, Docker postgres:17.11)
 - With DB: **112 passed, 0 failed, 0 skipped** (~15s: each validate test generates a smoke run). Without DB: 49 passed, 63 skipped (listed). mypy clean (15 files).
 - Each of the 12 checks has a corruption test (bypassing schema constraints) asserting exactly that check fails; clean run → all pass.
-- Dev DB (local Docker volume `pgdata`, 127.0.0.1:5433, db `ecommerce_oltp`): holds only one synthetic smoke run (`run_20261017T140517Z_531a6a`, 1,000 orders, generated this session). It predates 0002 (`counts.planned` absent, `table_rows = {}` on all 5 chunks), so `ledger_complete` + `ledger_matches_tables` fail. Both fields come from unreleased PR #6; `main` has only 0001 — unrelated to the released schema. **Not deleted/recreated: needs user approval.**
+- Dev DB `ecommerce_oltp` (local Docker, 127.0.0.1:5433): recreated with user approval (old pre-0002 smoke run dropped). `init-db` applied 0001+0002; `generate --profile smoke` → `run_20261017T143356Z_a54aba`, 5 chunks, 0.2s, 43 MB peak RSS, same row counts as before (deterministic); `validate` 12 passed, 0 failed.
 - Business rule check: docs/03 allows "optional cancellation from eligible earlier states" (incl. CREATED) → CANCELLED with no payment attempt is valid; validator rule relaxed + test. CANCELLED with a pending INITIATED attempt is still rejected (judgment call; revisit if docs say otherwise).
 - CI: no GitHub Actions workflows exist; `gh pr checks 7` → no checks.
 
