@@ -22,6 +22,17 @@ no other activity on the server at the time). Largest tables: order_items 3.9 MB
 4. `resume`: 1 chunk written, 5 skipped, 1.0 s; `validate` 12/12; a second `resume` is a no-op.
 5. All 7 source tables identical to the clean run (row count + md5 of rows).
 
+## Reference data (cross-platform determinism)
+
+`scripts/expected_mvp_digest.txt` holds row counts + md5 per table for the 10k run above (seed 20261017,
+`DATA_VERSION` 1). `scripts/homelab_benchmark.sh` requires any machine's 10k run to match it exactly.
+
+Dry run of `scripts/homelab_benchmark.sh` on macOS after its review fixes (2026-10-17, dev Docker server; the kept
+`ecommerce_homelab_test` was dropped afterwards): all expectations passed; smoke 0.69 s / 40 MB; 10k 3.57 s / 60 MB,
+PG container 218 MB peak (sampled), PG CPU 2.64 s, WAL 16.4 MB, DB 19.5 MB; identical to the reference; resume
+1.12 s. Host snapshot diff: only the new benchmark database; dev `ecommerce_oltp` size and counters identical.
+(Wall times vary run to run on the laptop: compare 2.0-3.6 s across the three macOS 10k runs.)
+
 ## Not yet measured
 
 - Ubuntu server (Ryzen 5 5600, 16 GB) — the real target; Phase 0 inventory pending.

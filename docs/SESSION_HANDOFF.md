@@ -3,16 +3,34 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-17
-**Branch / commit:** `chore/mvp-run`, stacked on `feat/status-resume` (PR #8) — uncommitted (docs only).
-Stack: #5 → #6 → #7 → #8 → this, all OPEN on GitHub (checked this session; never assume merged). User: don't merge. Retarget each to `main` only after GitHub confirms its parent merged.
+**Branch / commit:** `chore/homelab-tooling`, stacked on `chore/mvp-run` (PR #9) — PR open (see TASKS.md).
+Stack: #5 → #6 → #7 → #8 → #9 → this, all OPEN (checked this session; never assume merged).
+User approved Ubuntu plan **option (a)**: merge the stack + tooling into `main`, tag, deploy the tag. Confirm before merging.
+Open decisions from the plan: sibling smoke/crash DBs (defaults used), where Ubuntu's existing `ecommerce_oltp` lives (for `EXISTING_PG_URL`), who executes on Ubuntu (user vs approved SSH), GitHub access (deploy key recommended).
 
 ## Current phase and task
-Phase 1 exit gate (generate 10k; FK/amount checks pass; restart works) **met on macOS dev**; results in `docs/BENCHMARKS.md`. Ubuntu repeat pending. Previous task (status/resume) is PR #8.
+Ubuntu Homelab Deployment Verification — tooling PR (no Ubuntu access yet; nothing run there).
+- `compose.yaml`: `POSTGRES_DB` configurable (default `ecommerce_oltp`, Mac unchanged), healthcheck uses it; homelab sets `POSTGRES_DB=postgres` + `COMPOSE_PROJECT_NAME=ecomgen_homelab`. Verified on a throwaway project (port 5499): healthy, no extra DB, removed.
+- `scripts/homelab_bench.py`: hard-coded namespace (create `ecommerce_homelab_test[_*]`, drop only `ecommerce_homelab_test_*`), refuses existing DBs and URLs hiding their DB (`?dbname=`, `%`), URLs from env only, read-only `pg-stats` (user-table counters: catalog counters move with autoanalyze), SIGKILL crash runner (sibling targets only). 16 unit tests, no DB.
+- `scripts/homelab_benchmark.sh`: gates (approved commit via `^{commit}` + clean tree, baseline present, GNU time, container up, **admin URL reaches our container** by `system_identifier`, DBs absent, ≥10 GB free on output + Docker root) → smoke → 10k (time, per-phase container memory sampled 0.2 s, cgroup CPU, WAL, sizes, validate, 7-table digest vs macOS) → SIGKILL + resume (digest = clean) → totals. Critical steps abort; siblings dropped on exit. Exit 0 only if all pass.
+- `scripts/host_snapshot.sh`: read-only before/after (containers, volumes, networks, images, compose projects, ports, /srv manifest excluding our checkout + benchmark output, optional existing-PG user-table counters).
+- `scripts/expected_mvp_digest.txt`: macOS 10k reference (matches earlier run). `docs/HOMELAB_DEPLOYMENT.md`: runbook. mypy now covers `scripts/`.
+- Mac dry run after fixes: all expectations passed; snapshot diff = only the new benchmark DB; dev `ecommerce_oltp` identical. Abort paths tested: admin URL to another server (throwaway PG on 5499), dirty tree with EXPECTED_SHA, `?dbname=` URL — all abort before creating anything. Kept DB dropped afterwards via psql.
+- Tests: 139 passed / 0 failed / 0 skipped with DB (first run after a benchmark takes ~60 s while Docker Desktop settles; re-run 20 s); 66 passed / 73 skipped without DB; mypy clean (18 files incl. scripts/).
 
-## MVP run (2026-10-17, macOS M1, Docker PG 17.11, commit `1e98a36`)
-- New DB `ecommerce_mvp` (kept for inspection; dev DB `ecommerce_oltp` untouched): 10,000 orders / 18,776 items / 12,265 payments, 6 chunks, 2.04 s wall, 1.2 s CPU, 63 MB peak RSS, 16 MB WAL, 19 MB DB; validate 12/12 in 0.4 s.
-- Restart: separate DB `ecommerce_mvp_crash`, SIGKILL before orders chunk 1 → RUNNING, 5,000 orders; status "crashed"; generate refused; resume 1 written / 5 skipped in 1.0 s; validate 12/12; all 7 tables identical (count + md5) to the clean run. Crash DB dropped afterwards.
-- Scratch scripts (not committed) in the session scratchpad: `mvp_db.py`, `mvp_clean.sh`, `crash_generate.py`, `mvp_crash.sh`.
+## Review (`/code-review high`) — all 10 fixed
+| # | Finding | Fix |
+|---|---|---|
+| 1 | Admin URL not proven to be our container | Preflight compares cluster `system_identifier` (URL vs `docker exec psql`); tested against another server |
+| 2 | `?dbname=` / percent-encoding bypass name guards | Such URLs refused; tests |
+| 3 | Drop prefix from env / DB_BASE | Namespace hard-coded in helper; DB_BASE removed; base never droppable; tests |
+| 4 | Helper failures not counted; empty digests "identical"; missing baseline skipped; leftovers on abort | `must` aborts; 7-table digest check; baseline required; EXIT trap drops created siblings |
+| 5 | Annotated tag ≠ HEAD | `rev-parse "$EXPECTED_SHA^{commit}"` |
+| 6 | Max-CPU compared as strings | docker-stats sampler removed (noisy); CPU from cgroup `usage_usec` |
+| 7 | Missing GNU time → generate never ran | Preflight requires GNU time (BSD only on macOS) |
+| 8 | Snapshot floods with repo/venv files; no networks/images | `SNAP_EXCLUDE` (checkout + output); networks + images listed |
+| 9 | memory.peak includes pytest; sparse samples; Docker-root free space unchecked | Per-phase `memory.current` sampler (0.2 s); memory.peak labelled; Docker-root gate |
+| 10 | Passwords in argv | URLs via env only (`crash`, `pg-stats`); test |
 
 ## Completed
 - PRs #1–#4 merged; #5 (generation), #6 (COPY loader + ledger + smoke), #7 (validate) open, each reviewed + fixed.
@@ -60,4 +78,4 @@ Focused second review (`/code-review medium`, resume compatibility): DATA_VERSIO
 - No CI (no workflows); not run on Ubuntu; Phase 0 inventory pending.
 
 ## Next step
-CI (GitHub Actions: pytest with a Postgres service + mypy; fail if integration tests skip). Then Phase 0 on Ubuntu (needs approval) and repeat the MVP run there; then Phase 2 file feeds.
+Fix review findings → PR (base `chore/mvp-run`) → user confirms merging #5…tooling into `main` + tag → user runs Step 0 inventory on Ubuntu → execute runbook only with approval → record results in `docs/BENCHMARKS.md`.

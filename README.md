@@ -24,7 +24,7 @@ uv run pytest                            # integration tests skip unless ECOMGEN
 uv run mypy
 ```
 
-Measured runs (time, peak RSS, WAL, DB size, restart) are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+Measured runs (time, peak RSS, WAL, DB size, restart) are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Ubuntu homelab runbook: [docs/HOMELAB_DEPLOYMENT.md](docs/HOMELAB_DEPLOYMENT.md).
 
 Migrations live in `src/ecomgen/migrations/NNNN_*.sql` and are applied in one transaction. Never edit an applied migration; add a new one (init-db refuses checksum drift).
 
