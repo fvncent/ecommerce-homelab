@@ -1,4 +1,3 @@
-cat > .gitignore <<'EOF'
 # macOS
 .DS_Store
 
@@ -6,6 +5,9 @@ cat > .gitignore <<'EOF'
 .env
 .env.*
 !.env.example
+
+# Claude Code per-machine settings
+.claude/settings.local.json
 
 # Python
 .venv/
@@ -25,4 +27,3 @@ postgres-data/
 
 # IDE
 .vscode/
-EOF
