@@ -4,13 +4,19 @@ version = "0.1.0"
 description = "Synthetic e-commerce source-data generator (PostgreSQL + files)"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pyyaml>=6.0.3",
+]
 
 [project.scripts]
 ecomgen = "ecomgen.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "mypy>=1.10"]
+dev = [
+    "pytest>=8",
+    "mypy>=1.10",
+    "types-pyyaml>=6.0.12.20260906",
+]
 
 [build-system]
 requires = ["hatchling"]

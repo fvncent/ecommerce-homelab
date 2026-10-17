@@ -1,4 +1,4 @@
-# PROPOSED configuration contract only. The generator implementation does not exist yet.
+# Validated by `ecomgen check-config`. generator/postgres/filesystem are strict; other sections are parsed in later phases.
 # Do not put database passwords or credentials in this file.
 generator:
   version: 1
