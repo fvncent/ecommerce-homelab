@@ -1,10 +1,10 @@
 # Tasks
 
 ## Active
+- [ ] PR #6 `feat/copy-loader-smoke` (stacked on PR #5): COPY loader + chunk ledger + `generate --profile smoke`; reviewed, 10 findings fixed; awaiting merge after #5
 - [ ] PR #5 `feat/deterministic-generation`: pure generator module + tests; reviewed, 8 findings fixed; awaiting merge
 
 ## Next (Phase 1)
-- [ ] Bounded-chunk COPY with `generation_chunks` row in the same transaction; `generate --profile smoke` (1,000 orders)
 - [ ] `validate --run-id`: order header = Σ items, payments vs order total, product currency = order currency, category cycles
 - [ ] `status` and `resume` (stale `RUNNING` run handling: one-running-run index blocks new runs until resolved)
 - [ ] 10,000-order MVP run; record time, peak RSS, DB size
