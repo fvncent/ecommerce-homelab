@@ -1,11 +1,12 @@
 # Tasks
 
 ## Active
+- [ ] PR #7 `feat/validate` (base `feat/copy-loader-smoke`): `validate [--run-id]`; reviewed, 10 findings fixed; awaiting merge (order: #5 → #6 → #7)
+- [ ] After #5 merges (GitHub-confirmed): `gh pr edit 6 --base main`; after #6 merges: retarget #7 to `main`
 - [ ] PR #6 `feat/copy-loader-smoke` (stacked on PR #5): COPY loader + chunk ledger + `generate --profile smoke`; reviewed, 10 findings fixed; awaiting merge after #5
 - [ ] PR #5 `feat/deterministic-generation`: pure generator module + tests; reviewed, 8 findings fixed; awaiting merge
 
 ## Next (Phase 1)
-- [ ] `validate --run-id`: order header = Σ items, payments vs order total, product currency = order currency, category cycles
 - [ ] `status` and `resume` (stale `RUNNING` run handling: one-running-run index blocks new runs until resolved)
 - [ ] 10,000-order MVP run; record time, peak RSS, DB size
 
@@ -19,6 +20,7 @@
 - Clearer error when `metadata_schema` is renamed after apply (currently fails loudly with DuplicateTable)
 
 ## Done
+- [x] Dev DB recreated (user-approved); smoke run + validate: 12/12 pass (2026-10-17)
 - [x] PR #1 workflow rules (CLAUDE.md, handoff, .gitignore fix)
 - [x] PR #2 package skeleton
 - [x] PR #3 config validation + `check-config`

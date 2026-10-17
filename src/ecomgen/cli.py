@@ -5,7 +5,7 @@ import time
 
 import psycopg
 
-from ecomgen import __version__, config, db, generate, load
+from ecomgen import __version__, config, db, generate, load, validate
 
 
 def check_config(path: str) -> int:
@@ -72,6 +72,36 @@ def generate_cmd(path: str, profile: str | None) -> int:
     return 0
 
 
+def validate_cmd(path: str, run_id: str | None) -> int:
+    """Exit 0: all checks pass. 1: a check failed (bad data). 2: config error. 3: could not validate."""
+    try:
+        cfg = config.load(path)
+        url = config.database_url(cfg)
+    except config.ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 2
+    try:
+        with psycopg.connect(url, autocommit=True) as conn:
+            run_id, results = validate.validate(conn, cfg, run_id)
+    except validate.ValidateError as e:
+        print(f"validate error: {e}", file=sys.stderr)
+        return 3
+    except psycopg.Error as e:
+        print(f"database error: {type(e).__name__}: {e}".rstrip(), file=sys.stderr)
+        return 3
+    print(f"run {run_id}")
+    for r in results:
+        if r.ok:
+            print(f"  OK   {r.check.name}")
+        else:
+            print(f"  FAIL {r.check.name}: {r.violations} violation(s) — {r.check.description}")
+            for sample in r.samples:
+                print(f"         {sample}")
+    failed = sum(not r.ok for r in results)
+    print(f"{len(results) - failed} passed, {failed} failed")
+    return 1 if failed else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ecomgen", description="Synthetic e-commerce source-data generator")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -84,6 +114,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("config", help="path to generator YAML")
     p.add_argument("--profile", choices=sorted(load.PROFILE_COUNTS),
                    help="use built-in counts (smoke: 1,000 orders) instead of the config's counts")
+    p = sub.add_parser("validate", help="check cross-row invariants and run-ledger completeness",
+                       description="Exit codes: 0 all checks pass, 1 a check failed, 2 config error, 3 could not "
+                                   "validate (no run, run not found, database error). Data checks cover the whole "
+                                   "application schema; --run-id scopes the ledger checks.")
+    p.add_argument("config", help="path to generator YAML")
+    p.add_argument("--run-id", help="run to check (default: the most recent run)")
     args = parser.parse_args(argv)
     if args.command == "check-config":
         return check_config(args.config)
@@ -91,5 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         return init_db(args.config)
     if args.command == "generate":
         return generate_cmd(args.config, args.profile)
+    if args.command == "validate":
+        return validate_cmd(args.config, args.run_id)
     parser.print_help()
     return 0

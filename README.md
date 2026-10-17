@@ -17,6 +17,7 @@ docker compose up -d --wait              # local PostgreSQL 17 on 127.0.0.1:5433
 uv run ecomgen check-config config/generator.example.yaml
 uv run ecomgen init-db config/generator.example.yaml   # idempotent; applies pending migrations
 uv run ecomgen generate config/generator.example.yaml --profile smoke  # 1,000 orders; omit --profile for config counts
+uv run ecomgen validate config/generator.example.yaml  # invariants + ledger; --run-id RUN (default: latest)
 uv run pytest                            # integration tests skip unless ECOMGEN_TEST_DATABASE_URL is set
 uv run mypy
 ```
@@ -26,6 +27,8 @@ Migrations live in `src/ecomgen/migrations/NNNN_*.sql` and are applied in one tr
 Entity generation (`src/ecomgen/generate.py`) is pure and deterministic: entity N is built from its own RNG seeded by `sha256(seed:entity:N)`, so any chunk regenerates alone and output doesn't depend on `chunk_rows`. IDs are `prefix_N`; item/payment IDs use a fixed stride per order (`itm_{(order-1)*5+line}`, `pay_{(order-1)*3+attempt}`), so they are sparse. Order/payment states are the simulated lifecycle as of `clock_end`. Limitations: single currency (USD); uniform customer/product choice (skew is Phase 4).
 
 `generate` (`src/ecomgen/load.py`) starts a run in `generator_meta.generation_runs` and writes each chunk with `COPY` (or `INSERT` when `bulk_copy: false`) plus its `generation_chunks` marker in one transaction: a marker means the chunk is durable, no marker means none of it was committed. Chunks already marked for a run are skipped, which is what `resume` will build on. Each marker also records rows per table (`table_rows`), and run totals come from the ledger. Because IDs are deterministic, `generate` refuses a database that already holds a run or any source rows; until `resume` exists, start over by recreating the database (or its application + metadata schemas) and running `init-db`. `--profile smoke` uses built-in counts; without the flag the config's counts are used even if its `profile` is `smoke`. An error marks the run `FAILED`; a hard crash leaves it `RUNNING`. One run at a time (advisory lock). `workers` is not used yet (single process).
+
+`validate` (`src/ecomgen/validate.py`) runs, in one read-only snapshot, the cross-row rules the schema can't enforce: order header = Σ items, contiguous line/attempt numbers, product currency = order currency, every payment attempt = order total, at most one live (non-FAILED) attempt and it is the last, order status consistent with the live payment attempt (a cancelled order may have no attempts), timestamps ordered (customer/product before order, seller before product, payment after order), acyclic categories; and per run: run COMPLETED, every planned chunk in the ledger, ledger row totals = table counts. Each check reports a count and up to 5 sample IDs. Exit codes: 0 all pass, 1 a check failed, 2 config error, 3 could not validate (no run / run not found / DB error). Scope: data checks cover the whole application schema (it holds one run's data); `--run-id` scopes only the ledger checks.
 
 > **macOS + iCloud:** if the repo is under an iCloud-synced folder (e.g. `~/Documents`), iCloud hides `.venv/**/*.pth` files and the editable install breaks (`No module named 'ecomgen'`). Keep the venv outside iCloud, e.g. `export UV_PROJECT_ENVIRONMENT=~/.venvs/ecomgen`.
 
