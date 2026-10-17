@@ -1,9 +1,11 @@
-# Local/dev PostgreSQL. Bound to localhost only. Password comes from .env (never committed).
+# PostgreSQL for dev (macOS) and the homelab test deployment (Ubuntu). Bound to localhost only.
+# Password and names come from .env (never committed). POSTGRES_DB is only used when the volume is first
+# initialized; the homelab sets it to `postgres` so no extra database is created (the benchmark creates its own).
 services:
   postgres:
     image: postgres:17.11-bookworm
     environment:
-      POSTGRES_DB: ecommerce_oltp
+      POSTGRES_DB: ${POSTGRES_DB:-ecommerce_oltp}
       POSTGRES_USER: ecomgen
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     ports:
@@ -11,7 +13,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ecomgen -d ecommerce_oltp"]
+      test: ["CMD-SHELL", "pg_isready -U ecomgen -d \"$${POSTGRES_DB}\""]
       interval: 2s
       timeout: 3s
       retries: 30
