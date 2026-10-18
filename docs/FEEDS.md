@@ -109,8 +109,15 @@ ecomgen replay-files CONFIG --from 2026-01-05 --to 2026-01-08 [--run-id R] [--fe
 - **Crash-safe like publishing:** copy into `staging/<replay_id>/`, check the copy's sha256, place with the same
   never-overwriting `place_file`, then a `file_deliveries` row (migration 0006); the manifest's row and
   `replays.state = COMPLETED` commit together. Holds the run lock (never overlaps generate/resume/cleanup).
-- Refused: a run that isn't COMPLETED, published no files, published under another data root, or lacks a requested
-  feed; an empty range; bad arguments (exit 2). Exit codes: 0 done, 1 refused/failed, 2 argument/config, 3 no run.
+- **Path safety:** manifest paths must be plain relative paths under their feed's directory (no `..`, `.`, empty
+  components, backslashes or absolute paths), and no symlink is followed below the data root (originals, staging,
+  delivery targets; publishing too). The schema repeats the path rules and ties every delivery to its replay's
+  directory and to a file the run published.
+- Refused (exit 1): a run that isn't COMPLETED, published no files, published under another data root or lacks a
+  requested feed; no files in the range; unsafe paths, symlinks, missing or changed originals. Bad arguments
+  (dates, hours outside 0..87600, percent outside 0..100, no or unknown feeds) exit 2; no run / not migrated
+  exit 3. A verify of a finished replay checks only the deliveries (originals may have been cleaned up since).
+  The CLI's "newly delivered" counts files, not the delivery manifest.
 
 ## Not yet
 

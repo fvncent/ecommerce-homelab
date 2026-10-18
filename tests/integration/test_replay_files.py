@@ -78,7 +78,7 @@ def test_replay_delivers_byte_identical_copies(run: tuple[psycopg.Connection, st
     conn, _ = run
     before = originals(data_root)
     r = replay.replay(conn, small_cfg, PARAMS)
-    assert not r.verified_only and r.newly_delivered == r.deliveries + 1 and r.duplicates > 0
+    assert not r.verified_only and r.newly_delivered == r.deliveries and r.duplicates > 0
     assert originals(data_root) == before  # originals untouched
     doc = json.loads((data_root / replay.delivery_manifest_path(r.replay_id)).read_text())
     assert doc["kind"] == "replayed_delivery" and doc["run_id"] == r.run_id and len(doc["deliveries"]) == r.deliveries
@@ -132,7 +132,7 @@ def test_sigkill_mid_replay_then_rerun_finishes_it(run: tuple[psycopg.Connection
     assert conn.execute("SELECT state FROM generator_meta.replays").fetchone() == ("RUNNING",)
     assert conn.execute("SELECT count(*) FROM generator_meta.file_deliveries").fetchone() == (5,)
     r = replay.replay(conn, small_cfg, PARAMS)
-    assert not r.verified_only and r.newly_delivered == r.deliveries + 1 - 5
+    assert not r.verified_only and r.newly_delivered == r.deliveries - 5
     # exactly the deterministic plan, and the manifest is what an uninterrupted replay writes
     rid = r.replay_id
     run_id = r.run_id
@@ -201,3 +201,109 @@ def test_cli_replay(db_url: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest
     assert main(["replay-files", cfg, "--from", "2026-01-06", "--to", "2026-01-05"]) == 2
     assert main(["replay-files", cfg, "--from", "not-a-date", "--to", "2026-01-05"]) == 2
     assert main(["replay-files", cfg, "--from", "2027-01-01", "--to", "2027-01-02"]) == 1
+
+
+def _manifest(conn: psycopg.Connection, root: Path) -> tuple[str, Path]:
+    run_id = conn.execute("SELECT run_id FROM generator_meta.generation_runs").fetchone()[0]  # type: ignore[index]
+    return run_id, root / feeds.manifest_path(run_id)
+
+
+def _rewrite_manifest(conn: psycopg.Connection, path: Path, edit: Callable[[dict[str, object]], None]) -> None:
+    """Edit the run manifest and update its ledger checksum, so only the path checks can object."""
+    doc = json.loads(path.read_text())
+    edit(doc)
+    path.write_text(json.dumps(doc, indent=2) + "\n")
+    conn.execute("UPDATE generator_meta.published_files SET sha256 = %s, bytes = %s WHERE feed = 'manifest'",
+                 (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_size))
+
+
+@pytest.mark.parametrize("bad", ["clickstream/date=2026-01-05/../../../outside.jsonl", "/etc/hosts",
+                                 "source_feeds/payment_settlement/date=2026-01-05/x.csv"])
+def test_unsafe_manifest_paths_are_refused_before_any_write(run: tuple[psycopg.Connection, str],
+                                                            small_cfg: config.Config, data_root: Path,
+                                                            bad: str) -> None:
+    conn, _ = run
+    _, mpath = _manifest(conn, data_root)
+
+    def edit(doc: dict[str, object]) -> None:
+        files = doc["files"]
+        assert isinstance(files, list)
+        clicks = [f for f in files if f["feed"] == "clickstream"]
+        clicks[0]["file_path"] = bad  # a clickstream entry pointing elsewhere (the last: under another feed's dir)
+    _rewrite_manifest(conn, mpath, edit)
+    with pytest.raises(replay.ReplayError, match="unsafe relative path|unexpected path"):
+        replay.replay(conn, small_cfg, PARAMS)
+    assert not (data_root / "deliveries").exists() and not (data_root.parent / "outside.jsonl").exists()
+
+
+def test_symlinks_are_refused(run: tuple[psycopg.Connection, str], small_cfg: config.Config, data_root: Path,
+                              tmp_path: Path) -> None:
+    conn, _ = run
+    victim = data_root / sorted(p for p in originals(data_root) if "date=2026-01-06/" in p)[0]
+    copy = tmp_path / "copy"
+    copy.write_bytes(victim.read_bytes())
+    victim.unlink()
+    victim.symlink_to(copy)  # identical bytes, but not a real file under the root
+    with pytest.raises(replay.ReplayError, match="symlink"):
+        replay.replay(conn, small_cfg, PARAMS)
+    victim.unlink()
+    victim.write_bytes(copy.read_bytes())
+    # a symlink planted at a delivery target, pointing at identical bytes, is not adopted
+    rid = replay.replay_id(str(_manifest(conn, data_root)[0]), PARAMS)
+    _, origs = replay._originals(conn, small_cfg, _manifest(conn, data_root)[0], data_root, PARAMS)
+    first = replay.schedule(rid, origs, PARAMS)[0]
+    target = data_root / first.path
+    target.parent.mkdir(parents=True)
+    target.symlink_to(data_root / first.original.path)
+    with pytest.raises(feeds.FeedError, match="symlink"):
+        replay.replay(conn, small_cfg, PARAMS)
+    assert target.is_symlink()
+
+
+def test_verify_cleans_leftover_staging_and_survives_removed_originals(
+        run: tuple[psycopg.Connection, str], small_cfg: config.Config, data_root: Path) -> None:
+    conn, _ = run
+    r = replay.replay(conn, small_cfg, PARAMS)
+    leftover = data_root / "staging" / r.replay_id / "x.csv"  # e.g. a crash after COMPLETED, before cleanup
+    leftover.parent.mkdir(parents=True)
+    leftover.write_text("copy\n")
+    some_original = data_root / json.loads((data_root / replay.delivery_manifest_path(r.replay_id)).read_text())[
+        "deliveries"][0]["original_path"]
+    some_original.unlink()
+    again = replay.replay(conn, small_cfg, PARAMS)
+    assert again.verified_only and (again.deliveries, again.duplicates) == (r.deliveries, r.duplicates)
+    assert not leftover.parent.exists()
+
+
+def test_schema_enforces_delivery_invariants(run: tuple[psycopg.Connection, str], small_cfg: config.Config) -> None:
+    conn, _ = run
+    r = replay.replay(conn, small_cfg, PARAMS)
+    ok = conn.execute("SELECT replay_id, run_id, delivered_path, original_path, sha256, bytes, arrived_at,"
+                      " duplicate FROM generator_meta.file_deliveries WHERE original_path IS NOT NULL"
+                      " LIMIT 1").fetchone()
+    assert ok is not None
+    rid, run_id, path, orig, sha, size, at, _ = ok
+    bad = {
+        "outside its replay dir": (rid, run_id, "deliveries/replay_id=rpl_000000000000/x", orig, sha, size, at, False),
+        "dot-dot component": (rid, run_id, path.replace("/arrived=", "/../arrived="), orig, sha, size, at, False),
+        "original not published": (rid, run_id, path + ".x", orig + ".nope", sha, size, at, False),
+        "manifest row with arrival": (rid, run_id, f"deliveries/replay_id={rid}/delivery_manifest.json.x", None, sha,
+                                      size, at, False),
+        "duplicate manifest": (rid, run_id, f"deliveries/replay_id={rid}/other.json", None, sha, size, None, True),
+        "other run": (rid, "run_20990101T000000Z_000000", path + ".y", orig, sha, size, at, False),
+    }
+    for label, row in bad.items():  # each row breaks the rule its label names
+        with pytest.raises(psycopg.errors.IntegrityError), conn.transaction():
+            conn.execute("INSERT INTO generator_meta.file_deliveries (replay_id, run_id, delivered_path,"
+                         " original_path, sha256, bytes, arrived_at, duplicate)"
+                         " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", row)
+
+
+def test_cli_replay_argument_errors_and_unmigrated_db(db_url: str, monkeypatch: pytest.MonkeyPatch,
+                                                     capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("ECOMMERCE_DATABASE_URL", db_url)
+    cfg = str(EXAMPLE)
+    base = ["replay-files", cfg, "--from", "2026-01-05", "--to", "2026-01-06"]
+    assert main(base) == 3 and "init-db" in capsys.readouterr().err  # not migrated: like other commands
+    assert main(base + ["--delay-hours", "100000000"]) == 2
+    assert main(base + ["--duplicate-pct", "101"]) == 2

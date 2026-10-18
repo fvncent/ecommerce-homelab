@@ -20,7 +20,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -29,7 +29,9 @@ from ecomgen import config, db, feeds, load
 from ecomgen.config import Config
 
 REPLAY_VERSION = 1  # bump if the schedule or layout changes: it is part of the replay id
-_PARTITION = re.compile(r"/date=(\d{4}-\d{2}-\d{2})/")
+FEED_DIRS = {"payment_settlement": "source_feeds/payment_settlement/", "clickstream": "clickstream/"}
+MAX_HOURS = 24 * 3650  # ten years: keeps every arrival time representable
+_PARTITION = re.compile(r"^[a-z_/]+/date=(\d{4}-\d{2}-\d{2})/[^/]+$")
 
 
 class ReplayError(RuntimeError):
@@ -46,10 +48,13 @@ class Params:
     duplicate_pct: int
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "feeds", tuple(sorted(set(self.feeds))))  # one logical replay, one id
+        if not self.feeds or not set(self.feeds) <= set(FEED_DIRS):
+            raise ReplayError(f"feeds must be a non-empty subset of {', '.join(FEED_DIRS)}, got {self.feeds}")
         if self.end < self.start:
             raise ReplayError(f"--to {self.end} is before --from {self.start}")
-        if self.delay_hours < 0 or self.jitter_hours < 0:
-            raise ReplayError("delay and jitter must be >= 0 hours")
+        if not (0 <= self.delay_hours <= MAX_HOURS and 0 <= self.jitter_hours <= MAX_HOURS):
+            raise ReplayError(f"delay and jitter must be 0..{MAX_HOURS} hours")
         if not 0 <= self.duplicate_pct <= 100:
             raise ReplayError("duplicate percentage must be in 0..100")
 
@@ -80,9 +85,9 @@ class Delivery:
 class ReplayResult:
     replay_id: str
     run_id: str
-    deliveries: int
+    deliveries: int  # files delivered (the delivery manifest not counted)
     duplicates: int
-    newly_delivered: int
+    newly_delivered: int  # of deliveries, placed by this call
     verified_only: bool
 
 
@@ -114,9 +119,10 @@ def schedule(rid: str, originals: list[Original], params: Params) -> list[Delive
 
 
 def _delivered(rid: str, at: datetime, path: str, n: int) -> str:
-    if n:
-        stem, dot, ext = path.rpartition(".")
-        path = f"{stem}.dup{n}{dot}{ext}"
+    if n:  # name.ext -> name.dupN.ext (only the file name; directories untouched)
+        p = PurePosixPath(path)
+        stem, dot, ext = p.name.rpartition(".")
+        path = str(p.with_name(f"{stem}.dup{n}.{ext}" if dot and stem else f"{p.name}.dup{n}"))
     return f"deliveries/replay_id={rid}/arrived={at.date().isoformat()}/{path}"
 
 
@@ -150,13 +156,21 @@ def _originals(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path,
     doc = json.loads(mpath.read_text(encoding="utf-8"))
     out, problems = [], []
     for f in doc["files"]:
-        m = _PARTITION.search("/" + f["file_path"])
-        if not m or f["feed"] not in params.feeds:
+        if f["feed"] not in params.feeds:
             continue
-        day = date.fromisoformat(m.group(1))
+        rel = f["file_path"]
+        try:
+            m = _PARTITION.match(feeds.safe_rel(rel))
+            if not m or not rel.startswith(FEED_DIRS[f["feed"]]):
+                raise feeds.FeedError(f"unexpected path for a {f['feed']} file: {rel!r}")
+            day = date.fromisoformat(m.group(1))
+            path = root / rel
+            feeds.no_links(root, path)
+        except (feeds.FeedError, ValueError) as e:
+            problems.append(f"{rel!r}: {e}")
+            continue
         if not params.start <= day <= params.end:
             continue
-        path = root / f["file_path"]
         if not path.is_file():
             problems.append(f"{f['file_path']}: missing")
         elif path.stat().st_size != f["bytes"] or feeds.sha256_of(path) != f["sha256"]:
@@ -164,8 +178,8 @@ def _originals(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path,
         else:
             out.append(Original(f["file_path"], f["feed"], day, f["sha256"], f["bytes"]))
     if problems:
-        raise ReplayError(f"{len(problems)} original file(s) in range can't be replayed; nothing was delivered: "
-                          + "; ".join(sorted(problems)[:5]))
+        raise ReplayError(f"{len(problems)} original file(s) can't be replayed; nothing was delivered by this "
+                          "attempt: " + "; ".join(sorted(problems)[:5]))
     if not out:
         raise ReplayError(f"no {'/'.join(params.feeds)} files with partitions {params.start}..{params.end}")
     return row[0], sorted(out, key=lambda o: o.path)
@@ -176,8 +190,10 @@ def replay(conn: psycopg.Connection, cfg: Config, params: Params, run_id: str | 
     never overlaps a generate/resume, another replay or a cleanup."""
     if not conn.autocommit:
         raise ReplayError("replay needs an autocommit connection so each delivery commits on its own")
-    if conn.execute("SELECT to_regclass(%s)", (f"{cfg.postgres.metadata_schema}.replays",)).fetchone() == (None,):
-        raise ReplayError("replay tables not found; run `ecomgen init-db` first")
+    if not db.has_ledger(conn, cfg):
+        raise db.RunLookupError("generator schema not found; run `ecomgen init-db` first")
+    if not db.has_table(conn, cfg, "replays"):
+        raise ReplayError("replay tables not found; run `ecomgen init-db` to apply the pending migrations")
     with load._run_lock(conn):
         run_id = db.resolve_run(conn, cfg, run_id)
         row = conn.execute(db.q(cfg, "SELECT state, resume_fields FROM {meta}.generation_runs WHERE run_id = %s"),
@@ -193,26 +209,30 @@ def replay(conn: psycopg.Connection, cfg: Config, params: Params, run_id: str | 
         unknown = set(params.feeds) - set((recorded or {}).get("feeds", {}).get("enabled") or [])
         if unknown:
             raise ReplayError(f"run {run_id} did not publish {', '.join(sorted(unknown))}")
-        source_sha, originals = _originals(conn, cfg, run_id, root, params)
         rid = replay_id(run_id, params)
+        staging = root / "staging" / rid
+        feeds.no_links(root, staging)
+        if staging.exists():
+            shutil.rmtree(staging)  # our own unrecorded copies from an interrupted (or crashed-after-commit) attempt
+        done: dict[str, str] = {r[0]: r[1] for r in conn.execute(db.q(
+            cfg, "SELECT delivered_path, sha256 FROM {meta}.file_deliveries WHERE replay_id = %s"), (rid,))}
+        mrel = delivery_manifest_path(rid)
+        if mrel in done:  # finished earlier: verify the deliveries only (originals may since have been cleaned up)
+            for path, sha in sorted(done.items()):
+                feeds.place_file(root, path, root / path, sha, sha)
+            n, dups = conn.execute(db.q(cfg, "SELECT count(*), count(*) FILTER (WHERE duplicate)"
+                                             " FROM {meta}.file_deliveries WHERE replay_id = %s"
+                                             " AND original_path IS NOT NULL"), (rid,)).fetchone()  # type: ignore[misc]
+            return ReplayResult(rid, run_id, int(n), int(dups), 0, True)
+        source_sha, originals = _originals(conn, cfg, run_id, root, params)
         conn.execute(db.q(cfg, "INSERT INTO {meta}.replays (replay_id, run_id, params, state)"
                                " VALUES (%s, %s, %s, 'RUNNING') ON CONFLICT (replay_id) DO NOTHING"),
                      (rid, run_id, Jsonb(params.as_json())))
         plan = schedule(rid, originals, params)
-        done: dict[str, str] = {r[0]: r[1] for r in conn.execute(db.q(
-            cfg, "SELECT delivered_path, sha256 FROM {meta}.file_deliveries WHERE replay_id = %s"), (rid,))}
-        mrel = delivery_manifest_path(rid)
-        unexpected = set(done) - {d.path for d in plan} - {mrel}
+        unexpected = set(done) - {d.path for d in plan}
         if unexpected:
             raise ReplayError(f"replay {rid} recorded deliveries its plan doesn't contain: {sorted(unexpected)[:3]}")
         dups = sum(d.duplicate for d in plan)
-        if mrel in done:  # finished earlier: verify only
-            for path, sha in sorted(done.items()):
-                feeds.place_file(root, path, root / path, sha, sha)
-            return ReplayResult(rid, run_id, len(plan), dups, 0, True)
-        staging = root / "staging" / rid
-        if staging.exists():
-            shutil.rmtree(staging)  # our own unrecorded copies from an interrupted attempt
         newly = 0
         for d in plan:
             staged = staging / d.path
@@ -223,20 +243,21 @@ def replay(conn: psycopg.Connection, cfg: Config, params: Params, run_id: str | 
                     raise ReplayError(f"{d.original.path} changed while it was being copied")
             newly += feeds.place_file(root, d.path, staged, d.original.sha256, done.get(d.path))
             if d.path not in done:
-                conn.execute(db.q(cfg, "INSERT INTO {meta}.file_deliveries (replay_id, delivered_path, original_path,"
-                                       " sha256, bytes, arrived_at, duplicate) VALUES (%s, %s, %s, %s, %s, %s, %s)"),
-                             (rid, d.path, d.original.path, d.original.sha256, d.original.bytes, d.arrived_at,
-                              d.duplicate))
+                conn.execute(db.q(cfg, "INSERT INTO {meta}.file_deliveries (replay_id, run_id, delivered_path,"
+                                       " original_path, sha256, bytes, arrived_at, duplicate)"
+                                       " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"),
+                             (rid, run_id, d.path, d.original.path, d.original.sha256, d.original.bytes,
+                              d.arrived_at, d.duplicate))
         staged = staging / mrel
         staged.parent.mkdir(parents=True, exist_ok=True)
         staged.write_text(json.dumps(delivery_manifest(rid, run_id, source_sha, params, plan), indent=2) + "\n",
                           encoding="utf-8")
         sha = feeds.sha256_of(staged)
         size = staged.stat().st_size
-        newly += feeds.place_file(root, mrel, staged, sha, None)
+        feeds.place_file(root, mrel, staged, sha, None)
         with conn.transaction():
-            conn.execute(db.q(cfg, "INSERT INTO {meta}.file_deliveries (replay_id, delivered_path, sha256, bytes)"
-                                   " VALUES (%s, %s, %s, %s)"), (rid, mrel, sha, size))
+            conn.execute(db.q(cfg, "INSERT INTO {meta}.file_deliveries (replay_id, run_id, delivered_path, sha256,"
+                                   " bytes) VALUES (%s, %s, %s, %s, %s)"), (rid, run_id, mrel, sha, size))
             conn.execute(db.q(cfg, "UPDATE {meta}.replays SET state = 'COMPLETED', finished_at = now()"
                                    " WHERE replay_id = %s"), (rid,))
         shutil.rmtree(staging)

@@ -17,9 +17,23 @@ Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleani
   `feeds.place_file` → `file_deliveries` row; manifest row + COMPLETED in one transaction; verify-only once done).
 - `feeds.place_file` extracted from `_place` (publish uses it; messages now "recorded file", "while placing it").
 - Migration 0006: `replays`, `file_deliveries`. CLI `replay-files` (exit 0/1/2/3).
-- Tests: 9 unit (`tests/test_replay.py`), 9 integration (`tests/integration/test_replay_files.py`, incl. real
-  SIGKILL before the 6th placement → rerun → exact plan + reproducible manifest). Suite: 202 passed with DB,
-  98 passed / 104 skipped without; mypy clean (26 files).
+- Tests: 12 unit (`tests/test_replay.py`), 16 integration (`tests/integration/test_replay_files.py`, incl. real
+  SIGKILL before the 6th placement → rerun → exact plan + reproducible manifest). Suite: 212 passed with DB,
+  101 passed / 111 skipped without; mypy clean (26 files).
+
+## PR A review (`/code-review high`) — all 10 fixed
+| # | Finding | Fix |
+|---|---|---|
+| 1 | Staging left forever after a crash post-COMPLETED | Staging cleared before every path, verify-only included; test |
+| 2 | Manifest paths unchecked (`..`, absolute) | `feeds.safe_rel` + feed-directory/partition pattern; refused before any write; tests |
+| 3 | Symlinks followed (originals, targets, staging) | `feeds.no_links`; `place_file` refuses links (publish too); tests |
+| 4 | Huge hours → OverflowError traceback | 0..87,600 h bounds in Params (exit 2); test |
+| 5 | feeds not normalized/validated | Sorted + deduplicated; non-empty known subset; tests |
+| 6 | Verify re-read originals, failed after cleanup | Verify-only before reading originals; test with a removed original |
+| 7 | Unquoted to_regclass; unmigrated DB exit 1 | `db.has_table` (quoted); no ledger → RunLookupError (exit 3); test |
+| 8 | `.dupN` inserted into directories | Only the file name changes; tests |
+| 9 | Docs exit code for empty range; manifest counted as delivery | Docs fixed (exit 1); newly_delivered counts files only |
+| 10 | Invariants only in Python | 0006: component-wise path CHECKs, replay-dir prefix, manifest-row shape, FK to published_files and to (replay, run); test. Residual: "COMPLETED has a manifest row" stays in code (one transaction) |
 
 ## Ubuntu facts (from the user, 2026-10-18)
 - Ubuntu Server, Ryzen 5 5600, ~14 GiB usable RAM, user `serveradmin`. Root fs ~73 GB free.
@@ -79,4 +93,4 @@ Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleani
 - Phase 2 file feeds not implemented: `data/` stays empty; `filesystem.root` default still `/srv/ecommerce-data`.
 
 ## Next step
-Independent review of PR A → fix → push + PR (ask) → merge → PR B cleanup-files → PR C benchmark + `v0.2.0-homelab`.
+Push + PR of PR A (ask) → CI → merge → PR B cleanup-files → PR C benchmark + `v0.2.0-homelab`.

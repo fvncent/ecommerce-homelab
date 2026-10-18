@@ -299,10 +299,32 @@ def _ledger(conn: psycopg.Connection, cfg: Config, run_id: str) -> dict[str, tup
     return {r[0]: (r[1], int(r[2]), r[3]) for r in rows}
 
 
+def safe_rel(rel: object) -> str:
+    """rel if it is a plain relative POSIX path (no '', '.', '..' components, no backslash, not absolute)."""
+    if not isinstance(rel, str) or not rel or rel.startswith("/") or "\\" in rel or "\0" in rel or any(
+            part in ("", ".", "..") for part in rel.split("/")):
+        raise FeedError(f"unsafe relative path {rel!r}")
+    return rel
+
+
+def no_links(root: Path, path: Path) -> None:
+    """Refuse if path, or any existing directory between root and it, is a symlink (root itself may be one)."""
+    rel = path.relative_to(root)
+    p = root
+    for part in rel.parts:
+        p = p / part
+        if p.is_symlink():
+            raise FeedError(f"{p} is a symlink; refusing to follow it under the data root")
+        if not p.exists():
+            return
+
+
 def place_file(root: Path, rel: str, staged: Path, sha: str, recorded_sha: str | None) -> bool:
     """Put staged (whose sha256 is sha) at root/rel without ever overwriting; True if newly placed. recorded_sha:
-    what a ledger already records for rel (then only verify), or None. Raises FeedError when a human must look."""
-    final = root / rel
+    what a ledger already records for rel (then only verify), or None. Raises FeedError when a human must look.
+    Never follows a symlink below root, at the target or in staging."""
+    final = root / safe_rel(rel)
+    no_links(root, final)
     if recorded_sha is not None:
         if not final.is_file() or sha256_of(final) != recorded_sha:
             raise FeedError(f"recorded file {final} is missing or changed since it was recorded; reconcile by hand")
@@ -316,6 +338,7 @@ def place_file(root: Path, rel: str, staged: Path, sha: str, recorded_sha: str |
         _durable(final)
         _sync_up(root, final.parent)
         return False
+    no_links(root, staged)
     _durable(staged)
     _mkdirs(root, final.parent)
     try:

@@ -62,3 +62,27 @@ def test_no_jitter_means_exact_delay() -> None:
 def test_invalid_params(bad: dict[str, object]) -> None:
     with pytest.raises(replay.ReplayError):
         replace(P, **bad)  # type: ignore[arg-type]
+
+
+def test_duplicate_name_changes_only_the_file_name() -> None:
+    at = datetime(2026, 1, 5, tzinfo=UTC)
+    assert replay._delivered("rpl_x", at, "a.b/c/file", 1) == ("deliveries/replay_id=rpl_x/arrived=2026-01-05/"
+                                                              "a.b/c/file.dup1")
+    assert replay._delivered("rpl_x", at, "a.b/c/f.csv", 2).endswith("/a.b/c/f.dup2.csv")
+    assert replay._delivered("rpl_x", at, "a/.hidden", 1).endswith("/a/.hidden.dup1")
+
+
+def test_feeds_are_normalized_and_validated() -> None:
+    unsorted = replace(P, feeds=("payment_settlement", "clickstream", "clickstream"))
+    assert unsorted.feeds == ("clickstream", "payment_settlement")
+    assert replay.replay_id(RUN, unsorted) == replay.replay_id(RUN, P)
+    for bad in ((), ("orders",), ("clickstream", "suppliers")):
+        with pytest.raises(replay.ReplayError, match="non-empty subset"):
+            replace(P, feeds=bad)
+
+
+def test_hours_are_bounded_so_arrivals_stay_representable() -> None:
+    edge = replace(P, delay_hours=replay.MAX_HOURS, jitter_hours=replay.MAX_HOURS)
+    assert replay.schedule(replay.replay_id(RUN, edge), ORIGINALS, edge)
+    with pytest.raises(replay.ReplayError, match="0..87600 hours"):
+        replace(P, delay_hours=replay.MAX_HOURS + 1)

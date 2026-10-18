@@ -1,7 +1,7 @@
 # Tasks
 
 ## Active
-- [ ] PR A `feat/replay-files`: `replay-files --from --to` (deterministic delays/duplicates, byte-identical copies, delivery manifest, crash-safe, migration 0006); awaiting review
+- [ ] PR A `feat/replay-files`: `replay-files --from --to` (deterministic delays/duplicates, byte-identical copies, delivery manifest, crash-safe, migration 0006); reviewed, 10 findings fixed; awaiting push approval
 - [ ] PR B `cleanup-files`: dry-run default, confirm token, ledger-known files only, root containment + no symlinks, manifests/audit kept, `deleted_at` (migration 0007), validate reports deleted files
 - [ ] PR C: benchmark with files (per-feed throughput, sha256 MB/s, feed digest vs macOS reference, publish-crash + replay-crash), then tag `v0.2.0-homelab`; Ubuntu: user recreates the 3 benchmark DBs by hand (approved 2026-10-18), `ECOMGEN_DATA_ROOT=/srv/homelab/ecommerce/data`; keep `v0.1.1-homelab` until it passes
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)

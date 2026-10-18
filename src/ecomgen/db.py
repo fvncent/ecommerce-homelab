@@ -95,10 +95,15 @@ def q(cfg: Config, query: str) -> sql.Composed:
                                  meta=sql.Identifier(cfg.postgres.metadata_schema))
 
 
+def has_table(conn: psycopg.Connection, cfg: Config, table: str) -> bool:
+    """True if the metadata schema has this table (both names quoted, so any configured schema name works)."""
+    name = sql.SQL("{}.{}").format(sql.Identifier(cfg.postgres.metadata_schema), sql.Identifier(table)).as_string(conn)
+    return conn.execute("SELECT to_regclass(%s) IS NOT NULL", (name,)).fetchone() == (True,)
+
+
 def has_ledger(conn: psycopg.Connection, cfg: Config) -> bool:
     """True once init-db has created the run ledger."""
-    name = sql.SQL("{}.generation_runs").format(sql.Identifier(cfg.postgres.metadata_schema)).as_string(conn)
-    return conn.execute("SELECT to_regclass(%s) IS NOT NULL", (name,)).fetchone() == (True,)
+    return has_table(conn, cfg, "generation_runs")
 
 
 class RunLookupError(RuntimeError):
