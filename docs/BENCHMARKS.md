@@ -7,10 +7,37 @@ Add a row per run; note the environment. The target is the Ubuntu server; macOS 
 
 | Date | Env | Commit | Profile | Orders / items / payments | Chunks | Wall | CPU user+sys | Peak RSS | WAL | DB size | validate |
 |---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-10-18 | **Ubuntu homelab** (Ryzen 5 5600, ~14 GiB; Ubuntu 26.04, kernel 7.0.0-38; host PG 18.6; NVMe ext4) | `8c581ad` | mvp (config counts, `chunk_rows: 5000`, 1 worker) | 10,000 / 18,776 / 12,265 | 6 | 1.78 s | 1.04 + 0.02 s | 66 MB | 16.5 MB | 19.7 MB | 12/12, 0.21 s |
 | 2026-10-17 | macOS dev (M1, 8 GB; Docker PG 17.11, VM 8 CPU / 4 GB) | `1e98a36` | mvp (config counts, `chunk_rows: 5000`, 1 worker) | 10,000 / 18,776 / 12,265 | 6 | 2.04 s (load 1.9 s) | 1.17 + 0.03 s | 63 MB | 16 MB | 19 MB | 12/12, 0.40 s |
 
 Measured with `/usr/bin/time -l` (macOS) around `ecomgen generate`; WAL = `pg_wal_lsn_diff` across the run (server-wide;
 no other activity on the server at the time). Largest tables: order_items 3.9 MB, orders 3.2 MB, payment_attempts 2.7 MB.
+
+## Ubuntu homelab verification (2026-10-18)
+
+Deployment gate, operator-run per `docs/HOMELAB_DEPLOYMENT.md` at `main` `8c581ad` (= reviewed PR #12 tree), clone
+`/srv/homelab/projects/ecommerce-homelab`, output `/srv/homelab/ecommerce/benchmarks/20261018T010412Z`. Host
+PostgreSQL 18.6 (`18/main`), role `ecomgen_app` (no privileges, no memberships) owning only
+`ecommerce_homelab_{smoke,test,crash}`, created by hand; nothing dropped. `scripts/homelab_benchmark.sh`: **all
+expectations passed**.
+
+| Phase | Result |
+|---|---|
+| Preflight | NVMe `/srv/homelab` UUID `d263e3fd-041a-4070-a72a-28e01126aa6f` read-write; approved commit, clean tree; role/databases checked; backend PID in the `postgresql@18-main` cgroup |
+| Smoke 1k | init-db, generate, validate pass; 0.30 s, 43 MB RSS; server 134 MB (2 samples only: too short to sample well) |
+| MVP 10k | 1.78 s wall, **5,618 orders/s, 27,068 rows/s** (48,181 rows); generator 66 MB RSS; server unit 172 MB peak (incl. page cache), CPU 0.70 s; WAL 16.5 MB (server-wide, cluster otherwise idle); DB 19.7 MB; validate 12/12 in 0.21 s; **data identical to the macOS reference** (7-table digest) |
+| Crash + resume | SIGKILL before orders chunk 1 → exit 137; no client sessions or prepared transactions left; status reports the crash; validate fails and generate refuses as designed; resume 0.87 s (54 MB RSS, server 208 MB, CPU 0.33 s); validate 12/12; second resume no-op; **resumed data identical to the clean run** (no duplicates, nothing missing) |
+| Totals | smoke 9.4 MB, test 19.7 MB, crash 19.7 MB; `/srv/homelab` 906 GB free before and after |
+
+Untouched (host snapshot as root, read-only, before Stage 2 vs after the benchmark, ~2,850 lines): the only
+differences are role `ecomgen_app` (`super=false createdb=false`), the three databases' ACLs (owner and sole
+`CONNECT` = `ecomgen_app`) and their sizes / write counters. Identical: Docker containers (IDs, start times, restart
+counts: VLSIM engine + TMS, PostgreSQL 17 on 55432, Redpanda), volumes, networks, images, listening ports, files under
+`/srv/homelab` outside the project path and clone, other roles and memberships, all non-default server settings,
+the `postgres` database, the `postgresql@18-main` unit's start time.
+
+Compared with macOS (10k): same data and WAL; Ubuntu 11% faster wall (1.78 vs 2.00 s) with less server CPU
+(0.70 vs 1.04 s). Generated CSV/JSONL files: not in scope yet (Phase 2 file feeds, `TASKS.md`); `data/` is empty.
 
 ## Restart (Phase 1 gate: "restart works")
 
@@ -48,5 +75,4 @@ read-only): only `ecomgen_app`, its three databases' ACLs and their sizes/counte
 
 ## Not yet measured
 
-- Ubuntu server (Ryzen 5 5600, 16 GB, host PostgreSQL 18) — the real target.
 - Larger profiles (practice 100k, advanced 1M) and `workers: 2`.

@@ -3,10 +3,11 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-18
-**Branch:** `fix/host-postgres-tooling`, stacked on `docs/post-merge-handoff` (PR #11, docs only). Both open.
-**Deploy target:** **`v0.1.1-homelab`** — not created yet: tag `main` after #11 and this PR merge (each needs approval).
-`v0.1.0-homelab` (`05bccd0`, PRs #5-#10) is **not deployable** on the homelab: its scripts assume a Docker database
-container and create/drop databases.
+**Branch:** `docs/ubuntu-benchmark` (records the Ubuntu run; not pushed yet). `main` = `8c581ad` (PRs #11, #12 merged).
+**Deployed:** `main` `8c581ad` on Ubuntu, clone `/srv/homelab/projects/ecommerce-homelab` (user's clone, at that
+commit). **Ubuntu verification passed** (2026-10-18): smoke, 10k (1.78 s, 5,618 orders/s, data identical to macOS),
+crash/resume; snapshot diff = only our role + 3 databases. Details: `docs/BENCHMARKS.md`.
+Tag `v0.1.1-homelab` not created (offered; `v0.1.0-homelab` is the old, container-based tooling).
 
 ## Ubuntu facts (from the user, 2026-10-18)
 - Ubuntu Server, Ryzen 5 5600, ~14 GiB usable RAM, user `serveradmin`. Root fs ~73 GB free.
@@ -15,10 +16,10 @@ container and create/drop databases.
 - Host PostgreSQL 18 (`18/main`, 127.0.0.1:5432; only `postgres` DB). Approved databases: `ecommerce_homelab_smoke`,
   `_test`, `_crash`; dedicated least-privilege role. Never drop automatically; never change server settings.
 - Do not touch: VLSIM engine + TMS, PostgreSQL 17 container (host port 55432), Redpanda. No new PG container.
-- Repo is now **public** (history scanned: no secrets ever committed). User already cloned it somewhere on Ubuntu
-  (path not yet reported).
-- User runs every Ubuntu command by hand: one small step at a time (what it does, exact commands, read-only or not,
-  expected result), wait for their output. Claude never SSHes.
+- Repo is now **public** (history scanned: no secrets ever committed). Clone: `/srv/homelab/projects/ecommerce-homelab`
+  (`.env` mode 600 there, `.venv` via uv). Role `ecomgen_app` + 3 databases exist and hold the benchmark data.
+- User runs every Ubuntu command by hand; they prefer one complete ordered list of steps (each marked read-only or
+  changes, with expected output) over one-step-per-message. Claude never SSHes.
 
 ## This task: host-PostgreSQL tooling (`fix/host-postgres-tooling`)
 - `homelab_bench.py`: fixed set of three databases; no create/drop; `preflight` refuses a role with any rol*
@@ -66,5 +67,7 @@ container and create/drop databases.
 - Phase 2 file feeds not implemented: `data/` stays empty; `filesystem.root` default still `/srv/ecommerce-data`.
 
 ## Next step
-Push + PR (base `docs/post-merge-handoff`) → user approves merging #11 then this → tag `v0.1.1-homelab` → Ubuntu
-Stage 1 (user reports clone path + mount/tool output) → Stage 2 → benchmark → results into `docs/BENCHMARKS.md`.
+User approves push + PR of `docs/ubuntu-benchmark` (and optionally the `v0.1.1-homelab` tag on `8c581ad`). Then the
+user picks the next roadmap item: Phase 2 file feeds (CSV/JSONL + manifests; homelab root
+`/srv/homelab/ecommerce/data`) or CI (GitHub Actions: pytest + Postgres service + mypy). Re-running the Ubuntu
+benchmark needs the three databases recreated by hand (approved cleanup, runbook).
