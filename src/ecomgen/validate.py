@@ -6,14 +6,18 @@ every row there (the state as of the latest step), run_completed and ledger_comp
 ledger_matches_tables sums the ledger of every run in the schema set (the chain's inserts add up to the tables).
 
 File checks (runs that publish feeds): every recorded file is intact and listed in the manifest, and each
-published feed agrees with PostgreSQL both ways (the Phase 2 gate). Feed rows are streamed into temporary tables
+published feed agrees with PostgreSQL both ways (the Phase 2 gate). For a chain of clock steps the files of every
+step are checked together against the current tables (each step holds only its window's events), so a record that
+two steps both published, or that none did, is a violation. Feed rows are streamed into temporary tables
 inside the same snapshot as the database checks, checked with the same id-per-violation queries, then dropped.
 """
 
 import csv
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import psycopg
 from psycopg import sql
@@ -168,7 +172,7 @@ CLICKSTREAM_CHECKS = (
                    GROUP BY 1) e USING (order_id)
         WHERE coalesce(e.n, 0) <> 1"""),
     Check("events_unique_and_complete", "event IDs are unique, every event has an ID and type (order_placed: an "
-          "order); browsing events = the run's clickstream_events", """
+          "order); browsing events = the run's clickstream_events (a chain: those up to its latest step)", """
         SELECT event_id AS id FROM pg_temp.feed_events WHERE event_id IS NOT NULL GROUP BY 1 HAVING count(*) > 1
         UNION ALL SELECT 'malformed event ' || coalesce(event_id, '(no event_id)') FROM pg_temp.feed_events
         WHERE event_id IS NULL OR event_type IS NULL OR (event_type = 'order_placed' AND order_id IS NULL)
@@ -207,13 +211,15 @@ def validate(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             run_id = db.resolve_run(conn, cfg, run_id)
             results = [_run_check(conn, cfg, c, run_id) for c in CHECKS]
-            row = conn.execute(db.q(cfg, "SELECT resume_fields FROM {meta}.generation_runs WHERE run_id = %s"),
-                               (run_id,)).fetchone()
-            recorded = row[0] if row and isinstance(row[0], dict) else {}
+            runs, as_of = _file_runs(conn, cfg, run_id)
+            recorded = runs[0][1] if runs else {}
             published = recorded.get("feeds", {}).get("enabled") or []
             if published:  # runs from before file feeds (or with feeds disabled) publish nothing to check
-                results += _file_results(conn, cfg, run_id, Path(recorded["data_root"]), published,
-                                         int(recorded["world"]["clickstream_events"]))
+                world = load.recorded_world(recorded)
+                browse = (world.clickstream_events if as_of is None else
+                          feeds.browsing_events_by(world, as_of, int(recorded["chunk_rows"])))
+                results += _file_results(conn, cfg, [r for r, _ in runs], Path(recorded["data_root"]), published,
+                                         browse)
             return run_id, results
     finally:
         if conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE:
@@ -222,19 +228,49 @@ def validate(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -
                     conn.execute(f"DROP TABLE IF EXISTS pg_temp.{name}")
 
 
+def _file_runs(conn: psycopg.Connection, cfg: Config,
+               run_id: str) -> tuple[list[tuple[str, dict[str, Any]]], datetime | None]:
+    """The runs whose files are checked, with their resume_fields, and the latest clock time (None: a generate
+    run). A generate run alone; for a clock step, every step in the schema set (the chain shares root and feeds)."""
+    clock = "as_of" if db.has_column(conn, cfg, "generation_runs", "as_of") else "NULL::timestamptz"
+    row = conn.execute(db.q(cfg, f"SELECT resume_fields, {clock} FROM {{meta}}.generation_runs WHERE run_id = %s"),
+                       (run_id,)).fetchone()
+    if row is None or not isinstance(row[0], dict):
+        return [], None
+    if row[1] is None:
+        return [(run_id, row[0])], None
+    steps = conn.execute(db.q(cfg, "SELECT run_id, resume_fields, as_of FROM {meta}.generation_runs"
+                                   " ORDER BY as_of")).fetchall()
+    return [(r[0], r[1]) for r in steps], steps[-1][2]
+
+
 def _sample(bad: list[str]) -> list[str]:
     return sorted(bad, key=lambda s: (len(s), s))[:SAMPLE]
 
 
-def _file_results(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path, published: list[str],
+def _file_results(conn: psycopg.Connection, cfg: Config, run_ids: list[str], root: Path, published: list[str],
                   browse: int) -> list[Result]:
-    """Check the run's files against the ledger and manifest, load the intact ones into the temp tables, and
+    """Check the runs' files against their ledgers and manifests, load the intact ones into the temp tables, and
     check the published feeds against PostgreSQL. Memory: one record at a time."""
+    broken: list[str] = []
+    manifest_bad: list[str] = []
+    for run_id in run_ids:
+        _load_run_files(conn, cfg, run_id, root, broken, manifest_bad)
+    results = [Result(FILES_INTACT, len(broken), _sample(broken)),
+               Result(MANIFEST_MATCHES, len(manifest_bad), _sample(manifest_bad))]
+    checks = (SETTLEMENT_CHECKS if "payment_settlement" in published else ()) + (
+        CLICKSTREAM_CHECKS if "clickstream" in published else ())
+    return results + [_run_check(conn, cfg, c, run_ids[-1], {"browse": browse}) for c in checks]
+
+
+def _load_run_files(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path, broken: list[str],
+                    manifest_bad: list[str]) -> None:
+    """One run's file and manifest checks (appended to broken / manifest_bad); intact feed files go into the temp
+    tables."""
     deleted_by = "deleted_by" if db.has_table(conn, cfg, "cleanups") else "NULL"  # before migration 0007
     ledger = conn.execute(db.q(cfg, f"SELECT rel_path, feed, format, records, bytes, sha256, {deleted_by}"
                                     " FROM {meta}.published_files WHERE run_id = %s ORDER BY rel_path"),
                           (run_id,)).fetchall()
-    broken: list[str] = []
     intact = []
     for rel, feed, fmt, records, size, sha, cleaned_by in ledger:
         path = root / rel
@@ -255,12 +291,12 @@ def _file_results(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path
     try:
         doc = json.loads((root / mrel).read_text(encoding="utf-8"))
         listed = {(f["file_path"], f["sha256"]) for f in doc["files"]}
-        manifest_bad = sorted(f"{p} ({'unlisted' if (p, s) in expected else 'not in ledger'})"
-                              for p, s in listed ^ expected)
+        manifest_bad += sorted(f"{p} ({'unlisted' if (p, s) in expected else 'not in ledger'})"
+                               for p, s in listed ^ expected)
         if doc.get("run_id") != run_id:
             manifest_bad.append(f"manifest run_id {doc.get('run_id')!r}")
     except (OSError, ValueError, KeyError, TypeError) as e:
-        manifest_bad = [f"{mrel}: unreadable ({type(e).__name__})"]
+        manifest_bad.append(f"{mrel}: unreadable ({type(e).__name__})")
     for rel, feed, fmt, records, path in intact:
         if feed == "manifest":
             continue
@@ -288,8 +324,3 @@ def _file_results(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path
             continue
         if n != records:
             broken.append(f"{rel}: {n} records, ledger says {records}")
-    results = [Result(FILES_INTACT, len(broken), _sample(broken)),
-               Result(MANIFEST_MATCHES, len(manifest_bad), _sample(manifest_bad))]
-    checks = (SETTLEMENT_CHECKS if "payment_settlement" in published else ()) + (
-        CLICKSTREAM_CHECKS if "clickstream" in published else ())
-    return results + [_run_check(conn, cfg, c, run_id, {"browse": browse}) for c in checks]

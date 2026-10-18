@@ -2,8 +2,9 @@
 Publishing with PostgreSQL: integration/test_publish.py."""
 
 import hashlib
+import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -160,3 +161,50 @@ def test_tiny_window_keeps_events_inside_it(tmp_path: Path) -> None:
     events = [e for rel, st in stats.items() if st.feed == "clickstream"
               for e in feeds.iter_records(tmp_path / rel, "jsonl")]
     assert len(events) == 70 and all(str(e["event_time"]) < "2026-01-01T00:10:00Z" for e in events)
+
+
+def _records(files: dict[str, bytes]) -> dict[str, list[bytes]]:
+    """feed -> sorted record lines (CSV headers dropped), independent of file names and splitting."""
+    out: dict[str, list[bytes]] = {"source_feeds": [], "clickstream": []}
+    for rel, data in files.items():
+        lines = data.splitlines(keepends=True)
+        out[rel.split("/")[0]] += lines[1:] if rel.endswith(".csv") else lines
+    return {k: sorted(v) for k, v in out.items()}
+
+
+@pytest.mark.parametrize("days", [[14], list(range(1, 15)), [0, 0.5, 3.25, 9, 14]])
+def test_step_files_together_equal_the_one_shot_files(tmp_path: Path, days: list[float]) -> None:
+    """Each step publishes only its window; every record lands in exactly one step, none is lost or doubled."""
+    c = cfg()
+    _, whole = staged(tmp_path / "whole", c)
+    together: dict[str, bytes] = {}
+    previous = None
+    for k, d in enumerate(days):
+        as_of = WORLD.clock_start + timedelta(days=d)
+        plan = g.plan_step(WORLD, previous, as_of)
+        run = f"run_20260101T00000{k}Z_abcdef"
+        stats = feeds.write_staged(WORLD, c, run, tmp_path / run, plan)
+        for rel, st in stats.items():
+            assert rel.split("/")[-1].startswith(run)
+            assert st.start is not None and st.end is not None and feeds.in_window(plan, st.start)
+            assert feeds.in_window(plan, st.end)  # every record of a step's file is inside its window
+            together[rel] = (tmp_path / run / rel).read_bytes()
+        previous = as_of
+    assert _records(together) == _records(whole) and _records(whole)["clickstream"]
+
+
+def test_step_windows_are_half_open() -> None:
+    t0, t1 = WORLD.clock_start + timedelta(days=1), WORLD.clock_start + timedelta(days=2)
+    first, later = g.plan_step(WORLD, None, t0), g.plan_step(WORLD, t0, t1)
+    assert feeds.in_window(first, WORLD.clock_start) and feeds.in_window(first, t0)
+    assert not feeds.in_window(later, t0) and feeds.in_window(later, t1)
+    assert not feeds.in_window(later, t1 + timedelta(seconds=1)) and feeds.in_window(None, t1 + timedelta(days=99))
+
+
+def test_browsing_events_by_counts_events_up_to_a_time(tmp_path: Path) -> None:
+    _, files = staged(tmp_path, cfg())
+    times = sorted(json.loads(line)["event_time"] for rel, data in files.items() if rel.startswith("clickstream/")
+                   for line in data.splitlines() if b'"order_placed"' not in line)
+    assert len(times) == WORLD.clickstream_events == feeds.browsing_events_by(WORLD, WORLD.clock_end, 250)
+    t = WORLD.clock_start + timedelta(days=5)
+    assert feeds.browsing_events_by(WORLD, t, 250) == sum(x <= feeds.ts(t) for x in times) > 0

@@ -124,19 +124,25 @@ incremental generation (new orders appended to an existing dataset) is a Phase 3
 ## Clock steps (`advance`; after `v0.2.0-homelab`, not deployed yet)
 
 `generate` writes a dataset as it stands at `clock_end` in one go. `advance` moves a simulation clock through the
-same period instead, so the database changes the way a live shop does: each step is a run that **inserts** the
-orders placed since the previous step and **updates** earlier orders and payments whose status changed (CONFIRMED →
-SHIPPED → DELIVERED, CAPTURED → SETTLED). Stepping to the end, in any number of steps, gives exactly the rows
-`generate` writes for the same config.
+same period instead, so the data changes the way a live shop's does. Each step is a run that:
+
+- **inserts** the orders placed since the previous step and **updates** earlier orders and payments whose status
+  changed (CONFIRMED → SHIPPED → DELIVERED, CAPTURED → SETTLED) in PostgreSQL;
+- then **publishes the files of its window** `(previous step, this step]` (the first step: from `clock_start`):
+  settlements whose `settled_at` is in it, `order_placed` events of the orders placed in it, browsing events whose
+  `event_time` is in it, and a manifest for the step.
+
+Stepping to the end, in any number of steps, gives exactly the rows `generate` writes and, across all steps' files,
+exactly its records (each record in one step only).
 
 Rules: a schema set holds either one `generate` run or one chain of steps, so give the stepped dataset its own
-schema names; the config must have `filesystem.csv: false` and `filesystem.jsonl: false` (files per step are not
-implemented yet); every step uses the same config; the clock only moves forward, within `clock_start`..`clock_end`.
+schema names; every step uses the same config (same seed, counts, clock, data root and feeds); the clock only moves
+forward, within `clock_start`..`clock_end`.
 
 ```bash
 cd /srv/homelab/ecommerce/practice
 cp practice-10k.yaml stepped-10k.yaml
-sed -i -e 's/^  csv: true$/  csv: false/' -e 's/^  jsonl: true$/  jsonl: false/' -e 's/^  application_schema: commerce$/  application_schema: commerce_stepped/' -e 's/^  integration_schema: integration$/  integration_schema: integration_stepped/' -e 's/^  metadata_schema: generator_meta$/  metadata_schema: generator_meta_stepped/' stepped-10k.yaml
+sed -i -e 's/^  application_schema: commerce$/  application_schema: commerce_stepped/' -e 's/^  integration_schema: integration$/  integration_schema: integration_stepped/' -e 's/^  metadata_schema: generator_meta$/  metadata_schema: generator_meta_stepped/' stepped-10k.yaml
 cd /srv/homelab/projects/ecommerce-homelab
 uv run ecomgen init-db /srv/homelab/ecommerce/practice/stepped-10k.yaml
 uv run ecomgen advance /srv/homelab/ecommerce/practice/stepped-10k.yaml --to 2026-01-08T00:00:00Z
@@ -145,16 +151,50 @@ uv run ecomgen advance /srv/homelab/ecommerce/practice/stepped-10k.yaml --to end
 uv run ecomgen validate /srv/homelab/ecommerce/practice/stepped-10k.yaml
 ```
 
-Each step prints `step run_… COMPLETED: clock <previous> -> <as_of>`, the rows inserted and the rows updated.
-`--to` needs a time zone (`Z` for UTC; other offsets are converted) or `end`. Repeating a step that is already
-done, the latest or an earlier one, prints "a completed step already reached …" and changes nothing, so the whole
-list of commands can be re-run safely. A step killed midway stays RUNNING; `advance` then refuses until `ecomgen resume CONFIG` finishes
-it. If a row was changed by hand in between, the step stops ("not as the previous step left them") without
-writing that chunk. The steps of a chain:
+To simulate business days, step one day at a time (`--to 2026-01-02T00:00:00Z`, `--to 2026-01-03T00:00:00Z`, ...).
+Measured on the Mac (10k config, 4 steps): about 2.5 s per step, mostly reading through the browsing sessions to
+pick the window's events; validate 19/19, files identical to `generate`'s records.
+
+Each step prints `step run_… COMPLETED: clock <previous> -> <as_of>`, the rows inserted and updated, and its files.
+`--to` needs a time zone (`Z` for UTC; other offsets are converted) or `end`. Repeating a step that is already done,
+the latest or an earlier one, prints "a completed step already reached …" and changes nothing (no file is
+rewritten), so the whole list of commands can be re-run safely. A step killed midway stays RUNNING; `advance` then
+refuses until `uv run ecomgen resume CONFIG` finishes it (database rows, then the missing files, then the manifest).
+If a row was changed by hand in between, the step stops ("not as the previous step left them") without writing
+that chunk.
+
+**What changed in PostgreSQL** (the chain, then the latest status mix):
 
 ```sql
 SELECT run_id, state, previous_as_of, as_of, counts->'written' FROM generator_meta_stepped.generation_runs ORDER BY as_of;
+SELECT status, count(*) FROM commerce_stepped.orders GROUP BY 1 ORDER BY 2 DESC;
 ```
+
+`counts->'written'` lists the rows each step inserted per table and `orders_updated` / `payment_attempts_updated`.
+
+**Files of a step:** every file name starts with the step's run id; its manifest is
+`manifests/run_id=<step run id>/manifest.json` and carries a `clock_step` block:
+
+```bash
+D=/srv/homelab/ecommerce/data/practice
+python3 -m json.tool $D/manifests/run_id=<step run id>/manifest.json | head -20
+find $D/source_feeds $D/clickstream -name '<step run id>*' | sort | head
+```
+
+```json
+"clock_step": {"first_step_run_id": "run_…", "previous_as_of": "2026-01-08T00:00:00Z", "as_of": "2026-01-15T00:00:00Z",
+               "window": "(previous_as_of, as_of]", "window_start": "2026-01-08T00:00:00Z"}
+```
+
+`validate CONFIG` checks the files of every step together against the current tables (each settled payment in
+exactly one settlement row, each order in exactly one `order_placed` event, no event ID in two steps); `--run-id`
+scopes the run/ledger checks to one step.
+
+**Time conventions (all UTC):** `event_time` / `settled_at` / `placed_at` = when it happened in the simulated
+business (a step's window is about these); `arrived_at` (clickstream) = when the web app received the event, 1-30 s
+later, so it can fall just after the step's `as_of`; `published_at` (manifest) = when the generator recorded the
+file (generation time, wall clock); delivery time = `replay-files`' `arrived=` partition and delivery manifest.
+Partitions (`date=`) are the UTC date of the event time.
 
 ## Crashes and history
 
