@@ -3,14 +3,67 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-18
-**Branch:** `feat/cleanup-files` (from `main` `1e8be96` = PR #16 replay-files merged, CI green 216/0). PR B of 3:
-plan approved (no `--older-than`), implemented, reviewed (10 findings fixed); awaiting push approval.
+**Branch:** `chore/benchmark-files` (from `main` `b619622` = PR #17 cleanup-files merged, CI green 235/0). PR C of
+3: PR #18 open; reviewed twice (10 + 10 findings fixed), Mac rehearsals green after the final fixes (PG 17 53/53
+with cleanup, PG 18 49/49); awaiting merge approval. No reset or deployment without approval.
 **Deployed on Ubuntu:** `v0.1.1-homelab` (`8c581ad`; no files). Keep it until `v0.2.0-homelab` passes there.
 **Approved (2026-10-18):** Part 2 plan (replay → cleanup → benchmark + release); user will recreate the three
 Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleaning a run's originals makes
 `validate` fail with "deleted by cleanup" (plan defaults, accepted with the plan).
 
-## This task: PR B, `cleanup-files` (`docs/FEEDS.md` "Cleanup")
+## This task: PR C, benchmark with files (`docs/HOMELAB_DEPLOYMENT.md`)
+- Decisions (user, 2026-10-18): publish crash in the smoke database, sequentially after the clean smoke run, from a
+  clean baseline without any reset: its own schema set (`*_pc`, derived config `generator_pc.yaml` in OUT; preflight
+  requires both schema sets empty). Replay cleanup: dry run unless `CLEANUP_REPLAY=1`, only for the replay this run
+  created (`owned-replay`), only if every earlier check passed; list reported first (`cleanup_plan.txt`).
+- Deployment rules (user): tag + SHA verified, PRs merged + CI green, localhost:5432 only (port 55432 refused in
+  preflight; `EXPECTED_PG_PORT`), inventory of the 3 DBs before proposing drops, no automatic drops, NVMe mount,
+  `ECOMGEN_DATA_ROOT=/srv/homelab/ecommerce/data`, everything under `/srv/homelab/ecommerce`, snapshot diff;
+  approval before creating/pushing `v0.2.0-homelab`; Ubuntu commands one step at a time, wait for output.
+- `homelab_bench.py`: local-only + forbidden-port + expected-port checks; `pc-config`, `run-id`, `feed-digest`,
+  `feed-stats`, `verify-files` (sha256 + orphans + staging), `feed-throughput`, `publish-crash` (kill after placing
+  file N, smoke DB only), `replay-crash` (test DB only), `replay-id`, `replay-originals`, `planned-replay-digest`,
+  `replay-digest`, `verify-replay`, `owned-replay`, `link-test`, `feeds-enabled`.
+- `homelab_benchmark.sh`: phases smoke → publish crash → MVP → feed-only throughput → load crash → replay crash →
+  cleanup; `same_as` (record-once with `RECORD_REFERENCES=1`, macOS only, exit 3); `expect` runs commands in a
+  subshell so SIGKILL notices go to the log.
+- Found: replay timing/duplicates are seeded by the replay id (includes the run id), so they differ per run and
+  can't be a cross-machine reference; the reference is the replayed originals, and deliveries are checked against
+  the locally computed plan. Making the schedule run-independent would be a REPLAY_VERSION 2 change (not done).
+- References: `scripts/expected_smoke_feed_digest.txt`, `expected_feed_digest.txt`, `expected_replay_originals.txt`
+  (recorded on Docker PG 17; `expected_mvp_digest.txt` re-recorded identical).
+- Rehearsals: Docker PG 17.11 (48/48, `CLEANUP_REPLAY=1`) and `postgres:18.6-trixie` (44/44, dry run), exit 0;
+  rehearsal role/DBs/container removed afterwards.
+
+## PR C review (`/code-review high`) — all 10 fixed
+| # | Finding | Fix |
+|---|---|---|
+| 1 | Port gate used the server's inner port (published container passes) | `check_server`: URL port explicit, not 55432, = EXPECTED_PG_PORT, before connecting; tests |
+| 2 | `?hostaddr=`/`?service=`/PGHOSTADDR could redirect | Only sslmode/connect_timeout/application_name; PGHOST/PGHOSTADDR/PGSERVICE refused; tests |
+| 3 | Cleanup dry-run failure passed silently | Exit code checked; must list this replay's copies; CLEANUP_REPLAY=1 without deletion = FAIL |
+| 4 | Record mode recorded after failures | Pending references in OUT/references, copied to scripts/ only if all checks passed (else exit 2) |
+| 5 | Data-root gate on path text | `check-paths` helper (resolve; strictly inside the project, no symlink, not benchmarks/; OUT not in data root), unit-tested; DATA_ROOT pinned on Linux |
+| 6 | Smoke/pc digests without completeness check | digest_ok before the diff |
+| 7 | EXPECTED_PG_PORT optional on Linux | Required on Linux; checked pre-connection |
+| 8 | Second rerun exit code ignored; "duplicates" over-claimed | Exit code checked; labels state what is checked (plan diff = none missing/extra) |
+| 9 | Host clock vs server clock in owned-replay | STARTED_EPOCH from the server (`server-epoch`) |
+| 10 | Orphan scan walked the whole data root; private `_originals` | Scan only source_feeds/, clickstream/, the run's manifest dir; `replay.originals` public |
+
+## PR C final review (`/code-review high` on PR #18) — all 10 fixed (2 critical/high)
+| # | Finding | Fix |
+|---|---|---|
+| 1 | **Critical:** urllib vs libpq parse: `user@127.0.0.1:55432,x@127.0.0.1:5432` showed 5432, libpq tries 55432 first | Gate judges libpq's own parse (`conninfo_to_dict`): one host, one port, allowed keys only; netloc with >1 '@' refused; tests |
+| 2 | **High:** symlinked project root moves confinement | Project path must equal its resolved path; test |
+| 3 | mem_stop in $(...) left a stale PID for the EXIT trap | Sampler stopped in the main shell (`mem_stop`), peak read separately (`mem_peak`) |
+| 4 | Expected exit 1 could be any error | `expect_msg`: exit code and the expected message (`FAIL run_completed`, `already holds run`, `removed by cleanup`) |
+| 5 | replay-crash params from CONFIG env, replay from argv config | Both from the same loaded config |
+| 6 | sh -c quoting / vacuous pass in "nothing else" | Counted in bash; the preceding check requires the file and its copies |
+| 7 | Test name mangled by the rename | Restored |
+| 8 | Duplicate PARENT gate | Removed |
+| 9 | `_schemas` duplicated `_cfg`, loaded twice | Reuses `_cfg`, once per preflight |
+| 10 | Exit code 1 undocumented | Header lists 0/1/2/3 |
+
+## Previous task: PR B, `cleanup-files` (PR #17, merged) (`docs/FEEDS.md` "Cleanup")
 - `cleanup.py`: `Target` (staging | replay | run), `plan` (read-only, hashes candidates: ledger-recorded,
   not-deleted files of a COMPLETED run/replay (gone ones included, changed ones kept out), or known `staging/<id>`
   dirs of runs/replays/cleanups; manifests kept; `check_root`), `token`, `run` (run lock; token must match before
@@ -41,7 +94,7 @@ Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleani
 | 9 | No index on deleted_by | Partial indexes in 0007 |
 | 10 | Duplicated id patterns; cln_* staging "unknown" | Shared RUN_ID/REPLAY_ID/CLEANUP_ID; cleanups known |
 
-## Previous task: PR A, `replay-files` (PR #16, merged) (`docs/FEEDS.md` "Replay")
+## Earlier: PR A, `replay-files` (PR #16, merged) (`docs/FEEDS.md` "Replay")
 - `replay.py`: `Params` (from/to/feeds/delay/jitter/dup pct, validated), `replay_id` (hash of run + params +
   REPLAY_VERSION), pure `schedule` (arrival = end of partition day + delay + jitter; dup 1-24 h later; both rng draws
   always made), `delivery_manifest` (plan only, reproducible), `_originals` (manifest vs ledger sha, each original vs
@@ -131,5 +184,5 @@ Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleani
 - Phase 2 file feeds not implemented: `data/` stays empty; `filesystem.root` default still `/srv/ecommerce-data`.
 
 ## Next step
-User approves the PR B plan → implement `cleanup-files` → independent review → push + PR (ask) → merge → PR C
-(benchmark with files + `v0.2.0-homelab`).
+User approves the PR C plan → benchmark with files + Mac rehearsals (PG 17, PG 18) → review → PR → merge → tag
+`v0.2.0-homelab` (ask) → user runs it on Ubuntu (recreate the 3 DBs by hand first) → results PR.

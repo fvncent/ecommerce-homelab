@@ -15,6 +15,8 @@ def bench(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     monkeypatch.setenv("ECOMGEN_BENCH_URL", UNREACHABLE.format("ecommerce_homelab_test"))
     monkeypatch.delenv("ECOMMERCE_DATABASE_URL", raising=False)
     monkeypatch.delenv("EXISTING_PG_URL", raising=False)
+    for var in ("PGHOST", "PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE", "EXPECTED_PG_PORT"):
+        monkeypatch.delenv(var, raising=False)
     spec = importlib.util.spec_from_file_location("homelab_bench", SCRIPT)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -85,3 +87,111 @@ def test_urls_come_from_env_not_argv(bench: ModuleType, monkeypatch: pytest.Monk
     monkeypatch.delenv("ECOMGEN_BENCH_URL")
     with pytest.raises(bench.Refused, match="ECOMGEN_BENCH_URL is not set"):
         bench.preflight()
+
+
+@pytest.mark.parametrize(("url", "match"), [
+    ("postgresql://u:p@10.0.0.5:5432/ecommerce_homelab_test", "only to a local PostgreSQL"),
+    ("postgresql://u:p@db.example:5432/ecommerce_homelab_test", "only to a local PostgreSQL"),
+    ("postgresql://u:p@127.0.0.1:5432/ecommerce_homelab_test?hostaddr=10.0.0.5", "hostaddr are not allowed"),
+    # libpq: ?host= wins
+    ("postgresql://u:p@127.0.0.1:5432/ecommerce_homelab_test?host=10.0.0.5", "only to a local PostgreSQL"),
+    ("postgresql://u:p@127.0.0.1:5432/ecommerce_homelab_test?service=vlsim", "service are not allowed"),
+    # libpq: ?port= wins
+    ("postgresql://u:p@127.0.0.1:5432/ecommerce_homelab_test?port=55432", "VLSIM"),
+    ("postgresql://u:p@127.0.0.1/ecommerce_homelab_test", "port explicitly"),
+    ("postgresql://u:p@127.0.0.1:55432/ecommerce_homelab_test", "VLSIM"),
+    # libpq ends the user at the first '@' and takes host lists: this one would try 55432 first (review finding)
+    ("postgresql://bench:pw@127.0.0.1:55432,x@127.0.0.1:5432/ecommerce_homelab_test", "exactly one host"),
+    ("postgresql://u:p@127.0.0.1,127.0.0.1:5432/ecommerce_homelab_test", "exactly one host"),
+    # libpq host: x@...
+    ("postgresql://u:p@x@127.0.0.1:5432/ecommerce_homelab_test", "only to a local PostgreSQL"),
+])
+def test_server_gate_refuses_before_connecting(bench: ModuleType, monkeypatch: pytest.MonkeyPatch, url: str,
+                                               match: str) -> None:
+    assert bench.FORBIDDEN_PORTS == {55432: "the VLSIM PostgreSQL container"}
+    monkeypatch.setenv("ECOMGEN_BENCH_URL", url)
+    with pytest.raises(bench.Refused, match=match):
+        bench.preflight()
+    monkeypatch.setenv("ECOMMERCE_DATABASE_URL", url.replace("ecommerce_homelab_test", "ecommerce_homelab_smoke"))
+    with pytest.raises(bench.Refused, match=match):
+        bench.publish_crash("config.yaml", "4")
+
+
+def test_server_gate_expected_port_and_environment(bench: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    ok = "postgresql://u:p@127.0.0.1:5432/ecommerce_homelab_test?connect_timeout=1&sslmode=disable"
+    assert bench.check_server(ok) == ok
+    monkeypatch.setenv("EXPECTED_PG_PORT", "5433")
+    with pytest.raises(bench.Refused, match="URL port is 5432, expected 5433"):
+        bench.check_server(ok)
+    monkeypatch.delenv("EXPECTED_PG_PORT")
+    for var in ("PGHOST", "PGHOSTADDR", "PGSERVICE"):
+        monkeypatch.setenv(var, "10.0.0.5")
+        with pytest.raises(bench.Refused, match=f"unset {var}"):
+            bench.check_server(ok)
+        monkeypatch.delenv(var)
+
+
+def test_publish_and_replay_crashes_only_target_their_databases(bench: ModuleType,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("ecommerce_homelab_test", "ecommerce_homelab_crash", "ecommerce_oltp"):
+        monkeypatch.setenv("ECOMMERCE_DATABASE_URL", UNREACHABLE.format(name))
+        with pytest.raises(bench.Refused, match="not an approved benchmark database"):
+            bench.publish_crash("config.yaml", "4")
+    for name in ("ecommerce_homelab_smoke", "ecommerce_homelab_crash", "ecommerce_oltp"):
+        monkeypatch.setenv("ECOMMERCE_DATABASE_URL", UNREACHABLE.format(name))
+        with pytest.raises(bench.Refused, match="not an approved benchmark database"):
+            bench.replay_crash("config.yaml", "6", "2026-01-05", "2026-01-10", "24", "6", "10")
+
+
+def test_pc_config_renames_only_the_schemas_and_never_overwrites(bench: ModuleType, tmp_path: Path) -> None:
+    from ecomgen import config
+    src = Path(__file__).parents[1] / "config" / "generator.example.yaml"
+    dst = tmp_path / "pc.yaml"
+    bench.pc_config(str(src), str(dst))
+    a, b = config.load(src), config.load(dst)
+    assert (b.postgres.application_schema, b.postgres.integration_schema, b.postgres.metadata_schema) == (
+        "commerce_pc", "integration_pc", "generator_meta_pc")
+    assert (a.generator, a.filesystem) == (b.generator, b.filesystem)
+    with pytest.raises(bench.Refused, match="already exists"):
+        bench.pc_config(str(src), str(dst))
+
+
+def test_feed_throughput_and_data_root_guards(bench: ModuleType, tmp_path: Path,
+                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(bench.Refused, match="unknown feed"):
+        bench.feed_throughput("config.yaml", str(tmp_path), "orders")
+    (tmp_path / "clickstream").mkdir()
+    with pytest.raises(bench.Refused, match="already exists"):
+        bench.feed_throughput("config.yaml", str(tmp_path), "clickstream")
+    for root in ("", "relative/dir", str(tmp_path / "missing")):
+        monkeypatch.setenv("ECOMGEN_DATA_ROOT", root)
+        with pytest.raises(bench.Refused, match="ECOMGEN_DATA_ROOT"):
+            bench.link_test()
+    monkeypatch.setenv("ECOMGEN_DATA_ROOT", str(tmp_path))
+    bench.link_test()
+    assert not any((tmp_path / "staging").iterdir())  # the probe is removed
+
+
+def test_data_root_and_output_paths(bench: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    proj, other = tmp_path / "ecommerce", tmp_path / "vlsim"
+    for d in (proj / "data", proj / "benchmarks" / "x", other / "data"):
+        d.mkdir(parents=True)
+    (proj / "linked").symlink_to(other / "data")
+    bench.check_paths(str(proj), str(proj / "data"), str(proj / "benchmarks"))
+    assert capsys.readouterr().out.strip() == str((proj / "data").resolve())
+    refused = {
+        "symlink": (proj / "linked", proj / "benchmarks"),
+        "dot-dot": (proj / "data" / ".." / ".." / "vlsim" / "data", proj / "benchmarks"),
+        "project root": (proj, proj / "benchmarks"),
+        "under benchmarks": (proj / "benchmarks" / "x", proj / "benchmarks"),
+        "outside": (other / "data", proj / "benchmarks"),
+        "output in data": (proj / "data", proj / "data"),
+        "output outside": (proj / "data", other),
+    }
+    (tmp_path / "project-link").symlink_to(proj)  # the project root itself a symlink (review finding)
+    with pytest.raises(bench.Refused, match="must be a real path"):
+        bench.check_paths(str(tmp_path / "project-link"), str(proj / "data"), str(proj / "benchmarks"))
+    for label, (data, out) in refused.items():
+        with pytest.raises(bench.Refused):
+            bench.check_paths(str(proj), str(data), str(out))
+            pytest.fail(f"{label}: not refused")
