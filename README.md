@@ -24,6 +24,8 @@ uv run pytest                            # integration tests skip unless ECOMGEN
 uv run mypy
 ```
 
+CI (`.github/workflows/ci.yml`, every PR and push to `main`): mypy, shellcheck, and the full suite against PostgreSQL 17.11 and 18.6; it fails if any test is skipped, so the integration tests always run.
+
 Measured runs (time, peak RSS, WAL, DB size, restart) are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Ubuntu homelab runbook: [docs/HOMELAB_DEPLOYMENT.md](docs/HOMELAB_DEPLOYMENT.md).
 
 Migrations live in `src/ecomgen/migrations/NNNN_*.sql` and are applied in one transaction. Never edit an applied migration; add a new one (init-db refuses checksum drift).

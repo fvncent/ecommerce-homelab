@@ -17,7 +17,7 @@
 #   macOS), PG_DATA_PATH (/var/lib/postgresql; free-space gate), MIN_FREE_GB (10).
 # Exit 0 only if every check holds; 2 = aborted by a gate or a failed step.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 2
 
 export CONFIG="${CONFIG:-config/generator.example.yaml}"
 export ECOMGEN_BENCH_URL="${ECOMGEN_BENCH_URL:-${ECOMMERCE_DATABASE_URL:-}}"

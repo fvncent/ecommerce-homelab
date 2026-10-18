@@ -12,7 +12,7 @@
 # listed. Files are listed at every depth (SNAP_MAXDEPTH limits it; then deeper changes are not seen); paths this
 # user cannot read are counted, since changes inside them are not seen either.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 2
 SNAP_ROOT="${SNAP_ROOT:-/srv/homelab}"
 SNAP_EXCLUDE="${SNAP_EXCLUDE:-/srv/homelab/ecommerce}"  # space-separated
 SNAP_MAXDEPTH="${SNAP_MAXDEPTH:-}"
