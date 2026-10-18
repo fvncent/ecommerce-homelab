@@ -4,8 +4,8 @@ Update before compaction or ending a significant session. Overwrite; git history
 
 **Updated:** 2026-10-18
 **Branch:** `chore/benchmark-files` (from `main` `b619622` = PR #17 cleanup-files merged, CI green 235/0). PR C of
-3: implemented, reviewed (10 findings fixed), Mac rehearsals green again (PG 17 53/53 with cleanup, PG 18 49/49);
-awaiting push approval. No reset or deployment without approval.
+3: PR #18 open; reviewed twice (10 + 10 findings fixed), Mac rehearsals green after the final fixes (PG 17 53/53
+with cleanup, PG 18 49/49); awaiting merge approval. No reset or deployment without approval.
 **Deployed on Ubuntu:** `v0.1.1-homelab` (`8c581ad`; no files). Keep it until `v0.2.0-homelab` passes there.
 **Approved (2026-10-18):** Part 2 plan (replay → cleanup → benchmark + release); user will recreate the three
 Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleaning a run's originals makes
@@ -48,6 +48,20 @@ Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleani
 | 8 | Second rerun exit code ignored; "duplicates" over-claimed | Exit code checked; labels state what is checked (plan diff = none missing/extra) |
 | 9 | Host clock vs server clock in owned-replay | STARTED_EPOCH from the server (`server-epoch`) |
 | 10 | Orphan scan walked the whole data root; private `_originals` | Scan only source_feeds/, clickstream/, the run's manifest dir; `replay.originals` public |
+
+## PR C final review (`/code-review high` on PR #18) — all 10 fixed (2 critical/high)
+| # | Finding | Fix |
+|---|---|---|
+| 1 | **Critical:** urllib vs libpq parse: `user@127.0.0.1:55432,x@127.0.0.1:5432` showed 5432, libpq tries 55432 first | Gate judges libpq's own parse (`conninfo_to_dict`): one host, one port, allowed keys only; netloc with >1 '@' refused; tests |
+| 2 | **High:** symlinked project root moves confinement | Project path must equal its resolved path; test |
+| 3 | mem_stop in $(...) left a stale PID for the EXIT trap | Sampler stopped in the main shell (`mem_stop`), peak read separately (`mem_peak`) |
+| 4 | Expected exit 1 could be any error | `expect_msg`: exit code and the expected message (`FAIL run_completed`, `already holds run`, `removed by cleanup`) |
+| 5 | replay-crash params from CONFIG env, replay from argv config | Both from the same loaded config |
+| 6 | sh -c quoting / vacuous pass in "nothing else" | Counted in bash; the preceding check requires the file and its copies |
+| 7 | Test name mangled by the rename | Restored |
+| 8 | Duplicate PARENT gate | Removed |
+| 9 | `_schemas` duplicated `_cfg`, loaded twice | Reuses `_cfg`, once per preflight |
+| 10 | Exit code 1 undocumented | Header lists 0/1/2/3 |
 
 ## Previous task: PR B, `cleanup-files` (PR #17, merged) (`docs/FEEDS.md` "Cleanup")
 - `cleanup.py`: `Target` (staging | replay | run), `plan` (read-only, hashes candidates: ledger-recorded,

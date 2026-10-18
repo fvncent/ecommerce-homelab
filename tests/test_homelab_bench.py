@@ -93,11 +93,18 @@ def test_urls_come_from_env_not_argv(bench: ModuleType, monkeypatch: pytest.Monk
     ("postgresql://u:p@10.0.0.5:5432/ecommerce_homelab_test", "only to a local PostgreSQL"),
     ("postgresql://u:p@db.example:5432/ecommerce_homelab_test", "only to a local PostgreSQL"),
     ("postgresql://u:p@127.0.0.1:5432/ecommerce_homelab_test?hostaddr=10.0.0.5", "hostaddr are not allowed"),
-    ("postgresql://u:p@127.0.0.1:5432/ecommerce_homelab_test?host=10.0.0.5", "host are not allowed"),
+    # libpq: ?host= wins
+    ("postgresql://u:p@127.0.0.1:5432/ecommerce_homelab_test?host=10.0.0.5", "only to a local PostgreSQL"),
     ("postgresql://u:p@127.0.0.1:5432/ecommerce_homelab_test?service=vlsim", "service are not allowed"),
-    ("postgresql://u:p@127.0.0.1:5432/ecommerce_homelab_test?port=55432", "port are not allowed"),
+    # libpq: ?port= wins
+    ("postgresql://u:p@127.0.0.1:5432/ecommerce_homelab_test?port=55432", "VLSIM"),
     ("postgresql://u:p@127.0.0.1/ecommerce_homelab_test", "port explicitly"),
     ("postgresql://u:p@127.0.0.1:55432/ecommerce_homelab_test", "VLSIM"),
+    # libpq ends the user at the first '@' and takes host lists: this one would try 55432 first (review finding)
+    ("postgresql://bench:pw@127.0.0.1:55432,x@127.0.0.1:5432/ecommerce_homelab_test", "exactly one host"),
+    ("postgresql://u:p@127.0.0.1,127.0.0.1:5432/ecommerce_homelab_test", "exactly one host"),
+    # libpq host: x@...
+    ("postgresql://u:p@x@127.0.0.1:5432/ecommerce_homelab_test", "only to a local PostgreSQL"),
 ])
 def test_server_gate_refuses_before_connecting(bench: ModuleType, monkeypatch: pytest.MonkeyPatch, url: str,
                                                match: str) -> None:
@@ -181,6 +188,9 @@ def test_data_root_and_output_paths(bench: ModuleType, tmp_path: Path, capsys: p
         "output in data": (proj / "data", proj / "data"),
         "output outside": (proj / "data", other),
     }
+    (tmp_path / "project-link").symlink_to(proj)  # the project root itself a symlink (review finding)
+    with pytest.raises(bench.Refused, match="must be a real path"):
+        bench.check_paths(str(tmp_path / "project-link"), str(proj / "data"), str(proj / "benchmarks"))
     for label, (data, out) in refused.items():
         with pytest.raises(bench.Refused):
             bench.check_paths(str(proj), str(data), str(out))

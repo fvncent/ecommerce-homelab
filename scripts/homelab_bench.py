@@ -69,32 +69,44 @@ def check_name(name: str, allowed: tuple[str, ...] = DATABASES) -> str:
 
 
 def check_server(url: str) -> str:
-    """Refuse, before connecting, any URL that could reach a server other than the local one on the expected port:
-    host must be loopback, the port explicit, allowed and equal to EXPECTED_PG_PORT (if set), only SAFE_PARAMS in
-    the query, and no PGHOST/PGHOSTADDR/PGSERVICE in the environment."""
-    parts = urlsplit(url)
-    if parts.hostname not in LOOPBACK:
-        raise Refused(f"the benchmark connects only to a local PostgreSQL, not {parts.hostname!r}")
-    extra = set(parse_qs(parts.query, keep_blank_values=True)) - SAFE_PARAMS
-    if extra:
-        raise Refused(f"URL parameters {', '.join(sorted(extra))} are not allowed (only {', '.join(sorted(SAFE_PARAMS))})")
+    """Refuse, before connecting, any URL that could reach a server other than the local one on the expected port.
+    Judged by libpq's own parse (psycopg's conninfo_to_dict), not urllib's, because they differ (e.g. libpq ends the
+    user at the first '@' and takes comma-separated host lists): exactly one loopback host and one explicit port,
+    not 55432, equal to EXPECTED_PG_PORT if set; only user/password/host/port/dbname and SAFE_PARAMS; and no
+    PGHOST/PGHOSTADDR/PGSERVICE in the environment."""
+    from psycopg.conninfo import conninfo_to_dict
     set_env = [v for v in REDIRECTING_ENV if os.environ.get(v)]
     if set_env:
         raise Refused(f"unset {', '.join(set_env)}: they can redirect the connection")
-    if parts.port is None:
+    try:
+        info = {k: str(v) for k, v in conninfo_to_dict(url).items()}
+    except psycopg.Error as e:
+        raise Refused(f"unparseable URL ({type(e).__name__})") from None
+    extra = set(info) - {"user", "password", "host", "port", "dbname"} - SAFE_PARAMS
+    if extra:
+        raise Refused(f"URL parameters {', '.join(sorted(extra))} are not allowed"
+                      f" (only {', '.join(sorted(SAFE_PARAMS))})")
+    host, port = info.get("host", ""), info.get("port", "")
+    if "," in host or "," in port:
+        raise Refused("the URL must name exactly one host and one port")
+    if host not in LOOPBACK:
+        raise Refused(f"the benchmark connects only to a local PostgreSQL, not {host!r}")
+    if not port.isdigit():
         raise Refused("the URL must name its port explicitly")
-    if parts.port in FORBIDDEN_PORTS:
-        raise Refused(f"port {parts.port} is {FORBIDDEN_PORTS[parts.port]}; never benchmark against it")
+    if int(port) in FORBIDDEN_PORTS:
+        raise Refused(f"port {port} is {FORBIDDEN_PORTS[int(port)]}; never benchmark against it")
     expected = os.environ.get("EXPECTED_PG_PORT")
-    if expected and int(expected) != parts.port:
-        raise Refused(f"URL port is {parts.port}, expected {expected}")
+    if expected and int(expected) != int(port):
+        raise Refused(f"URL port is {port}, expected {expected}")
+    if urlsplit(url).netloc.count("@") > 1 or info.get("dbname") != dbname_of(url):
+        raise Refused("ambiguous URL: libpq and the URL path disagree on where it connects")
     return url
 
 
 def bench_url() -> str:
-    url = check_server(env_url("ECOMGEN_BENCH_URL"))
+    url = env_url("ECOMGEN_BENCH_URL")
     check_name(dbname_of(url))
-    return url
+    return check_server(url)
 
 
 def db_url(name: str) -> str:
@@ -102,8 +114,7 @@ def db_url(name: str) -> str:
 
 
 def _schemas() -> tuple[str, ...]:
-    from ecomgen import config
-    pg = config.load(os.environ.get("CONFIG", "config/generator.example.yaml")).postgres
+    pg = _cfg().postgres
     return pg.application_schema, pg.integration_schema, pg.metadata_schema
 
 
@@ -111,7 +122,8 @@ def preflight() -> None:
     """Refuse unless the server is local and not a forbidden port, and the role is unprivileged and owns every
     approved database, each still empty (also of the publish-crash schema set)."""
     bench_url()  # host, port and parameters are checked before any connection
-    schemas = _schemas() + tuple(s + PC_SUFFIX for s in _schemas())
+    base = _schemas()
+    schemas = base + tuple(s + PC_SUFFIX for s in base)
     for name in DATABASES:
         with psycopg.connect(db_url(name)) as c:
             row = c.execute(sql.SQL("SELECT current_user, {}, pg_get_userbyid(d.datdba)"
@@ -412,9 +424,10 @@ def publish_crash(config_path: str, nth: str) -> None:
         load.run(conn, config.load(config_path), "smoke")
 
 
-def _replay_params(start: str, end: str, delay: str, jitter: str, dup: str) -> "replay.Params":
+def _replay_params(cfg: "config.Config", start: str, end: str, delay: str, jitter: str,
+                   dup: str) -> "replay.Params":
     from ecomgen import feeds, replay
-    return replay.Params(date.fromisoformat(start), date.fromisoformat(end), tuple(feeds.enabled(_cfg())),
+    return replay.Params(date.fromisoformat(start), date.fromisoformat(end), tuple(feeds.enabled(cfg)),
                          int(delay), int(jitter), int(dup))
 
 
@@ -424,16 +437,17 @@ def replay_crash(config_path: str, nth: str, start: str, end: str, delay: str, j
     url = check_server(env_url("ECOMMERCE_DATABASE_URL"))
     check_name(dbname_of(url), (TEST_DB,))
     from ecomgen import config, replay
-    params = _replay_params(start, end, delay, jitter, dup)
+    cfg = config.load(config_path)
+    params = _replay_params(cfg, start, end, delay, jitter, dup)  # the same config the replay runs with
     _kill_after_placing(int(nth))
     with psycopg.connect(url, autocommit=True) as conn:
-        replay.replay(conn, config.load(config_path), params)
+        replay.replay(conn, cfg, params)
 
 
 def replay_id(name: str, start: str, end: str, delay: str, jitter: str, dup: str) -> None:
     from ecomgen import replay
     with psycopg.connect(db_url(name)) as c:
-        print(replay.replay_id(_latest(c, _cfg()), _replay_params(start, end, delay, jitter, dup)))
+        print(replay.replay_id(_latest(c, _cfg()), _replay_params(_cfg(), start, end, delay, jitter, dup)))
 
 
 def replay_digest(name: str, rid: str) -> None:
@@ -455,7 +469,7 @@ def planned_replay_digest(name: str, start: str, end: str, delay: str, jitter: s
     the pure schedule, in replay-digest's format (nothing is written)."""
     from ecomgen import config, feeds, replay
     cfg = _cfg()
-    params = _replay_params(start, end, delay, jitter, dup)
+    params = _replay_params(_cfg(), start, end, delay, jitter, dup)
     with psycopg.connect(db_url(name)) as c:
         run = _latest(c, cfg)
         _, originals = replay.originals(c, cfg, run, Path(config.data_root(cfg)), params)
@@ -473,7 +487,7 @@ def replay_originals(name: str, start: str, end: str, delay: str, jitter: str, d
     with psycopg.connect(db_url(name)) as c:
         run = _latest(c, cfg)
         _, originals = replay.originals(c, cfg, run, Path(config.data_root(cfg)),
-                                         _replay_params(start, end, delay, jitter, dup))
+                                         _replay_params(_cfg(), start, end, delay, jitter, dup))
     for line in sorted(f"{o.path.replace(run, 'RUN')} {o.sha256}" for o in originals):
         print(line)
 
@@ -527,6 +541,8 @@ def check_paths(project: str, data_root: str, out_parent: str) -> None:
     """Print the resolved data root if it is a real directory (not a symlink) strictly inside the resolved project,
     not under benchmarks/, and the benchmark output's parent is inside the project but not inside the data root."""
     proj = Path(project).resolve(strict=True)
+    if Path(project).is_symlink() or Path(os.path.abspath(project)) != proj:
+        raise Refused(f"the project directory {project} must be a real path (it resolves to {proj})")
     if Path(data_root).is_symlink() or not Path(data_root).is_dir():
         raise Refused(f"{data_root} must be an existing directory, not a symlink")
     data = Path(data_root).resolve(strict=True)
@@ -565,7 +581,8 @@ COMMANDS: dict[str, Callable[..., None]] = {
     "pc-config": pc_config, "run-id": run_id, "feed-digest": feed_digest, "feed-stats": feed_stats,
     "verify-files": verify_files, "feed-throughput": feed_throughput, "publish-crash": publish_crash,
     "replay-crash": replay_crash, "replay-id": replay_id, "replay-digest": replay_digest,
-    "planned-replay-digest": planned_replay_digest, "replay-originals": replay_originals, "verify-replay": verify_replay, "owned-replay": owned_replay, "link-test": link_test,
+    "planned-replay-digest": planned_replay_digest, "replay-originals": replay_originals,
+    "verify-replay": verify_replay, "owned-replay": owned_replay, "link-test": link_test,
     "feeds-enabled": feeds_enabled, "check-paths": check_paths,
 }
 

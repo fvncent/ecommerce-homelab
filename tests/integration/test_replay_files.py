@@ -266,7 +266,7 @@ def test_symlinks_are_refused(run: tuple[psycopg.Connection, str], small_cfg: co
     assert target.is_symlink()
 
 
-def test_verify_cleans_leftover_staging_and_survives_removedoriginals(
+def test_verify_cleans_leftover_staging_and_survives_removed_originals(
         run: tuple[psycopg.Connection, str], small_cfg: config.Config, data_root: Path) -> None:
     conn, _ = run
     r = replay.replay(conn, small_cfg, PARAMS)

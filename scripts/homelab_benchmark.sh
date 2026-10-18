@@ -24,7 +24,8 @@
 #   the replay this run created), RECORD_REFERENCES (1: write the file references instead of comparing; macOS only,
 #   refused with EXPECTED_SHA; exits 3).
 # References (macOS, must exist unless recording): EXPECTED_DIGEST, scripts/expected_{smoke_feed,feed}_digest.txt, scripts/expected_replay_originals.txt.
-# Exit 0 only if every check holds; 2 = aborted by a gate or a failed step; 3 = references recorded.
+# Exit 0 only if every check holds; 1 = one or more checks failed; 2 = aborted by a gate or a failed step;
+# 3 = references recorded.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
@@ -77,6 +78,17 @@ same_as() {
   fi
   expect 0 "$3" diff "$1" "$2"
 }
+# expect_msg CODE PATTERN LABEL CMD...: like expect, and the command's output must contain PATTERN (so an expected
+# failure fails for the expected reason, not e.g. a database error that happens to exit 1 too)
+expect_msg() {
+  local want="$1" pattern="$2" label="$3"; shift 3
+  local log="$OUT/out_$RANDOM$RANDOM.txt"
+  ( "$@" > "$log" 2>&1; exit $? ) 2>> "$OUT/log.txt"; local got=$?
+  cat "$log" >> "$OUT/log.txt"
+  if [ "$got" = "$want" ] && grep -q -- "$pattern" "$log"; then note "- PASS $label (exit $got)"
+  else note "- FAIL $label (exit $got, want $want with \"$pattern\")"; FAILED=1; fi
+  rm -f "$log"
+}
 # digest_ok FILE: the digest step produced all 7 tables (an empty pair must never compare "identical")
 digest_ok() { [ "$(wc -l < "$1" | tr -d ' ')" = 7 ]; }
 timed() {
@@ -105,8 +117,11 @@ mem_start() {  # sample memory.current every 0.2 s for one phase
   ( while :; do pgcg memory.current; sleep 0.2; done ) > "$OUT/mem_$1.txt" 2>/dev/null &
   MEMPID=$!; disown "$MEMPID" 2>/dev/null
 }
-mem_stop() {
-  kill "$MEMPID" 2>/dev/null; MEMPID=""
+mem_stop() {  # in the main shell (never inside $(...)), so MEMPID is really cleared before the EXIT trap
+  [ -n "$MEMPID" ] && kill "$MEMPID" 2>/dev/null
+  MEMPID=""
+}
+mem_peak() {
   awk '$1 + 0 > m { m = $1 + 0 } END { if (NR) printf "%.0f MB peak (%d samples)", m / 1048576, NR; else print "not measured" }' "$OUT/mem_$1.txt"
 }
 cleanup() { [ -n "$MEMPID" ] && kill "$MEMPID" 2>/dev/null; }
@@ -142,7 +157,6 @@ if [ "${RECORD_REFERENCES:-}" = 1 ]; then
   [ -z "${EXPECTED_SHA:-}" ] && [ "$(uname -s)" = Darwin ] || early_die "RECORD_REFERENCES is for recording the macOS references only"
 fi
 [ "$(uname -s)" != Linux ] || [ -n "${PG_SERVICE:-}" ] || early_die "PG_SERVICE not set (e.g. postgresql@18-main)"
-[ -d "$PARENT" ] || early_die "$PARENT does not exist (create the project directories first)"
 mkdir "$OUT" || early_die "cannot create $OUT"
 : > "$OUT/summary.md"; : > "$OUT/log.txt"
 trap cleanup EXIT
@@ -202,7 +216,8 @@ use_db "$SMOKE"
 expect 0 "init-db" "$ECOMGEN" init-db "$CONFIG"
 mem_start smoke
 expect 0 "generate --profile smoke (database + files)" timed smoke "$ECOMGEN" generate "$CONFIG" --profile smoke
-note "  - generator: $(time_summary smoke); postgres server: $(mem_stop smoke)"
+mem_stop
+note "  - generator: $(time_summary smoke); postgres server: $(mem_peak smoke)"
 expect 0 "validate (database + files)" "$ECOMGEN" validate "$CONFIG"
 bench feed-digest "$SMOKE" > "$OUT/feeds_smoke.txt" 2>> "$OUT/log.txt"
 same_as "$REF_SMOKE_FEEDS" "$OUT/feeds_smoke.txt" "smoke files identical to the macOS reference"
@@ -216,7 +231,7 @@ bench pc-config "$CONFIG" "$PC_CONFIG" >> "$OUT/log.txt" 2>&1 || die "cannot wri
 expect 0 "init-db (own, empty schema set: a clean baseline)" env CONFIG="$PC_CONFIG" "$ECOMGEN" init-db "$PC_CONFIG"
 expect 137 "generate killed right after a file is in place, before its ledger row commits" env CONFIG="$PC_CONFIG" "$PY" scripts/homelab_bench.py publish-crash "$PC_CONFIG" 4
 expect 0 "no sessions or prepared transactions left" env CONFIG="$PC_CONFIG" "$PY" scripts/homelab_bench.py leftovers "$SMOKE"
-expect 1 "validate fails before resume" "$ECOMGEN" validate "$PC_CONFIG"
+expect_msg 1 "FAIL run_completed" "validate fails before resume (the run is not COMPLETED)" "$ECOMGEN" validate "$PC_CONFIG"
 expect 0 "resume (adopts the placed file, publishes the rest)" timed pc_resume "$ECOMGEN" resume "$PC_CONFIG"
 note "  - resume: $(time_summary pc_resume)"
 expect 0 "validate after resume (database + files)" "$ECOMGEN" validate "$PC_CONFIG"
@@ -234,7 +249,8 @@ expect 0 "init-db" "$ECOMGEN" init-db "$CONFIG"
 lsn="$(bench wal-lsn)" || die "cannot read WAL position"; cpu0="$(cpu_usec)"
 mem_start mvp
 expect 0 "generate" timed mvp "$ECOMGEN" generate "$CONFIG"
-mem="$(mem_stop mvp)"
+mem_stop
+mem="$(mem_peak mvp)"
 wal="$(bench wal-bytes-since "$lsn")" || die "cannot read WAL position"
 note "  - generator: $(time_summary mvp)"
 note "  - postgres server: $mem; CPU $(cpu_since "$cpu0")"
@@ -273,12 +289,13 @@ expect 137 "generate killed by SIGKILL" bench crash "$CONFIG" orders 1
 expect 0 "no sessions or prepared transactions left by the killed run" bench leftovers "$CRASH"
 "$ECOMGEN" status "$CONFIG" > "$OUT/status_crashed.txt" 2>&1
 expect 0 "status reports the crash" grep -q "the run crashed" "$OUT/status_crashed.txt"
-expect 1 "validate fails on the partial run" "$ECOMGEN" validate "$CONFIG"
-expect 1 "generate refuses (run exists)" "$ECOMGEN" generate "$CONFIG"
+expect_msg 1 "FAIL run_completed" "validate fails on the partial run" "$ECOMGEN" validate "$CONFIG"
+expect_msg 1 "already holds run" "generate refuses (run exists)" "$ECOMGEN" generate "$CONFIG"
 cpu0="$(cpu_usec)"
 mem_start resume
 expect 0 "resume" timed resume "$ECOMGEN" resume "$CONFIG"
-note "  - resume: $(time_summary resume); postgres server: $(mem_stop resume); CPU $(cpu_since "$cpu0")"
+mem_stop
+note "  - resume: $(time_summary resume); postgres server: $(mem_peak resume); CPU $(cpu_since "$cpu0")"
 expect 0 "validate after resume" "$ECOMGEN" validate "$CONFIG"
 expect 0 "second resume is a no-op" "$ECOMGEN" resume "$CONFIG"
 bench digest "$CRASH" > "$OUT/digest_crash.txt" 2>> "$OUT/log.txt"
@@ -317,14 +334,15 @@ expect 0 "the replay was created by this benchmark (run $RUN_MVP, after $STARTED
 expect 0 "cleanup dry run succeeds" test "$dry" = 0
 note "  - $(head -1 "$OUT/cleanup_plan.txt") (full list: cleanup_plan.txt)"
 expect 0 "dry run lists this replay's copies" grep -q "^  delete deliveries/replay_id=$RID/arrived=" "$OUT/cleanup_plan.txt"
-expect 0 "dry run lists nothing else" sh -c "! grep '^  delete ' '$OUT/cleanup_plan.txt' | grep -v '^  delete deliveries/replay_id=$RID/arrived='"
+others="$(grep '^  delete ' "$OUT/cleanup_plan.txt" | grep -vc "^  delete deliveries/replay_id=$RID/arrived=")"
+expect 0 "dry run lists nothing else" test "$others" = 0
 TOKEN="$(sed -n 's/.*--delete --confirm \([0-9a-f]\{12\}\)$/\1/p' "$OUT/cleanup_plan.txt")"
 if [ "${CLEANUP_REPLAY:-}" = 1 ] && [ -n "$TOKEN" ] && [ "$FAILED" = 0 ]; then
   expect 0 "cleanup --delete --confirm (CLEANUP_REPLAY=1)" "$ECOMGEN" cleanup-files "$CONFIG" --replay-id "$RID" --delete --confirm "$TOKEN"
   note "  - $(grep -h "^cleanup cln_" "$OUT/log.txt" | tail -1)"
   expect 0 "originals untouched (every file still matches its sha256)" bench verify-files "$TEST"
   expect 0 "MVP run still validates" "$ECOMGEN" validate "$CONFIG"
-  expect 1 "the cleaned replay can no longer be verified (and says why)" "$ECOMGEN" replay-files "$CONFIG" "${RPL_CLI[@]}"
+  expect_msg 1 "removed by cleanup" "the cleaned replay can no longer be verified (and says why)" "$ECOMGEN" replay-files "$CONFIG" "${RPL_CLI[@]}"
 elif [ "${CLEANUP_REPLAY:-}" = 1 ]; then
   note "- FAIL CLEANUP_REPLAY=1 but nothing was deleted (earlier failures, or no token in the dry run)"; FAILED=1
 else
