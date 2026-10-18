@@ -135,7 +135,7 @@ def test_clickstream_contract(tmp_path: Path) -> None:
 
 
 def test_rollover_splits_files_without_losing_records(tmp_path: Path) -> None:
-    w = feeds._Writer(tmp_path, RUN, 2_000)  # a 2 kB limit (config's minimum is 1 MB) forces several parts
+    w = feeds._Writer(tmp_path, 2_000)  # a 2 kB limit (config's minimum is 1 MB) forces several parts
     recs = [(f"line {i}\n", datetime(2026, 1, 2, tzinfo=UTC)) for i in range(500)]
     w.add("clickstream", f"clickstream/date=2026-01-02/{RUN}", "jsonl", None, recs[:200])
     w.add("clickstream", f"clickstream/date=2026-01-02/{RUN}", "jsonl", None, recs[200:])

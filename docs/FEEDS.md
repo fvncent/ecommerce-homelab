@@ -51,8 +51,9 @@ customer_id, session_id, product_id, event_time, arrived_at, source_system, payl
 
 **manifest.json**: `run_id`, `generator_version`, `data_version`, `config_sha256`, `seed` and per file
 `source_system, feed, file_path` (relative to the root)`, format, schema_version, start_event_time, end_event_time,
-records_written, bytes, sha256, anomaly_count` (0) `, published_at`. Built only from the database, so rebuilding it
-gives the same bytes.
+records_written, bytes, sha256, anomaly_count` (0) `, published_at`. All timestamps are `YYYY-MM-DDTHH:MM:SSZ`;
+`published_at` is when the ledger recorded the file (for a file adopted after a crash: the resume time). Built only
+from the database, so rebuilding it gives the same bytes.
 
 ## Publishing and recovery
 
@@ -60,21 +61,28 @@ DB and filesystem writes can't commit together; the run converges instead:
 
 1. All database chunks commit first (chunk ledger, unchanged).
 2. Every file is regenerated into `staging/<run_id>/` (cleared first: only that run's unpublished output).
-3. Per file: fsync, `rename` into place (same filesystem), fsync the directory, then a `published_files` ledger
-   row (migration 0005). The manifest is published the same way, last. Then the run becomes `COMPLETED`.
+3. Per file: fsync, create missing partition directories (fsyncing each parent), hard-link into place (same
+   filesystem; unlike rename, a link fails if a file appeared at the target meanwhile), fsync the directory, then a
+   `published_files` ledger row (migration 0005). The manifest is published the same way, last. Then the run
+   becomes `COMPLETED`.
 4. A published file is **never overwritten**. On `resume` (or any repeat): a recorded file must still match its
-   checksum; an unrecorded file at a target path (crash between rename and ledger insert) is adopted only if its
-   bytes equal the regenerated ones; anything else stops with an error for a human to reconcile.
+   checksum; an unrecorded file at a target path (crash between placing and recording it) is adopted, after an
+   fsync, only if its bytes equal the regenerated ones; anything else stops with an error for a human to
+   reconcile. Once the manifest is recorded, a repeat regenerates nothing: it only verifies the recorded files and
+   that the manifest lists exactly them.
 
 Consumers: a file is complete once it appears outside `staging/`; a run's set is complete once its manifest
-exists. Resume refuses if the data root or feed layout differs from the run's (`resume_fields`).
+exists. Resume refuses if the data root or feed layout differs from the run's (`resume_fields`; the root is
+recorded only when a feed is enabled). The data root's filesystem must support hard links (ext4, APFS do).
 
 ## Validation (`ecomgen validate`)
 
-For runs that publish feeds, after the database checks: `files_match_ledger` (exists, size, sha256, record count),
-`manifest_matches_ledger`, `settlements_match_payments`, `settled_payments_settled_once`, `clickstream_ids_exist`,
-`orders_placed_once`, `events_unique_and_complete`. Feed rows are streamed into temporary tables (rolled back), so
-memory stays bounded and the role needs `TEMPORARY` on the database (owners have it).
+For runs that publish feeds, in the same read-only snapshot as the database checks: `files_match_ledger` (exists,
+readable, size, sha256, record count) and `manifest_matches_ledger`; for a published settlement feed
+`settlements_match_payments` and `settled_payments_settled_once`; for a published clickstream
+`clickstream_ids_exist`, `orders_placed_once` and `events_unique_and_complete`. A missing field in a row is a
+violation (NULL-safe comparisons). Feed rows are streamed into temporary tables (created just before the snapshot,
+dropped after), so memory stays bounded and the role needs `TEMPORARY` on the database (owners have it).
 
 ## Not yet
 

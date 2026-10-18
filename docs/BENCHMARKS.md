@@ -73,6 +73,14 @@ server's time zone and collation: it changed under `America/New_York` and `C`). 
 same 10k database, which still matched the old reference under the old method. PG 18 snapshot diff (superuser,
 read-only): only `ecomgen_app`, its three databases' ACLs and their sizes/counters.
 
+## File feeds (Phase 2, macOS dev, 2026-10-18, `feat/file-feeds`)
+
+10k config (`clickstream_events: 100000`), throwaway database, data root on the laptop SSD: `generate` 5.72 s wall
+(3.84 + 0.27 s CPU; database part ~2 s as before), peak RSS 66 MB; 120 files, 31 MB: 8,295 settlement rows and
+110,000 clickstream events (100,000 browsing + 10,000 `order_placed`); `validate` 19/19 in 1.78 s; repeat `resume` a
+no-op (0.15 s). A bounded entity cache took feed writing from 8.8 s to 2.6 s with byte-identical output (golden test);
+per-directory fsyncs added ~0.8 s.
+
 ## Not yet measured
 
 - Larger profiles (practice 100k, advanced 1M) and `workers: 2`.

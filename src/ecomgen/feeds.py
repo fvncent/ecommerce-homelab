@@ -9,8 +9,10 @@ Rows within a file follow generation order, not event time. Files roll over at f
 
 Publishing (DB and filesystem writes are not atomic together, so this converges instead):
 1. Every file of the run is regenerated into `staging/{run}/` (our own incomplete output, cleared first).
-2. Each staged file is fsynced and renamed into place on the same filesystem, then recorded in
-   {meta}.published_files; the run manifest (`manifests/run_id={run}/manifest.json`) goes last.
+2. Each staged file is fsynced and hard-linked into place on the same filesystem (a link fails instead of replacing
+   a file that appeared meanwhile), its directory chain fsynced, then recorded in {meta}.published_files; the run
+   manifest (`manifests/run_id={run}/manifest.json`) goes last. Once the manifest is recorded, a repeat only
+   verifies checksums.
 3. A published file is never overwritten. On resume, a recorded file must still match its checksum, and an
    unrecorded file already at a target path (crash between rename and ledger insert) is adopted only if its bytes
    equal the regenerated ones. Anything else stops the run for a human to reconcile.
@@ -25,7 +27,7 @@ import os
 import re
 import shutil
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -147,7 +149,6 @@ class _Writer:
     """Appends records to date-partitioned files under staging, rolling over at max_bytes. Only per-file stats are
     kept in memory; rows are flushed per call, so memory is bounded by the caller's chunk."""
     staging: Path
-    run_id: str
     max_bytes: int
     files: dict[str, FileStat] = field(default_factory=dict)
     _part: dict[str, tuple[int, int]] = field(default_factory=dict)  # base -> (part number, bytes in it)
@@ -202,7 +203,7 @@ def enabled(cfg: Config) -> list[str]:
 def write_staged(world: generate.World, cfg: Config, run_id: str, staging: Path) -> dict[str, FileStat]:
     """Write every enabled feed of the run into staging; return per-file stats keyed by relative path."""
     feeds = enabled(cfg)
-    w = _Writer(staging, run_id, cfg.filesystem.max_file_size_mb * 1024 * 1024)
+    w = _Writer(staging, cfg.filesystem.max_file_size_mb * 1024 * 1024)
     rows = cfg.generator.chunk_rows
     header = _csv_line(list(SETTLEMENT_COLUMNS))
     for chunk_no in range(generate.chunk_count(world, "orders", rows)):
@@ -272,6 +273,26 @@ def _durable(path: Path) -> None:
         os.fsync(f.fileno())
 
 
+def _mkdirs(root: Path, d: Path) -> None:
+    """mkdir -p under root, fsyncing the parent of each new directory, so a new partition survives a power cut."""
+    missing = []
+    while not d.exists():
+        missing.append(d)
+        d = d.parent
+    for m in reversed(missing):
+        m.mkdir(exist_ok=True)
+        _fsync_dir(m.parent)
+
+
+def _sync_up(root: Path, d: Path) -> None:
+    """fsync d and every directory above it up to root (used when we can't know which entries are new)."""
+    while True:
+        _fsync_dir(d)
+        if d == root:
+            return
+        d = d.parent
+
+
 def _ledger(conn: psycopg.Connection, cfg: Config, run_id: str) -> dict[str, tuple[str, int, str]]:
     rows = conn.execute(db.q(cfg, "SELECT rel_path, sha256, bytes, feed FROM {meta}.published_files"
                                   " WHERE run_id = %s"), (run_id,)).fetchall()
@@ -292,12 +313,19 @@ def _place(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path, rel: 
     if final.exists():
         if not final.is_file() or sha256_of(final) != sha:
             raise FeedError(f"{final} already exists with other content; refusing to overwrite it")
-        newly = False  # crash between rename and ledger insert: same bytes, adopt it
+        # crash between placing and recording it: same bytes, adopt it, after making sure it is durable
+        _durable(final)
+        _sync_up(root, final.parent)
+        newly = False
     else:
         _durable(staged)
-        final.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(staged, final)
+        _mkdirs(root, final.parent)
+        try:
+            os.link(staged, final)  # unlike rename, fails if a file appeared at final meanwhile
+        except FileExistsError:
+            raise FeedError(f"{final} appeared while publishing; refusing to overwrite it") from None
         _fsync_dir(final.parent)
+        staged.unlink()
         newly = True
     conn.execute(db.q(cfg, "INSERT INTO {meta}.published_files (run_id, rel_path, feed, format, schema_version,"
                            " records, bytes, sha256, start_event_time, end_event_time)"
@@ -320,7 +348,7 @@ def manifest(conn: psycopg.Connection, cfg: Config, run_id: str) -> dict[str, ob
             {"source_system": SOURCE_SYSTEMS[f[1]], "feed": f[1], "file_path": f[0], "format": f[2],
              "schema_version": f[3], "start_event_time": ts(f[4]) if f[4] else None,
              "end_event_time": ts(f[5]) if f[5] else None, "records_written": f[6], "bytes": f[7], "sha256": f[8],
-             "anomaly_count": 0, "published_at": f[9].astimezone(UTC).isoformat()} for f in files],
+             "anomaly_count": 0, "published_at": ts(f[9])} for f in files],
     }
 
 
@@ -341,8 +369,10 @@ def publish(conn: psycopg.Connection, cfg: Config, run_id: str, world: generate.
     staging = root / "staging" / run_id
     if staging.exists():
         shutil.rmtree(staging)  # only ever our own unpublished output for this run
-    stats = write_staged(world, cfg, run_id, staging)
     ledger = _ledger(conn, cfg, run_id)
+    if manifest_path(run_id) in ledger:  # everything was published (crash before COMPLETED): only verify
+        return _verified(conn, cfg, run_id, root, ledger)
+    stats = write_staged(world, cfg, run_id, staging)
     unknown = set(ledger) - set(stats) - {manifest_path(run_id)}
     if unknown:
         raise FeedError(f"ledger records files this run would not produce: {sorted(unknown)[:3]}")
@@ -356,10 +386,26 @@ def publish(conn: psycopg.Connection, cfg: Config, run_id: str, world: generate.
     newly += _place(conn, cfg, run_id, root, rel, path, FileStat("manifest", "json", len(files)),
                     _ledger(conn, cfg, run_id))
     shutil.rmtree(staging)
-    records: dict[str, int] = {}
-    for st in stats.values():
-        records[st.feed] = records.get(st.feed, 0) + st.records
-    return Published(len(stats) + 1, newly, records)
+    return replace(_verified(conn, cfg, run_id, root, _ledger(conn, cfg, run_id), check=False),
+                   newly_published=newly)
+
+
+def _verified(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path,
+              ledger: dict[str, tuple[str, int, str]], check: bool = True) -> Published:
+    """Published counts from the ledger. With check: every recorded file still matches its checksum, and the
+    published manifest lists exactly the recorded feed files."""
+    for rel, (sha, _, _) in sorted(ledger.items()):
+        if check and (not (root / rel).is_file() or sha256_of(root / rel) != sha):
+            raise FeedError(f"published file {root / rel} is missing or changed since it was recorded; reconcile "
+                            "by hand")
+    if check:
+        doc = json.loads((root / manifest_path(run_id)).read_text(encoding="utf-8"))
+        if {f["file_path"] for f in doc["files"]} != set(ledger) - {manifest_path(run_id)}:
+            raise FeedError(f"ledger and manifest of {run_id} list different files; reconcile by hand")
+    rows = conn.execute(db.q(cfg, "SELECT feed, sum(records)::bigint FROM {meta}.published_files"
+                                  " WHERE run_id = %s AND feed <> 'manifest' GROUP BY 1 ORDER BY 1"),
+                        (run_id,)).fetchall()
+    return Published(len(ledger), 0, {str(k): int(v) for k, v in rows})
 
 
 def iter_records(path: Path, fmt: str) -> Iterator[dict[str, object]]:

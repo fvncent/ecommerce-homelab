@@ -11,7 +11,6 @@ from ecomgen import __version__, config, db, feeds, generate, load, validate
 def _connect_cfg(path: str) -> tuple[config.Config, str] | int:
     try:
         cfg = config.load(path)
-        config.data_root(cfg)  # validates ECOMGEN_DATA_ROOT
         return cfg, config.database_url(cfg)
     except config.ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
@@ -66,11 +65,15 @@ def generate_cmd(path: str, profile: str | None) -> int:
     try:
         with psycopg.connect(url, autocommit=True) as conn:
             result = load.run(conn, cfg, profile)
+    except config.ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 2
     except (load.LoadError, generate.GenerationError, feeds.FeedError) as e:
         print(f"generate error: {e}", file=sys.stderr)
         return 1
     except OSError as e:
-        print(f"file error: {e}; the run is FAILED, fix the cause and run `ecomgen resume`", file=sys.stderr)
+        print(f"file error: {e}; if a run was started it is now FAILED (see `ecomgen status`): fix the cause and "
+              "run `ecomgen resume`", file=sys.stderr)
         return 1
     except psycopg.Error as e:
         print(f"database error: {type(e).__name__}: {e}".rstrip(), file=sys.stderr)
@@ -99,7 +102,7 @@ def validate_cmd(path: str, run_id: str | None) -> int:
     try:
         with psycopg.connect(url, autocommit=True) as conn:
             run_id, results = validate.validate(conn, cfg, run_id)
-    except (validate.ValidateError, db.RunLookupError) as e:
+    except (validate.ValidateError, db.RunLookupError, OSError) as e:
         print(f"validate error: {e}", file=sys.stderr)
         return 3
     except psycopg.Error as e:
@@ -160,6 +163,9 @@ def resume_cmd(path: str, run_id: str | None) -> int:
     try:
         with psycopg.connect(url, autocommit=True) as conn:
             result = load.resume(conn, cfg, run_id)
+    except config.ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 2
     except db.RunLookupError as e:
         print(f"resume error: {e}", file=sys.stderr)
         return 3

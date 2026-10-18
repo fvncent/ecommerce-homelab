@@ -133,6 +133,11 @@ def test_never_overwrites(published: psycopg.Connection, small_cfg: config.Confi
     victim.write_bytes(original)
     rel = str(victim.relative_to(data_root))
     published.execute("DELETE FROM generator_meta.published_files WHERE rel_path = %s", (rel,))
+    with pytest.raises(feeds.FeedError, match="ledger and manifest .* list different files"):
+        feeds.publish(published, small_cfg, run_id, world, data_root)  # manifest recorded: verify-only path
+    mrel = feeds.manifest_path(run_id)
+    published.execute("DELETE FROM generator_meta.published_files WHERE rel_path = %s", (mrel,))
+    (data_root / mrel).unlink()
     victim.write_bytes(b"someone else's file\n")  # an unrecorded file in the way
     with pytest.raises(feeds.FeedError, match="refusing to overwrite"):
         feeds.publish(published, small_cfg, run_id, world, data_root)
@@ -198,6 +203,63 @@ def test_missing_data_root_refused_before_any_write(migrated: Migrated, small_cf
     with pytest.raises(load.LoadError, match="does not exist"):
         load.run(c, small_cfg, "smoke")
     assert c.execute("SELECT count(*) FROM generator_meta.generation_runs").fetchone() == (0,)
+
+
+@pytest.mark.parametrize(("csv", "jsonl"), [(True, False), (False, True)])
+def test_single_feed_runs_validate_clean(migrated: Migrated, small_cfg: config.Config, data_root: Path, csv: bool,
+                                         jsonl: bool) -> None:
+    one = replace(small_cfg, filesystem=replace(small_cfg.filesystem, csv=csv, jsonl=jsonl))
+    c = migrated(one)
+    assert set(load.run(c, one, "smoke").files.records) == set(feeds.enabled(one))
+    results = validate.validate(c, one)[1]
+    assert [r.check.name for r in results if not r.ok] == []
+    names = {r.check.name for r in results}
+    assert ("settlements_match_payments" in names) == csv and ("orders_placed_once" in names) == jsonl
+
+
+def test_missing_fields_and_unreadable_files_are_violations(published: psycopg.Connection, small_cfg: config.Config,
+                                                            data_root: Path) -> None:
+    rel = _first(data_root, ".csv")
+    _rewrite(published, data_root, rel, lambda ls: ls[:-1] + [",".join(ls[-1].split(",")[:4]) + "\n"])
+    assert "settlements_match_payments" in failing(published, small_cfg)  # NULL fee/net/settled_at are not a pass
+    other = data_root / _first(data_root, ".jsonl")
+    other.chmod(0)
+    try:
+        bad = {r.check.name: r for r in validate.validate(published, small_cfg)[1] if not r.ok}
+        assert any("unreadable" in s for s in bad["files_match_ledger"].samples)
+    finally:
+        other.chmod(0o644)
+
+
+def test_file_appearing_before_placement_is_not_overwritten(migrated: Migrated, small_cfg: config.Config,
+                                                            data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    c = migrated(small_cfg)
+    real_link = os.link
+
+    def racing_link(src: str, dst: str) -> None:  # someone writes the target between the check and the link
+        Path(dst).write_bytes(b"restored by hand\n")
+        real_link(src, dst)
+    monkeypatch.setattr(os, "link", racing_link)
+    with pytest.raises(feeds.FeedError, match="appeared while publishing"):
+        load.run(c, small_cfg, "smoke")
+    victim = next(p for p in data_root.rglob("*-part-00000.*") if "staging" not in p.parts)
+    assert victim.read_bytes() == b"restored by hand\n"
+
+
+def test_feeds_off_runs_ignore_the_data_root(migrated: Migrated, small_cfg: config.Config, tmp_path: Path,
+                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    off = replace(small_cfg, filesystem=replace(small_cfg.filesystem, csv=False, jsonl=False))
+    c = migrated(off)
+    real = load.write_chunks
+
+    def boom(*args: object, **kwargs: object) -> tuple[int, int]:
+        raise OSError("simulated")
+    monkeypatch.setattr(load, "write_chunks", boom)
+    with pytest.raises(OSError):
+        load.run(c, off, "smoke")
+    monkeypatch.setattr(load, "write_chunks", real)
+    monkeypatch.setenv("ECOMGEN_DATA_ROOT", str(tmp_path / "anywhere-else"))
+    assert load.resume(c, off) is not None
 
 
 def test_feeds_disabled_publishes_nothing(migrated: Migrated, small_cfg: config.Config, data_root: Path) -> None:
@@ -267,4 +329,5 @@ def test_cli_generate_reports_files(db_url: str, monkeypatch: pytest.MonkeyPatch
     out = capsys.readouterr().out
     assert "newly published" in out and "clickstream=11000" in out
     monkeypatch.setenv("ECOMGEN_DATA_ROOT", "relative/path")
-    assert main(["validate", str(EXAMPLE)]) == 2
+    assert main(["generate", str(EXAMPLE)]) == 2  # config error, before any run or file
+    assert main(["status", str(EXAMPLE)]) == 0  # commands that write nothing don't care

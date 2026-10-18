@@ -82,7 +82,7 @@ def resume_fields(cfg: Config, world: generate.World) -> dict[str, object]:
         "data_version": generate.DATA_VERSION,
         "world": {f.name: getattr(world, f.name) for f in dataclasses.fields(world)},
         "chunk_rows": cfg.generator.chunk_rows, "application_schema": cfg.postgres.application_schema,
-        "data_root": str(config.data_root(cfg)),
+        "data_root": str(config.data_root(cfg)) if feeds.enabled(cfg) else None,  # nothing written there otherwise
         "feeds": {"enabled": feeds.enabled(cfg), "max_file_size_mb": cfg.filesystem.max_file_size_mb},
     }
     normalized: dict[str, object] = json.loads(json.dumps(fields, default=datetime.isoformat))
@@ -235,7 +235,10 @@ def _resume_mismatch(recorded: dict[str, object] | None, cfg: Config) -> list[st
     """Names of RESUME_MUST_MATCH fields that differ between the run's record and this config/generator."""
     if recorded is None:
         return ["resume fields (run predates migration 0003)"]
-    current = resume_fields(cfg, generate.World.from_config(cfg))
+    try:
+        current = resume_fields(cfg, generate.World.from_config(cfg))
+    except config.ConfigError as e:  # e.g. an invalid ECOMGEN_DATA_ROOT: report it, don't crash status
+        return [f"data_root ({e})"]
     return [k for k in RESUME_MUST_MATCH if recorded.get(k) != current[k]]
 
 

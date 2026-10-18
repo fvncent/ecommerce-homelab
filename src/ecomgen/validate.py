@@ -4,11 +4,12 @@ Each check is a query returning one `id` per violation; only the count and a few
 Scope: the application schema holds exactly one run's data (generate refuses a second run), so data checks
 cover every row there; only the ledger checks are scoped to the run. Revisit when resume/increments add runs.
 
-File checks (runs that publish feeds): every recorded file is intact and listed in the manifest, and the feeds
-agree with PostgreSQL both ways (the Phase 2 gate). Feed rows are streamed into temporary tables, checked with
-the same id-per-violation queries, and rolled back.
+File checks (runs that publish feeds): every recorded file is intact and listed in the manifest, and each
+published feed agrees with PostgreSQL both ways (the Phase 2 gate). Feed rows are streamed into temporary tables
+inside the same snapshot as the database checks, checked with the same id-per-violation queries, then dropped.
 """
 
+import csv
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -129,19 +130,29 @@ CHECKS = LEDGER_CHECKS + DATA_CHECKS
 FILES_INTACT = Check("files_match_ledger", "every recorded file exists with its recorded size, checksum and records",
                      "")
 MANIFEST_MATCHES = Check("manifest_matches_ledger", "the run manifest lists exactly the recorded feed files", "")
-# Queries over pg_temp.feed_settlements / pg_temp.feed_events, loaded from the run's files.
-FEED_CHECKS = (
+# Queries over pg_temp.feed_settlements / pg_temp.feed_events, loaded from the run's files; each group runs only if
+# the run published that feed. Comparisons are NULL-safe: a field missing from a row is a violation.
+TEMP_TABLES = {
+    "feed_settlements": "settlement_id text, payment_id text, order_id text, currency text, gross numeric,"
+                        " fee numeric, net numeric, settled_at timestamptz",
+    "feed_events": "event_id text, event_type text, customer_id text, product_id text, order_id text",
+}
+SETTLEMENT_CHECKS = (
     Check("settlements_match_payments", "each settlement row is a SETTLED payment with the same order, amount, "
-          "currency and time; fee >= 0 and fee + net = gross", """
-        SELECT s.settlement_id AS id FROM pg_temp.feed_settlements s
-        LEFT JOIN {app}.payment_attempts p USING (payment_id)
-        WHERE p.payment_id IS NULL OR p.state <> 'SETTLED' OR p.order_id <> s.order_id OR p.amount <> s.gross
-           OR p.currency <> s.currency OR p.updated_at <> s.settled_at OR s.fee < 0 OR s.fee + s.net <> s.gross"""),
+          "currency and time; fee >= 0 and fee + net = gross; no field missing", """
+        SELECT coalesce(s.settlement_id, '(no settlement_id) ' || coalesce(s.payment_id, '?')) AS id
+        FROM pg_temp.feed_settlements s LEFT JOIN {app}.payment_attempts p USING (payment_id)
+        WHERE p.payment_id IS NULL OR p.state <> 'SETTLED' OR s.settlement_id IS NULL
+           OR (p.order_id, p.amount, p.currency, p.updated_at)
+              IS DISTINCT FROM (s.order_id, s.gross, s.currency, s.settled_at)
+           OR s.fee IS NULL OR s.net IS NULL OR s.fee < 0 OR s.fee + s.net <> s.gross"""),
     Check("settled_payments_settled_once", "every SETTLED payment has exactly one settlement row", """
         SELECT p.payment_id AS id FROM {app}.payment_attempts p
         LEFT JOIN (SELECT payment_id, count(*) n FROM pg_temp.feed_settlements GROUP BY 1) s USING (payment_id)
         WHERE p.state = 'SETTLED' AND coalesce(s.n, 0) <> 1
         UNION ALL SELECT settlement_id FROM pg_temp.feed_settlements GROUP BY 1 HAVING count(*) > 1"""),
+)
+CLICKSTREAM_CHECKS = (
     Check("clickstream_ids_exist", "customer, product and order IDs in events exist (an order with its customer)", """
         SELECT e.event_id AS id FROM pg_temp.feed_events e
         WHERE (e.customer_id IS NOT NULL
@@ -155,11 +166,15 @@ FEED_CHECKS = (
         LEFT JOIN (SELECT order_id, count(*) n FROM pg_temp.feed_events WHERE event_type = 'order_placed'
                    GROUP BY 1) e USING (order_id)
         WHERE coalesce(e.n, 0) <> 1"""),
-    Check("events_unique_and_complete", "event IDs are unique; browsing events = the run's clickstream_events", """
-        SELECT event_id AS id FROM pg_temp.feed_events GROUP BY 1 HAVING count(*) > 1
+    Check("events_unique_and_complete", "event IDs are unique, every event has an ID and type (order_placed: an "
+          "order); browsing events = the run's clickstream_events", """
+        SELECT event_id AS id FROM pg_temp.feed_events WHERE event_id IS NOT NULL GROUP BY 1 HAVING count(*) > 1
+        UNION ALL SELECT 'malformed event ' || coalesce(event_id, '(no event_id)') FROM pg_temp.feed_events
+        WHERE event_id IS NULL OR event_type IS NULL OR (event_type = 'order_placed' AND order_id IS NULL)
         UNION ALL SELECT 'browsing events: ' || count(*) || ', expected ' || %(browse)s
         FROM pg_temp.feed_events WHERE event_type <> 'order_placed' HAVING count(*) <> %(browse)s"""),
 )
+FEED_CHECKS = SETTLEMENT_CHECKS + CLICKSTREAM_CHECKS
 
 
 def _run_check(conn: psycopg.Connection, cfg: Config, check: Check, run_id: str,
@@ -178,81 +193,98 @@ def _run_check(conn: psycopg.Connection, cfg: Config, check: Check, run_id: str,
 
 
 def validate(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -> tuple[str, list[Result]]:
-    """Run every check in one read-only snapshot. Returns (run_id, results)."""
+    """Run every check, file checks included, in one read-only snapshot. Returns (run_id, results)."""
     if conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
         raise ValidateError("validate needs a connection with no open transaction (it sets its own snapshot)")
+    # Temp tables can't be created in a read-only transaction, but can be filled there: create them first.
     with conn.transaction():
-        conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        run_id = db.resolve_run(conn, cfg, run_id)
-        results = [_run_check(conn, cfg, c, run_id) for c in CHECKS]
-        recorded = conn.execute(db.q(cfg, "SELECT resume_fields FROM {meta}.generation_runs WHERE run_id = %s"),
-                                (run_id,)).fetchone()
-    published = (recorded[0] or {}).get("feeds", {}).get("enabled") if recorded else None
-    if published:  # runs from before file feeds (or with feeds disabled) publish nothing to check
-        results += _file_results(conn, cfg, run_id, Path(recorded[0]["data_root"]),  # type: ignore[index]
-                                 int(recorded[0]["world"]["clickstream_events"]))  # type: ignore[index]
-    return run_id, results
+        for name, cols in TEMP_TABLES.items():
+            conn.execute(f"DROP TABLE IF EXISTS pg_temp.{name}")
+            conn.execute(f"CREATE TEMP TABLE {name} ({cols})")
+    try:
+        with conn.transaction():
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            run_id = db.resolve_run(conn, cfg, run_id)
+            results = [_run_check(conn, cfg, c, run_id) for c in CHECKS]
+            row = conn.execute(db.q(cfg, "SELECT resume_fields FROM {meta}.generation_runs WHERE run_id = %s"),
+                               (run_id,)).fetchone()
+            recorded = row[0] if row and isinstance(row[0], dict) else {}
+            published = recorded.get("feeds", {}).get("enabled") or []
+            if published:  # runs from before file feeds (or with feeds disabled) publish nothing to check
+                results += _file_results(conn, cfg, run_id, Path(recorded["data_root"]), published,
+                                         int(recorded["world"]["clickstream_events"]))
+            return run_id, results
+    finally:
+        if conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE:
+            with conn.transaction():
+                for name in TEMP_TABLES:
+                    conn.execute(f"DROP TABLE IF EXISTS pg_temp.{name}")
 
 
 def _sample(bad: list[str]) -> list[str]:
     return sorted(bad, key=lambda s: (len(s), s))[:SAMPLE]
 
 
-def _file_results(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path, browse: int) -> list[Result]:
-    """Check the run's files against the ledger and manifest, then load them into temp tables (rolled back) and
-    check them against PostgreSQL. Memory: one record at a time."""
-    with conn.transaction(force_rollback=True):
-        ledger = conn.execute(db.q(cfg, "SELECT rel_path, feed, format, records, bytes, sha256"
-                                        " FROM {meta}.published_files WHERE run_id = %s ORDER BY rel_path"),
-                              (run_id,)).fetchall()
-        broken: list[str] = []
-        intact = []
-        for rel, feed, fmt, records, size, sha in ledger:
-            path = root / rel
+def _file_results(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path, published: list[str],
+                  browse: int) -> list[Result]:
+    """Check the run's files against the ledger and manifest, load the intact ones into the temp tables, and
+    check the published feeds against PostgreSQL. Memory: one record at a time."""
+    ledger = conn.execute(db.q(cfg, "SELECT rel_path, feed, format, records, bytes, sha256"
+                                    " FROM {meta}.published_files WHERE run_id = %s ORDER BY rel_path"),
+                          (run_id,)).fetchall()
+    broken: list[str] = []
+    intact = []
+    for rel, feed, fmt, records, size, sha in ledger:
+        path = root / rel
+        try:
             if not path.is_file():
                 broken.append(f"{rel}: missing")
             elif path.stat().st_size != size or feeds.sha256_of(path) != sha:
                 broken.append(f"{rel}: size or checksum differs from the ledger")
             else:
                 intact.append((rel, feed, fmt, records, path))
-        mrel = feeds.manifest_path(run_id)
-        expected = {(r[0], r[5]) for r in ledger if r[1] != "manifest"}
-        try:
-            doc = json.loads((root / mrel).read_text(encoding="utf-8"))
-            listed = {(f["file_path"], f["sha256"]) for f in doc["files"]}
-            manifest_bad = sorted(f"{p} ({'unlisted' if (p, s) in expected else 'not in ledger'})"
-                                  for p, s in listed ^ expected)
-            if doc.get("run_id") != run_id:
-                manifest_bad.append(f"manifest run_id {doc.get('run_id')!r}")
-        except (OSError, ValueError, KeyError, TypeError) as e:
-            manifest_bad = [f"{mrel}: unreadable ({type(e).__name__})"]
-        conn.execute("CREATE TEMP TABLE feed_settlements (settlement_id text, payment_id text, order_id text,"
-                     " currency text, gross numeric, fee numeric, net numeric, settled_at timestamptz)")
-        conn.execute("CREATE TEMP TABLE feed_events (event_id text, event_type text, customer_id text,"
-                     " product_id text, order_id text)")
-        for rel, feed, fmt, records, path in intact:
-            if feed == "manifest":
-                continue
-            n = 0
-            target = "feed_settlements" if feed == "payment_settlement" else "feed_events"
-            try:  # a savepoint per file: a bad record aborts only this file's COPY
-                with conn.transaction(), conn.cursor() as cur, \
-                        cur.copy(sql.SQL("COPY pg_temp.{} FROM STDIN").format(sql.Identifier(target))) as copy:
-                    for r in feeds.iter_records(path, fmt):
-                        n += 1
-                        if feed == "payment_settlement":
-                            copy.write_row((r["settlement_id"], r["payment_id"], r["order_id"], r["currency"],
-                                            r["gross_amount"], r["fee_amount"], r["net_amount"], r["settled_at"]))
-                        else:
-                            payload = r.get("payload")
-                            order_id = payload.get("order_id") if isinstance(payload, dict) else None
-                            copy.write_row((r["event_id"], r["event_type"], r["customer_id"], r["product_id"],
-                                            order_id))
-            except (ValueError, KeyError, TypeError, psycopg.DataError) as e:
-                broken.append(f"{rel}: unparseable record {n} ({type(e).__name__})")
-                continue
-            if n != records:
-                broken.append(f"{rel}: {n} records, ledger says {records}")
-        results = [Result(FILES_INTACT, len(broken), _sample(broken)),
-                   Result(MANIFEST_MATCHES, len(manifest_bad), _sample(manifest_bad))]
-        return results + [_run_check(conn, cfg, c, run_id, {"browse": browse}) for c in FEED_CHECKS]
+        except OSError as e:
+            broken.append(f"{rel}: unreadable ({type(e).__name__})")
+    mrel = feeds.manifest_path(run_id)
+    expected = {(r[0], r[5]) for r in ledger if r[1] != "manifest"}
+    try:
+        doc = json.loads((root / mrel).read_text(encoding="utf-8"))
+        listed = {(f["file_path"], f["sha256"]) for f in doc["files"]}
+        manifest_bad = sorted(f"{p} ({'unlisted' if (p, s) in expected else 'not in ledger'})"
+                              for p, s in listed ^ expected)
+        if doc.get("run_id") != run_id:
+            manifest_bad.append(f"manifest run_id {doc.get('run_id')!r}")
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        manifest_bad = [f"{mrel}: unreadable ({type(e).__name__})"]
+    for rel, feed, fmt, records, path in intact:
+        if feed == "manifest":
+            continue
+        n = 0
+        target = "feed_settlements" if feed == "payment_settlement" else "feed_events"
+        try:  # a savepoint per file: a bad record aborts only this file's COPY
+            with conn.transaction(), conn.cursor() as cur, \
+                    cur.copy(sql.SQL("COPY pg_temp.{} FROM STDIN").format(sql.Identifier(target))) as copy:
+                for r in feeds.iter_records(path, fmt):
+                    n += 1
+                    if feed == "payment_settlement":
+                        copy.write_row(tuple(r[k] for k in ("settlement_id", "payment_id", "order_id", "currency",
+                                                            "gross_amount", "fee_amount", "net_amount",
+                                                            "settled_at")))
+                    else:
+                        payload = r.get("payload")
+                        order_id = payload.get("order_id") if isinstance(payload, dict) else None
+                        copy.write_row((r["event_id"], r["event_type"], r["customer_id"], r["product_id"],
+                                        order_id))
+        except (ValueError, KeyError, TypeError, AttributeError, csv.Error, psycopg.DataError) as e:
+            broken.append(f"{rel}: unparseable record {n} ({type(e).__name__})")
+            continue
+        except OSError as e:
+            broken.append(f"{rel}: unreadable ({type(e).__name__})")
+            continue
+        if n != records:
+            broken.append(f"{rel}: {n} records, ledger says {records}")
+    results = [Result(FILES_INTACT, len(broken), _sample(broken)),
+               Result(MANIFEST_MATCHES, len(manifest_bad), _sample(manifest_bad))]
+    checks = (SETTLEMENT_CHECKS if "payment_settlement" in published else ()) + (
+        CLICKSTREAM_CHECKS if "clickstream" in published else ())
+    return results + [_run_check(conn, cfg, c, run_id, {"browse": browse}) for c in checks]
