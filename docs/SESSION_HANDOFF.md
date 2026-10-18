@@ -3,7 +3,8 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-18
-**Branch:** `feat/file-feeds` (from `main` `d3ff25a`; PRs #13 + #14 merged, CI green on main). Not pushed yet.
+**Branch:** `feat/file-feeds` (from `main` `d3ff25a`), **PR #15**: CI green (184 passed, 0 skipped on PG 17.11 and 18.6;
+the feed golden test passes on Linux too, so files are byte-identical across platforms).
 **Deployed on Ubuntu:** `v0.1.1-homelab` (`8c581ad`), verified 2026-10-18 (`docs/BENCHMARKS.md`). The new code needs
 `ECOMGEN_DATA_ROOT` there (part 2 updates the benchmark).
 
@@ -101,6 +102,6 @@ Update before compaction or ending a significant session. Overwrite; git history
 - Phase 2 file feeds not implemented: `data/` stays empty; `filesystem.root` default still `/srv/ecommerce-data`.
 
 ## Next step
-User approves push + PR of `feat/file-feeds` → CI green → merge → Phase 2 part 2 (replay-files, retention,
+User merges PR #15 → Phase 2 part 2 (replay-files, retention,
 benchmark + Ubuntu re-run with `ECOMGEN_DATA_ROOT=/srv/homelab/ecommerce/data`, new tag). Mac dev `.env` needs
 `ECOMGEN_DATA_ROOT` pointing at an existing directory before `generate` against `ecommerce_oltp`-style DBs.

@@ -1,7 +1,7 @@
 # Tasks
 
 ## Active
-- [ ] PR `feat/file-feeds` (Phase 2, part 1): settlement CSV + clickstream JSONL, staged publish + ledger + manifest, resume, validate gate (`docs/FEEDS.md`); reviewed, 10 findings fixed; awaiting push approval
+- [ ] PR `feat/file-feeds` (Phase 2, part 1): settlement CSV + clickstream JSONL, staged publish + ledger + manifest, resume, validate gate (`docs/FEEDS.md`); reviewed, 10 findings fixed; PR #15, CI green (184 passed, 0 skipped on PG 17 + 18; feed golden identical on Linux); awaiting merge
 - [ ] Phase 2, part 2: `replay-files --from --to` (deterministic filenames), retention/cleanup policy (explicit command only), benchmark script + Ubuntu re-run with files (`ECOMGEN_DATA_ROOT=/srv/homelab/ecommerce/data`), record in `docs/BENCHMARKS.md`
 - [ ] Later in Phase 2/3: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 
