@@ -101,6 +101,13 @@ def has_table(conn: psycopg.Connection, cfg: Config, table: str) -> bool:
     return conn.execute("SELECT to_regclass(%s) IS NOT NULL", (name,)).fetchone() == (True,)
 
 
+def has_column(conn: psycopg.Connection, cfg: Config, table: str, column: str) -> bool:
+    """True if the metadata schema's table has this column (e.g. one added by a later migration)."""
+    name = sql.SQL("{}.{}").format(sql.Identifier(cfg.postgres.metadata_schema), sql.Identifier(table)).as_string(conn)
+    return conn.execute("SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass(%s)"
+                        " AND attname = %s AND NOT attisdropped)", (name, column)).fetchone() == (True,)
+
+
 def has_ledger(conn: psycopg.Connection, cfg: Config) -> bool:
     """True once init-db has created the run ledger."""
     return has_table(conn, cfg, "generation_runs")
