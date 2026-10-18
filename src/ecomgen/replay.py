@@ -31,6 +31,7 @@ from ecomgen.config import Config
 REPLAY_VERSION = 1  # bump if the schedule or layout changes: it is part of the replay id
 FEED_DIRS = {"payment_settlement": "source_feeds/payment_settlement/", "clickstream": "clickstream/"}
 MAX_HOURS = 24 * 3650  # ten years: keeps every arrival time representable
+REPLAY_ID = re.compile(r"rpl_[0-9a-f]{12}")
 _PARTITION = re.compile(r"^[a-z_/]+/date=(\d{4}-\d{2}-\d{2})/[^/]+$")
 
 
@@ -154,6 +155,9 @@ def _originals(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path,
     if not mpath.is_file() or feeds.sha256_of(mpath) != row[0]:
         raise ReplayError(f"manifest {mpath} is missing or differs from its recorded checksum")
     doc = json.loads(mpath.read_text(encoding="utf-8"))
+    cleaned: dict[str, str] = {r[0]: r[1] for r in conn.execute(db.q(
+        cfg, "SELECT rel_path, deleted_by FROM {meta}.published_files WHERE run_id = %s AND deleted_by IS NOT NULL"),
+        (run_id,))} if db.has_table(conn, cfg, "cleanups") else {}  # before migration 0007 nothing was cleaned
     out, problems = [], []
     for f in doc["files"]:
         if f["feed"] not in params.feeds:
@@ -171,7 +175,9 @@ def _originals(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path,
             continue
         if not params.start <= day <= params.end:
             continue
-        if not path.is_file():
+        if rel in cleaned:
+            problems.append(f"{rel}: deleted by cleanup {cleaned[rel]}")
+        elif not path.is_file():
             problems.append(f"{f['file_path']}: missing")
         elif path.stat().st_size != f["bytes"] or feeds.sha256_of(path) != f["sha256"]:
             problems.append(f"{f['file_path']}: differs from the manifest")
@@ -218,6 +224,12 @@ def replay(conn: psycopg.Connection, cfg: Config, params: Params, run_id: str | 
             cfg, "SELECT delivered_path, sha256 FROM {meta}.file_deliveries WHERE replay_id = %s"), (rid,))}
         mrel = delivery_manifest_path(rid)
         if mrel in done:  # finished earlier: verify the deliveries only (originals may since have been cleaned up)
+            cleaned = conn.execute(db.q(cfg, "SELECT min(deleted_by), count(*) FROM {meta}.file_deliveries"
+                                             " WHERE replay_id = %s AND deleted_by IS NOT NULL"),
+                                   (rid,)).fetchone() if db.has_table(conn, cfg, "cleanups") else None
+            if cleaned and cleaned[1]:
+                raise ReplayError(f"replay {rid}: {cleaned[1]} delivered file(s) were removed by cleanup "
+                                  f"{cleaned[0]}; it can't be verified (replay with other parameters for new copies)")
             for path, sha in sorted(done.items()):
                 feeds.place_file(root, path, root / path, sha, sha)
             n, dups = conn.execute(db.q(cfg, "SELECT count(*), count(*) FILTER (WHERE duplicate)"

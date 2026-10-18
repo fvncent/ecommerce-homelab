@@ -121,7 +121,46 @@ ecomgen replay-files CONFIG --from 2026-01-05 --to 2026-01-08 [--run-id R] [--fe
   exit 3. A verify of a finished replay checks only the deliveries (originals may have been cleaned up since).
   The CLI's "newly delivered" counts files, not the delivery manifest.
 
+## Cleanup (`ecomgen cleanup-files`)
+
+Explicit, reviewed deletion of files the generator produced (code: `src/ecomgen/cleanup.py`):
+
+```bash
+ecomgen cleanup-files CONFIG --replay-id rpl_...          # dry run: candidates, kept files, a token
+ecomgen cleanup-files CONFIG --replay-id rpl_... --delete --confirm <token>
+# targets: --replay-id (a COMPLETED replay's copies) | --run-id (a COMPLETED run's feed files) | --staging
+```
+
+- **Candidates come only from the database**: the target's recorded, not-yet-deleted files (`published_files` /
+  `file_deliveries`), or `staging/<id>` directories of runs, replays or cleanups this database knows. Nothing is found by
+  scanning: unrecorded files (and unknown staging entries) are never deleted. Run manifests, delivery manifests and
+  audit reports are never candidates (the schema also refuses marking a manifest deleted).
+- **Dry run by default.** It inspects every candidate (hashing it); the token is a hash of the target and the exact
+  list (path, checksum, size, already gone). `--delete --confirm TOKEN` rebuilds the list and refuses, with no side
+  effects, unless it matches, so only what was reviewed is deleted. A file whose bytes no longer match its record
+  is not a candidate ("changed since it was recorded: kept"), so it doesn't come back as work every time.
+- **Never follows a symlink:** each file's directory is opened component by component from the data root with
+  `O_NOFOLLOW`, and the file is checked (regular file, recorded checksum, same inode) and unlinked through that
+  descriptor; staging directories are removed with fd-based `rmtree`. Swapping a directory for a link at any moment
+  can't redirect a deletion outside the root (tested). A file changed during the delete is kept (`kept_changed`).
+- **Root guards:** refuses a missing root, `/`, your home directory, a root containing `.git` or `PG_VERSION`, and
+  a run/replay published under another root. Holds the run lock (never overlaps generate/resume/replay).
+- **Ledger rows are never removed**: marked `deleted_at` / `deleted_by` (migration 0007). `validate` reports a
+  cleaned run's files as "deleted by cleanup <id>" (and fails); replay refuses cleaned originals, and a cleaned
+  replay can't be verified (both say so). Copies made by earlier replays are independent of their originals.
+- **Audit:** `audit/cleanup_id=cln_<UTC>_<random>.json`: target, token, data root, deleted files (path, sha256,
+  bytes, ledger, deleted_at), `deleted_bytes`, files already gone (marked, not counted as deleted), staging dirs
+  removed, files kept because they changed. Built only from the database and placed without overwriting.
+- **Crash-safe:** cleanups row (RUNNING, with its data root) first; per item delete → fsync dir → one transaction
+  marking its ledger row and recording it in the cleanup's details; then audit, COMPLETED. After an interruption,
+  the next accepted `--delete` under the same root first finishes earlier cleanups' audits; a new dry run lists
+  what is left, and files unlinked but not yet marked show as "already gone" (tested with a real SIGKILL).
+- Works with databases before migration 0007 for everything else (validate, replay treat nothing as cleaned);
+  cleanup itself then exits 3 asking for `init-db`.
+- Exit codes: 0 dry run or deleted, 1 refused/failed, 2 config/argument error (including an empty id), 3
+  run/replay not found or not migrated. No age-based selection (`--older-than`): left out on purpose (2026-10-18).
+
 ## Not yet
 
-Cleanup/retention command (Phase 2 part 2, next PR), Parquet snapshots, supplier/courier feeds (need warehouses,
+Age-based retention, Parquet snapshots, supplier/courier feeds (need warehouses,
 inventory, shipments), anomaly injection (Phase 4).

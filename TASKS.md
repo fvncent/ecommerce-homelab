@@ -1,8 +1,7 @@
 # Tasks
 
 ## Active
-- [ ] PR A `feat/replay-files`: `replay-files --from --to` (deterministic delays/duplicates, byte-identical copies, delivery manifest, crash-safe, migration 0006); reviewed, 10 findings fixed; awaiting push approval
-- [ ] PR B `cleanup-files`: dry-run default, confirm token, ledger-known files only, root containment + no symlinks, manifests/audit kept, `deleted_at` (migration 0007), validate reports deleted files
+- [ ] PR B `cleanup-files` (branch `feat/cleanup-files`, reviewed, 10 findings fixed, awaiting push approval; no `--older-than` by decision): dry-run default, confirm token, ledger-known files only, root containment + no symlinks, manifests/audit kept, `deleted_at` (migration 0007), validate reports deleted files
 - [ ] PR C: benchmark with files (per-feed throughput, sha256 MB/s, feed digest vs macOS reference, publish-crash + replay-crash), then tag `v0.2.0-homelab`; Ubuntu: user recreates the 3 benchmark DBs by hand (approved 2026-10-18), `ECOMGEN_DATA_ROOT=/srv/homelab/ecommerce/data`; keep `v0.1.1-homelab` until it passes
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 
@@ -16,6 +15,7 @@
 - Clearer error when `metadata_schema` is renamed after apply (currently fails loudly with DuplicateTable)
 
 ## Done
+- [x] PR #16 Phase 2 part 2 A (`replay-files`) merged; `main` `1e8be96` CI green, 216 passed / 0 skipped on PG 17 + 18 (2026-10-18)
 - [x] PR #15 Phase 2 part 1 (file feeds) merged; `main` `5cf4280` CI green, 184 passed / 0 skipped on PG 17 + 18 (2026-10-18)
 - [x] PRs #13 (Ubuntu results) and #14 (CI) merged; `main` CI green (2026-10-18)
 - [x] Phase 0 Ubuntu inspection (user, 2026-10-18): Ryzen 5 5600, ~14 GiB, NVMe 1 TB at `/srv/homelab`, host PG 18
