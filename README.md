@@ -16,13 +16,15 @@ set -a; . ./.env; set +a                 # .env is not auto-loaded
 docker compose up -d --wait              # local PostgreSQL 17 on 127.0.0.1:5433
 uv run ecomgen check-config config/generator.example.yaml
 uv run ecomgen init-db config/generator.example.yaml   # idempotent; applies pending migrations
-uv run ecomgen generate config/generator.example.yaml --profile smoke  # 1,000 orders; omit --profile for config counts
-uv run ecomgen validate config/generator.example.yaml  # invariants + ledger; --run-id RUN (default: latest)
+uv run ecomgen generate config/generator.example.yaml --profile smoke  # 1,000 orders + files; omit --profile for config counts
+uv run ecomgen validate config/generator.example.yaml  # invariants, ledger, files vs DB; --run-id RUN (default: latest)
 uv run ecomgen status config/generator.example.yaml    # run state + chunk progress (read-only)
 uv run ecomgen resume config/generator.example.yaml    # finish a crashed/FAILED run with the identical config
 uv run pytest                            # integration tests skip unless ECOMGEN_TEST_DATABASE_URL is set
 uv run mypy
 ```
+
+`generate` also writes payment-settlement CSV and clickstream JSONL with a checksummed manifest under `$ECOMGEN_DATA_ROOT` (or `filesystem.root`), staged and then renamed into place, never overwritten; see [docs/FEEDS.md](docs/FEEDS.md).
 
 CI (`.github/workflows/ci.yml`, every PR and push to `main`): mypy, shellcheck, and the full suite against PostgreSQL 17.11 and 18.6; it fails if any test is skipped, so the integration tests always run.
 

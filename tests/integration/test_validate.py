@@ -16,7 +16,10 @@ pytestmark = pytest.mark.skipif(not ADMIN_URL, reason="ECOMGEN_TEST_DATABASE_URL
 
 @pytest.fixture
 def small_cfg(cfg: config.Config) -> config.Config:
-    return replace(cfg, generator=replace(cfg.generator, chunk_rows=300))
+    # Feeds off: these tests break database invariants one at a time, and the feed checks (test_publish.py)
+    # would rightly flag the same edits as files disagreeing with the database.
+    return replace(cfg, generator=replace(cfg.generator, chunk_rows=300),
+                   filesystem=replace(cfg.filesystem, csv=False, jsonl=False))
 
 
 @pytest.fixture
@@ -153,7 +156,7 @@ def test_cli_validate(
     assert main(["generate", cfg_path, "--profile", "smoke"]) == 0
     capsys.readouterr()
     assert main(["validate", cfg_path]) == 0
-    assert "12 passed, 0 failed" in capsys.readouterr().out
+    assert f"{len(validate.CHECKS) + 2 + len(validate.FEED_CHECKS)} passed, 0 failed" in capsys.readouterr().out
     assert main(["validate", cfg_path, "--run-id", "run_nope"]) == 3
     with psycopg.connect(db_url, autocommit=True) as c:
         c.execute("UPDATE commerce.order_items SET line_no = 9 WHERE order_item_id = 'itm_1'")

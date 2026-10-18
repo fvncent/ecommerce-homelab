@@ -16,6 +16,7 @@ RUN_MODES = ("historical", "incremental", "continuous")
 COUNT_KEYS = ("customers", "products", "sellers", "warehouses", "orders", "clickstream_events")
 # Parsed by later phases; accepted unvalidated for now so the example config loads.
 DEFERRED_SECTIONS = ("scenario", "ai_readiness", "safety", "logging")
+DATA_ROOT_ENV = "ECOMGEN_DATA_ROOT"  # per-machine override of filesystem.root, like the DB URL
 _IDENTIFIER = re.compile(r"(?!pg_)[a-z_][a-z0-9_]{0,62}")  # pg_* is reserved by PostgreSQL
 
 
@@ -181,9 +182,13 @@ def parse(raw: bytes) -> Config:
     root = f._take("root")
     if not isinstance(root, str) or not PurePosixPath(root).is_absolute():
         raise ConfigError(f"filesystem.root: must be an absolute path, got {root!r}")
+    staging, csv, jsonl, parquet = (f.bool(k) for k in ("publish_via_staging", "csv", "jsonl", "parquet"))
+    if not staging:
+        raise ConfigError("filesystem.publish_via_staging: must be true (files are always staged, then renamed)")
+    if parquet:
+        raise ConfigError("filesystem.parquet: not implemented yet; set it to false")
     filesystem = FilesystemConfig(
-        PurePosixPath(root),
-        f.bool("publish_via_staging"), f.bool("csv"), f.bool("jsonl"), f.bool("parquet"),
+        PurePosixPath(root), staging, csv, jsonl, parquet,
         f.choice("compression", ("snappy", "zstd", "gzip", "none")),
         f.choice("partition_by", ("event_date",)),
         f.int("max_file_size_mb", 1, 4096),
@@ -200,6 +205,16 @@ def load(path: str | os.PathLike[str]) -> Config:
     except OSError as e:
         raise ConfigError(f"cannot read config {path}: {e.strerror}") from None
     return parse(raw)
+
+
+def data_root(cfg: Config, environ: Mapping[str, str] = os.environ) -> PurePosixPath:
+    """Where files are published: $ECOMGEN_DATA_ROOT if set, else filesystem.root."""
+    raw = environ.get(DATA_ROOT_ENV, "").strip()
+    if not raw:
+        return cfg.filesystem.root
+    if not PurePosixPath(raw).is_absolute():
+        raise ConfigError(f"{DATA_ROOT_ENV} must be an absolute path, got {raw!r}")
+    return PurePosixPath(raw)
 
 
 def database_url(cfg: Config, environ: Mapping[str, str] = os.environ) -> str:
