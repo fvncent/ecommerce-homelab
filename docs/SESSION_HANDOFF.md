@@ -3,10 +3,24 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-18
-**Branch:** `fix/host-postgres-tooling`, stacked on `docs/post-merge-handoff` (PR #11, docs only). Both open.
-**Deploy target:** **`v0.1.1-homelab`** — not created yet: tag `main` after #11 and this PR merge (each needs approval).
-`v0.1.0-homelab` (`05bccd0`, PRs #5-#10) is **not deployable** on the homelab: its scripts assume a Docker database
-container and create/drop databases.
+**Branch:** `chore/ci`, stacked on `docs/ubuntu-benchmark` (PR #13, docs: Ubuntu results). `main` = `8c581ad`,
+tagged **`v0.1.1-homelab`** (annotated; the commit verified on Ubuntu). `v0.1.0-homelab` = old container tooling.
+**Deployed:** `8c581ad` on Ubuntu, clone `/srv/homelab/projects/ecommerce-homelab`. **Ubuntu verification passed**
+(2026-10-18): smoke, 10k (1.78 s, 5,618 orders/s, data identical to macOS), crash/resume; snapshot diff = only our
+role + 3 databases. Details: `docs/BENCHMARKS.md`.
+
+## This task: CI (`chore/ci`)
+- `.github/workflows/ci.yml`: `lint` (uv sync --frozen, mypy, `bash -n` + `shellcheck -S warning` on scripts) and
+  `test` (matrix postgres 17.11-bookworm / 18.6-trixie service; `ECOMGEN_TEST_DATABASE_URL` = service superuser;
+  pytest with JUnit, then `scripts/ci_no_skips.py` fails on any skip or zero tests). `permissions: contents: read`,
+  `persist-credentials: false`, concurrency cancels superseded runs. Runs on every PR (any base) and push to main.
+- Pinned: actions/checkout v7.0.1, astral-sh/setup-uv v10.2.0 (v10.3.0 skipped: 9 days old), uv 0.12.13 (= local),
+  runner ubuntu-24.04.
+- shellcheck findings at warning level: unchecked `cd` in both scripts → `|| exit 2`. Info-level notes ignored.
+- Local checks: actionlint 1.7.7 clean; shellcheck 0.10.0 clean; suite with only `ECOMGEN_TEST_DATABASE_URL`
+  set: 146 passed (= CI env); gate exits 0 on that report and 1 on a no-DB report (73 skipped); 5 gate unit tests.
+- PR #14. First GitHub run (39085948076) green: lint 10 s (mypy 20 files clean); PG 17.11 and 18.6 each
+  **151 passed, 0 skipped** (~40 s per job).
 
 ## Ubuntu facts (from the user, 2026-10-18)
 - Ubuntu Server, Ryzen 5 5600, ~14 GiB usable RAM, user `serveradmin`. Root fs ~73 GB free.
@@ -15,12 +29,12 @@ container and create/drop databases.
 - Host PostgreSQL 18 (`18/main`, 127.0.0.1:5432; only `postgres` DB). Approved databases: `ecommerce_homelab_smoke`,
   `_test`, `_crash`; dedicated least-privilege role. Never drop automatically; never change server settings.
 - Do not touch: VLSIM engine + TMS, PostgreSQL 17 container (host port 55432), Redpanda. No new PG container.
-- Repo is now **public** (history scanned: no secrets ever committed). User already cloned it somewhere on Ubuntu
-  (path not yet reported).
-- User runs every Ubuntu command by hand: one small step at a time (what it does, exact commands, read-only or not,
-  expected result), wait for their output. Claude never SSHes.
+- Repo is now **public** (history scanned: no secrets ever committed). Clone: `/srv/homelab/projects/ecommerce-homelab`
+  (`.env` mode 600 there, `.venv` via uv). Role `ecomgen_app` + 3 databases exist and hold the benchmark data.
+- User runs every Ubuntu command by hand; they prefer one complete ordered list of steps (each marked read-only or
+  changes, with expected output) over one-step-per-message. Claude never SSHes.
 
-## This task: host-PostgreSQL tooling (`fix/host-postgres-tooling`)
+## Previous task: host-PostgreSQL tooling (PR #12, merged)
 - `homelab_bench.py`: fixed set of three databases; no create/drop; `preflight` refuses a role with any rol*
   privilege, any role membership, ownership of other databases, or non-empty databases; `same-server` (backend PID
   in the systemd unit cgroup / container); `leftovers` (client backends + prepared xacts after SIGKILL); digest
@@ -38,7 +52,7 @@ container and create/drop databases.
   rehearsal roles/databases/containers removed; Mac back to `ecommerce_mvp`, `ecommerce_oltp`, role `ecomgen`.
 - Tests: 146 passed with DB; 73 passed / 73 skipped without; mypy clean.
 
-## Review (`/code-review high`) — all 10 fixed
+## PR #12 review (`/code-review high`) — all 10 fixed
 | # | Finding | Fix |
 |---|---|---|
 | 1 | Handoff still named v0.1.0-homelab as target | Handoff rewritten; deploy target v0.1.1-homelab |
@@ -66,5 +80,6 @@ container and create/drop databases.
 - Phase 2 file feeds not implemented: `data/` stays empty; `filesystem.root` default still `/srv/ecommerce-data`.
 
 ## Next step
-Push + PR (base `docs/post-merge-handoff`) → user approves merging #11 then this → tag `v0.1.1-homelab` → Ubuntu
-Stage 1 (user reports clone path + mount/tool output) → Stage 2 → benchmark → results into `docs/BENCHMARKS.md`.
+User merges #13 then #14 (CI green) → next roadmap item: Phase 2 file feeds (CSV/JSONL + manifests;
+homelab root `/srv/homelab/ecommerce/data`). Re-running the Ubuntu benchmark needs the three databases recreated
+by hand (approved cleanup, runbook).

@@ -11,7 +11,8 @@ it is read-only.
   touched; no recursive `chown`/`chmod`, no `777`.
   ```
   /srv/homelab/ecommerce/
-    source/       git checkout (detached at the approved tag)
+    source/       git checkout at the approved commit (or an existing clone elsewhere: then add it to
+                  SNAP_EXCLUDE; the 2026-10-18 run used /srv/homelab/projects/ecommerce-homelab)
     data/{csv,jsonl,parquet,events}/   file feeds (Phase 2; empty for now)
     checkpoints/  (resume state lives in the database ledger today; empty)
     logs/  benchmarks/  metadata/
@@ -57,18 +58,19 @@ Take the "before" snapshot first, so the role and databases created here show up
 
 ```bash
 cd /srv/homelab/ecommerce/source
-PG_LOCAL_SUPERUSER=1 PG_SERVICE=postgresql@18-main bash scripts/host_snapshot.sh \
-  > /srv/homelab/ecommerce/benchmarks/before.txt          # read-only; sudo asks for your password
+sudo PG_LOCAL_SUPERUSER=1 PG_SERVICE=postgresql@18-main SNAP_EXCLUDE="/srv/homelab/ecommerce <CLONE>" \
+  bash scripts/host_snapshot.sh > /srv/homelab/ecommerce/benchmarks/before.txt   # read-only; as root it sees
+                                                                                  # every file and docker
 ```
 
 ```bash
-sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
-CREATE ROLE ecomgen_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 10;
-CREATE DATABASE ecommerce_homelab_smoke OWNER ecomgen_app;
-CREATE DATABASE ecommerce_homelab_test  OWNER ecomgen_app;
-CREATE DATABASE ecommerce_homelab_crash OWNER ecomgen_app;
-REVOKE CONNECT, TEMPORARY ON DATABASE ecommerce_homelab_smoke, ecommerce_homelab_test, ecommerce_homelab_crash FROM PUBLIC;
-SQL
+sudo -u postgres psql -v ON_ERROR_STOP=1 \
+  -c "CREATE ROLE ecomgen_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 10" \
+  -c "CREATE DATABASE ecommerce_homelab_smoke OWNER ecomgen_app" \
+  -c "CREATE DATABASE ecommerce_homelab_test OWNER ecomgen_app" \
+  -c "CREATE DATABASE ecommerce_homelab_crash OWNER ecomgen_app" \
+  -c "REVOKE CONNECT, TEMPORARY ON DATABASE ecommerce_homelab_smoke, ecommerce_homelab_test, ecommerce_homelab_crash FROM PUBLIC"
+# (one -c per statement: a pasted heredoc failed in the first run, so CREATE ROLE never ran)
 sudo -u postgres psql -c '\password ecomgen_app'      # paste the value from: openssl rand -hex 24
 ```
 
@@ -88,8 +90,8 @@ set -a; . ./.env; set +a                               # password comes from .en
 uv run pytest                                          # unit tests; integration tests listed as skipped
 EXPECTED_SHA=<APPROVED_TAG> MOUNT_UUID=<uuid> PG_MAJOR=18 PG_SERVICE=postgresql@18-main \
   bash scripts/homelab_benchmark.sh
-PG_LOCAL_SUPERUSER=1 PG_SERVICE=postgresql@18-main bash scripts/host_snapshot.sh \
-  > /srv/homelab/ecommerce/benchmarks/after.txt
+sudo PG_LOCAL_SUPERUSER=1 PG_SERVICE=postgresql@18-main SNAP_EXCLUDE="/srv/homelab/ecommerce <CLONE>" \
+  bash scripts/host_snapshot.sh > /srv/homelab/ecommerce/benchmarks/after.txt
 diff /srv/homelab/ecommerce/benchmarks/before.txt /srv/homelab/ecommerce/benchmarks/after.txt
 ```
 
