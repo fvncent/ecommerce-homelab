@@ -4,11 +4,14 @@ Feeds (schema_version 1), partitioned by event date (UTC) under the data root:
 - payment_settlement (CSV, `source_feeds/payment_settlement/date=D/{run}-{provider}-part-NNNNN.csv`): one row per
   payment attempt SETTLED by clock_end, in daily batches per provider; fee and net are exact Decimal amounts.
 - clickstream (JSONL, `clickstream/date=D/{run}-part-NNNNN.jsonl`): World.clickstream_events browsing events in
-  sessions of SESSION_EVENTS (`evt_N`, `ses_N`), plus one `order_placed` event per order (`evt_ord_N`).
+  sessions of SESSION_EVENTS (`evt_N`, `ses_N`), plus one `order_placed` event per order (`evt_ord_N`). Session s
+  starts in slot s of the clock (like orders), so session starts never decrease with s and a time range maps to a
+  range of sessions: every event of a session is in [start, start + SESSION_SPAN].
 Rows within a file follow generation order, not event time. Files roll over at filesystem.max_file_size_mb.
 A clock step (`advance`) publishes the events of its window (previous_as_of, as_of] only (the first step:
 [clock_start, as_of]): settlements whose settled_at is in it, order_placed events of the orders placed in it, and
-browsing events whose event_time is in it. All steps of a chain together hold exactly the one-shot run's records.
+browsing events whose event_time is in it, generating only the sessions that can have one (step_sessions), not the
+whole history. All steps of a chain together hold exactly the one-shot run's records.
 
 Publishing (DB and filesystem writes are not atomic together, so this converges instead):
 1. Every file of the run is regenerated into `staging/{run}/` (our own incomplete output, cleared first).
@@ -27,6 +30,7 @@ import hashlib
 import io
 import json
 import os
+import random
 import re
 import shutil
 from collections.abc import Callable, Iterator
@@ -94,18 +98,52 @@ def session_count(world: generate.World) -> int:
     return -(-world.clickstream_events // SESSION_EVENTS)
 
 
+def _session_start(world: generate.World, rng: random.Random, s: int) -> datetime:
+    """Session s starts in slot s of [clock_start, clock_end - SESSION_SPAN) (whole seconds; the session's first
+    draw), so the start never decreases with s."""
+    last_start = max(world.clock_start, world.clock_end - SESSION_SPAN)
+    span, count = int((last_start - world.clock_start).total_seconds()), session_count(world)
+    lo, hi = span * (s - 1) // count, span * s // count
+    return world.clock_start + timedelta(seconds=lo + int(rng.random() * (hi - lo)))
+
+
+def session_start(world: generate.World, s: int) -> datetime:
+    if not 1 <= s <= session_count(world):
+        raise FeedError(f"session {s} out of range 1..{session_count(world)}")
+    return _session_start(world, generate._rng(world.seed, "sessions", s), s)
+
+
+def sessions_by(world: generate.World, t: datetime) -> int:
+    """Number of sessions started at or before t (binary search over session_start, which never decreases)."""
+    lo, hi = 0, session_count(world)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if session_start(world, mid) <= t:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+def step_sessions(world: generate.World, plan: generate.StepPlan) -> range:
+    """The sessions that can have an event in the step window (previous, as_of]: started by as_of and, unless this
+    is the first step, after previous - SESSION_SPAN (an older session's events are all at or before previous)."""
+    first = 1 if plan.previous is None else sessions_by(world, plan.previous - SESSION_SPAN) + 1
+    return range(first, sessions_by(world, plan.as_of) + 1)
+
+
 def session_events(world: generate.World, s: int,
                    customer: Callable[[int], generate.Customer] | None = None,
                    product: Callable[[int], generate.Product] | None = None) -> list[dict[str, object]]:
-    """Browsing session s (1-based): events evt_{(s-1)*SESSION_EVENTS+1}.. up to clickstream_events, all before
-    clock_end, one customer (or anonymous) per session. customer/product: optional (cached) World constructors."""
+    """Browsing session s (1-based): events evt_{(s-1)*SESSION_EVENTS+1}.. up to clickstream_events, in
+    [session_start, session_start + SESSION_SPAN] and before clock_end, one customer (or anonymous) per session.
+    customer/product: optional (cached) World constructors."""
     customer, product = customer or world.customer, product or world.product
     rng = generate._rng(world.seed, "sessions", s)
+    t = _session_start(world, rng, s)
     anonymous = generate._int(rng, 1, 100) <= ANONYMOUS_PCT
     found = generate._probe(rng, world.customers, customer, lambda c: c.status == "ACTIVE", set())
     customer_id = None if anonymous or found is None else found[1].customer_id
-    last_start = max(world.clock_start, world.clock_end - SESSION_SPAN)
-    t = generate._between(rng, world.clock_start, last_start)
     latest = world.clock_end - timedelta(seconds=1)
     out = []
     for m in range((s - 1) * SESSION_EVENTS + 1, min(world.clickstream_events, s * SESSION_EVENTS) + 1):
@@ -213,23 +251,25 @@ def _in_window_text(plan: generate.StepPlan, at: str) -> bool:
     return (plan.previous is None or at > ts(plan.previous)) and at <= ts(plan.as_of)
 
 
-def _sessions(world: generate.World, rows: int) -> Iterator[list[dict[str, object]]]:
-    """All browsing events, a bounded batch of sessions at a time. Entities are pure functions of their number, so a
-    bounded cache can't change output; it saves regenerating the same products (and their sellers) per event."""
+def _sessions(world: generate.World, rows: int, sessions: range) -> Iterator[list[dict[str, object]]]:
+    """The browsing events of `sessions`, a bounded batch of sessions at a time. Entities are pure functions of their
+    number, so a bounded cache can't change output; it saves regenerating the same products (and their sellers)."""
     customer: Callable[[int], generate.Customer] = functools.lru_cache(maxsize=CACHE_ENTITIES)(world.customer)
     product: Callable[[int], generate.Product] = functools.lru_cache(maxsize=CACHE_ENTITIES)(world.product)
     per_chunk = max(1, rows // SESSION_EVENTS)
-    for first in range(1, session_count(world) + 1, per_chunk):
-        last = min(session_count(world), first + per_chunk - 1)
-        yield [e for s in range(first, last + 1) for e in session_events(world, s, customer, product)]
+    for first in range(sessions.start, sessions.stop, per_chunk):
+        yield [e for s in range(first, min(sessions.stop, first + per_chunk))
+               for e in session_events(world, s, customer, product)]
 
 
 def browsing_events_by(world: generate.World, as_of: datetime, rows: int) -> int:
-    """How many browsing events happened by as_of (all of them at clock_end)."""
-    if as_of >= world.clock_end:
-        return world.clickstream_events
+    """How many browsing events happened by as_of (all of them at clock_end). Only sessions started in
+    (as_of - SESSION_SPAN, as_of] are generated: the ones before have every event by as_of."""
+    done = sessions_by(world, as_of - SESSION_SPAN)
     limit = ts(as_of)
-    return sum(1 for batch in _sessions(world, rows) for e in batch if str(e["event_time"]) <= limit)
+    partial = range(done + 1, sessions_by(world, as_of) + 1)
+    return (min(world.clickstream_events, done * SESSION_EVENTS)
+            + sum(1 for batch in _sessions(world, rows, partial) for e in batch if str(e["event_time"]) <= limit))
 
 
 def write_staged(world: generate.World, cfg: Config, run_id: str, staging: Path,
@@ -247,9 +287,15 @@ def write_staged(world: generate.World, cfg: Config, run_id: str, staging: Path,
         if "clickstream" in feeds:
             _add_events(w, run_id, [order_event(world, o) for o in orders])
     if "clickstream" in feeds:
-        for batch in _sessions(world, rows):
-            _add_events(w, run_id, [e for e in batch if _in_window_text(plan, str(e["event_time"]))])
+        for batch in _step_sessions(world, rows, plan):
+            _add_events(w, run_id, batch)
     return w.files
+
+
+def _step_sessions(world: generate.World, rows: int, plan: generate.StepPlan) -> Iterator[list[dict[str, object]]]:
+    """The browsing events in the step window, a bounded batch of sessions at a time."""
+    for batch in _sessions(world, rows, step_sessions(world, plan)):
+        yield [e for e in batch if _in_window_text(plan, str(e["event_time"]))]
 
 
 def _order_batches(world: generate.World, rows: int, plan: generate.StepPlan

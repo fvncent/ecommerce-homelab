@@ -292,6 +292,15 @@ def test_malformed_recorded_fields_are_a_validate_error(migrated: Migrated, smal
         validate.validate(c, small_cfg)
 
 
+def test_a_chain_of_another_data_version_is_a_validate_error(migrated: Migrated, small_cfg: config.Config) -> None:
+    """Its browsing sessions were placed differently, so this release can't count its browse events."""
+    c = migrated(small_cfg)
+    load.advance(c, small_cfg, MID)
+    c.execute("UPDATE generator_meta.generation_runs SET resume_fields = resume_fields || '{\"data_version\": 2}'")
+    with pytest.raises(validate.ValidateError, match="data_version 2"):
+        validate.validate(c, small_cfg)
+
+
 def test_file_size_may_change_between_steps(migrated: Migrated, small_cfg: config.Config, cfg_path: Path,
                                             tmp_path: Path) -> None:
     c = migrated(small_cfg)

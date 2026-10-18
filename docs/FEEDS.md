@@ -44,7 +44,9 @@ customer_id, session_id, product_id, event_time, arrived_at, source_system, payl
 - Browsing: `counts.clickstream_events` events `evt_N` in sessions `ses_K` of 5 (the last may be shorter); one
   customer per session or anonymous (`customer_id` null, ~30%). Types: `product_viewed` (payload `page`),
   `search` (no product; `query`, `results`), `added_to_cart` / `removed_from_cart` (`quantity`), `wishlist_added`.
-  Products are active ones; customers are ACTIVE ones.
+  Products are active ones; customers are ACTIVE ones. Session `ses_K` starts in slot K of
+  `[clock_start, clock_end - 25 min)` (data version 3), so later sessions never start earlier, and its events are
+  5-300 s apart, within 25 min (`SESSION_SPAN`) of its start.
 - Orders: one `order_placed` event `evt_ord_N` per order at `placed_at`, session `ses_ord_N`, payload `order_id`,
   `currency`, `total`.
 - `event_time` is in `[clock_start, clock_end)`; `arrived_at` = event_time + 1-30 s.
@@ -175,8 +177,11 @@ step's database chunks and before COMPLETED, so `resume` finishes any interrupte
 unchanged. All steps' records together = the one-shot run's records. `validate` checks every step's files together,
 including `records_in_their_step_window`. `replay-files` of a step refuses dates whose partitions also hold files of
 another step (a mid-day step boundary), so a replayed day is never partial.
-`arrived_at` may be up to 30 s after the step's `as_of` (receive time, not the window). Cost: each step reads all
-browsing sessions to pick its window (~2.5 s per step at 100k events on the Mac).
+`arrived_at` may be up to 30 s after the step's `as_of` (receive time, not the window). A step generates only the
+sessions that can have an event in its window: those started in `(previous_as_of - 25 min, as_of]` (found by binary
+search, since session starts never decrease), then keeps the events inside the window; validate's browse count
+does the same. A daily step at 100k events takes ~0.08 s for its browsing events (was ~1.2 s with the whole history
+read every step); see `docs/BENCHMARKS.md`. The first step still generates every session up to its `as_of`.
 
 ## Not yet
 

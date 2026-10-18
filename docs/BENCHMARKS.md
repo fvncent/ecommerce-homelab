@@ -132,6 +132,29 @@ references (`scripts/expected_{mvp,feed}_digest.txt`, recorded on PG 17); replay
 exactly the plan; replayed originals = `scripts/expected_replay_originals.txt`; no orphans or staging left.
 WAL 16.7 MB (10k). Data root after a full run ≈ 70 MB.
 
+## Browsing sessions per clock step (macOS, 2026-10-19, `fix/session-ordering`, data version 3)
+
+Browsing events of 31 daily steps over the example clock (January 2026, chunk_rows 5000), pure generation without
+the database (`write_staged`'s browsing part), before (data version 2: every step generates every session and keeps
+its window) and after (sessions in time slots; a step generates only those started in
+`(previous - 25 min, as_of]`):
+
+| Browsing events | Daily step before | Daily step after | 31 steps before | 31 steps after | validate's browse count (day 20) |
+|---|---|---|---|---|---|
+| 100,000 | 1.24 s (median) | 0.083 s | 40.2 s | 2.6 s | 0.97 s → 0.002 s |
+| 1,000,000 | 11.6 s | 0.46 s | 366 s | 14.4 s | 8.8 s → 0.017 s |
+
+After the change the cost of a step follows the sessions in its window, not the history: 31 steps together cost
+about what generating every session once costs. End-to-end on Docker `postgres:18.6-trixie`, 10k config: 31 daily
+`advance` steps took 36 s (~1.2 s each, mostly CLI start and database writes); rows (table digests) and file records
+(110,000 clickstream events, all settlements) identical to one `generate`; validate 20/20 for both.
+`scripts/homelab_benchmark.sh` with `RECORD_REFERENCES=1` re-recorded the file references
+(`scripts/expected_{smoke_feed,feed}_digest.txt`, `expected_replay_originals.txt`); `expected_mvp_digest.txt` is
+unchanged (rows did not change). A following verification run: 49/49, exit 0.
+
+Remaining: the first step of a chain still generates every session up to its `as_of` (it publishes all of them);
+browsing sessions are spread evenly over the clock, as before, not shaped by time of day.
+
 ## Not yet measured
 
 - Larger profiles (practice 100k, advanced 1M) and `workers: 2`.

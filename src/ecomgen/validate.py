@@ -22,7 +22,7 @@ from typing import Any
 import psycopg
 from psycopg import sql
 
-from ecomgen import db, feeds, load
+from ecomgen import db, feeds, generate, load
 from ecomgen.config import Config
 
 SAMPLE = 5
@@ -232,6 +232,11 @@ def validate(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -
                               for r, _, state in runs if state != "COMPLETED"] if as_of is not None else []
                 if unfinished:  # one clear reason instead of every missing file and record of that step
                     return run_id, results + [Result(FILES_INTACT, len(unfinished), _sample(unfinished))]
+                if as_of is not None and recorded.get("data_version") != generate.DATA_VERSION:
+                    # a chain's browse count depends on the session times of its data version
+                    raise ValidateError(f"run {run_id} was written under data_version "
+                                        f"{recorded.get('data_version')}, not {generate.DATA_VERSION}: validate it "
+                                        "with the release that wrote it")
                 try:
                     world = load.recorded_world(recorded)
                     browse = (world.clickstream_events if as_of is None else
