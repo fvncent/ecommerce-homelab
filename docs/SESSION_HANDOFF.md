@@ -42,7 +42,7 @@ Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleani
 | 2 | `?hostaddr=`/`?service=`/PGHOSTADDR could redirect | Only sslmode/connect_timeout/application_name; PGHOST/PGHOSTADDR/PGSERVICE refused; tests |
 | 3 | Cleanup dry-run failure passed silently | Exit code checked; must list this replay's copies; CLEANUP_REPLAY=1 without deletion = FAIL |
 | 4 | Record mode recorded after failures | Pending references in OUT/references, copied to scripts/ only if all checks passed (else exit 2) |
-| 5 | Data-root gate on path text | realpath; strictly inside the resolved project, no symlink, not benchmarks/; DATA_ROOT pinned on Linux; OUT not in data root; tested |
+| 5 | Data-root gate on path text | `check-paths` helper (resolve; strictly inside the project, no symlink, not benchmarks/; OUT not in data root), unit-tested; DATA_ROOT pinned on Linux |
 | 6 | Smoke/pc digests without completeness check | digest_ok before the diff |
 | 7 | EXPECTED_PG_PORT optional on Linux | Required on Linux; checked pre-connection |
 | 8 | Second rerun exit code ignored; "duplicates" over-claimed | Exit code checked; labels state what is checked (plan diff = none missing/extra) |

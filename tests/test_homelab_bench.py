@@ -163,3 +163,25 @@ def test_feed_throughput_and_data_root_guards(bench: ModuleType, tmp_path: Path,
     monkeypatch.setenv("ECOMGEN_DATA_ROOT", str(tmp_path))
     bench.link_test()
     assert not any((tmp_path / "staging").iterdir())  # the probe is removed
+
+
+def test_data_root_and_output_paths(bench: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    proj, other = tmp_path / "ecommerce", tmp_path / "vlsim"
+    for d in (proj / "data", proj / "benchmarks" / "x", other / "data"):
+        d.mkdir(parents=True)
+    (proj / "linked").symlink_to(other / "data")
+    bench.check_paths(str(proj), str(proj / "data"), str(proj / "benchmarks"))
+    assert capsys.readouterr().out.strip() == str((proj / "data").resolve())
+    refused = {
+        "symlink": (proj / "linked", proj / "benchmarks"),
+        "dot-dot": (proj / "data" / ".." / ".." / "vlsim" / "data", proj / "benchmarks"),
+        "project root": (proj, proj / "benchmarks"),
+        "under benchmarks": (proj / "benchmarks" / "x", proj / "benchmarks"),
+        "outside": (other / "data", proj / "benchmarks"),
+        "output in data": (proj / "data", proj / "data"),
+        "output outside": (proj / "data", other),
+    }
+    for label, (data, out) in refused.items():
+        with pytest.raises(bench.Refused):
+            bench.check_paths(str(proj), str(data), str(out))
+            pytest.fail(f"{label}: not refused")

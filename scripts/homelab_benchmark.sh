@@ -131,15 +131,10 @@ if [ "$(uname -s)" = Linux ]; then
   [ -n "${EXPECTED_PG_PORT:-}" ] || early_die "EXPECTED_PG_PORT not set (5432 on the homelab)"
 fi
 [ -n "${ECOMGEN_DATA_ROOT:-}" ] || early_die "ECOMGEN_DATA_ROOT not set (e.g. $DATA_ROOT/data)"
-[ -d "$ECOMGEN_DATA_ROOT" ] && [ ! -L "$ECOMGEN_DATA_ROOT" ] || early_die "$ECOMGEN_DATA_ROOT must be an existing directory, not a symlink"
-REAL_PROJECT="$(realpath "$DATA_ROOT")" || early_die "cannot resolve $DATA_ROOT"
-REAL_DATA="$(realpath "$ECOMGEN_DATA_ROOT")" || early_die "cannot resolve $ECOMGEN_DATA_ROOT"
-case "$REAL_DATA" in "$REAL_PROJECT"/?*) ;; *) early_die "ECOMGEN_DATA_ROOT resolves to $REAL_DATA, not strictly inside $REAL_PROJECT";; esac
-case "$REAL_DATA/" in "$REAL_PROJECT/benchmarks/"*) early_die "ECOMGEN_DATA_ROOT must not be inside $REAL_PROJECT/benchmarks";; esac
+[ -d "$PARENT" ] || early_die "$PARENT does not exist (create the project directories first)"
+# resolved and checked in the helper (unit-tested): strictly inside the project, no symlink, not benchmarks/
+REAL_DATA="$(bench check-paths "$DATA_ROOT" "$ECOMGEN_DATA_ROOT" "$PARENT" 2>&1)" || early_die "$REAL_DATA"
 export ECOMGEN_DATA_ROOT="$REAL_DATA"  # resolved: no '..' or link anywhere in what the generator is given
-REAL_PARENT="$(realpath "$PARENT" 2>/dev/null)" || early_die "$PARENT does not exist (create the project directories first)"
-case "$REAL_PARENT/" in "$REAL_PROJECT"/?*) ;; *) early_die "OUT resolves outside $REAL_PROJECT";; esac
-case "$REAL_PARENT/" in "$REAL_DATA/"*) early_die "OUT must not be inside the data root";; esac
 if [ -n "${MOUNT_UUID:-}" ]; then
   [ "$(findmnt -no UUID -T "$ECOMGEN_DATA_ROOT" 2>/dev/null)" = "$MOUNT_UUID" ] || early_die "$ECOMGEN_DATA_ROOT is not on the $MOUNT_TARGET mount"
 fi

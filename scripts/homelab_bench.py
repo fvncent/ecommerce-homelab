@@ -523,6 +523,25 @@ def link_test() -> None:
     print(f"{root}: hard links work")
 
 
+def check_paths(project: str, data_root: str, out_parent: str) -> None:
+    """Print the resolved data root if it is a real directory (not a symlink) strictly inside the resolved project,
+    not under benchmarks/, and the benchmark output's parent is inside the project but not inside the data root."""
+    proj = Path(project).resolve(strict=True)
+    if Path(data_root).is_symlink() or not Path(data_root).is_dir():
+        raise Refused(f"{data_root} must be an existing directory, not a symlink")
+    data = Path(data_root).resolve(strict=True)
+    if proj not in data.parents:
+        raise Refused(f"ECOMGEN_DATA_ROOT resolves to {data}, not strictly inside {proj}")
+    if data == proj / "benchmarks" or proj / "benchmarks" in data.parents:
+        raise Refused(f"ECOMGEN_DATA_ROOT must not be inside {proj / 'benchmarks'}")
+    out = Path(out_parent).resolve(strict=True)
+    if out != proj and proj not in out.parents:
+        raise Refused(f"OUT resolves outside {proj}")
+    if out == data or data in out.parents:
+        raise Refused("OUT must not be inside the data root")
+    print(data)
+
+
 def env_root() -> str:
     root = os.environ.get("ECOMGEN_DATA_ROOT", "")
     if not root or not os.path.isabs(root) or not os.path.isdir(root):
@@ -547,7 +566,7 @@ COMMANDS: dict[str, Callable[..., None]] = {
     "verify-files": verify_files, "feed-throughput": feed_throughput, "publish-crash": publish_crash,
     "replay-crash": replay_crash, "replay-id": replay_id, "replay-digest": replay_digest,
     "planned-replay-digest": planned_replay_digest, "replay-originals": replay_originals, "verify-replay": verify_replay, "owned-replay": owned_replay, "link-test": link_test,
-    "feeds-enabled": feeds_enabled,
+    "feeds-enabled": feeds_enabled, "check-paths": check_paths,
 }
 
 if __name__ == "__main__":
