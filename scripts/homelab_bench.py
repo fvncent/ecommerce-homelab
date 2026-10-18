@@ -1,27 +1,30 @@
 """Helper for scripts/homelab_benchmark.sh and scripts/host_snapshot.sh. Not part of the ecomgen package.
 
 Safety rules, enforced here (not in the shell script, not configurable):
-- databases are only created inside NAMESPACE (`ecommerce_homelab_test` or `ecommerce_homelab_test_*`) and only
-  dropped if they are siblings (`ecommerce_homelab_test_*`); the kept benchmark DB itself is never dropped;
-- `create` refuses a database that already exists;
+- only the three approved databases (DATABASES) are ever connected to for writing; nothing is created or dropped
+  here: an operator creates the role and databases by hand, and cleanup is a manual, approved step;
+- `preflight` refuses unless the connecting role is unprivileged (no superuser, createdb, createrole, replication,
+  bypassrls), owns each approved database, and each is still empty (none of the config's schemas exist), so
+  PostgreSQL's own permissions confine the benchmark to those databases;
 - URLs must name their database only in the path: `?dbname=` overrides and percent-encoded paths are rejected;
-- URLs (they hold passwords) come from env vars, never argv: ECOMGEN_TEST_DATABASE_URL (admin, our container's
-  maintenance DB), ECOMMERCE_DATABASE_URL (crash target), EXISTING_PG_URL (pg-stats, read-only).
+- URLs (they hold passwords) come from env vars, never argv: ECOMGEN_BENCH_URL (any approved database; the others
+  are derived from it), ECOMMERCE_DATABASE_URL (crash target), EXISTING_PG_URL (pg-stats, read-only).
 """
 
 import os
-import re
 import signal
 import sys
+import time
 from collections.abc import Callable
 from urllib.parse import parse_qs, urlsplit
 
 import psycopg
 from psycopg import sql
 
-NAMESPACE = "ecommerce_homelab_test"
-NAME = re.compile(r"[a-z_][a-z0-9_]{0,62}")
+TEST_DB, SMOKE_DB, CRASH_DB = "ecommerce_homelab_test", "ecommerce_homelab_smoke", "ecommerce_homelab_crash"
+DATABASES = (TEST_DB, SMOKE_DB, CRASH_DB)
 TABLES = ("sellers", "categories", "customers", "products", "orders", "order_items", "payment_attempts")
+PRIVILEGES = ("rolsuper", "rolcreatedb", "rolcreaterole", "rolreplication", "rolbypassrls")
 
 
 class Refused(SystemExit):
@@ -40,68 +43,101 @@ def env_url(var: str) -> str:
 def dbname_of(url: str) -> str:
     """The database a URL connects to, refusing forms whose effective database differs from the path."""
     parts = urlsplit(url)
-    if "dbname" in parse_qs(parts.query) or "%" in parts.path:
+    if "dbname" in parse_qs(parts.query, keep_blank_values=True) or "%" in parts.path:  # empty dbname = user name
         raise Refused("URL must name its database only in the path (no ?dbname=, no percent-encoding)")
     return parts.path.lstrip("/")
 
 
-def admin_url() -> str:
-    return env_url("ECOMGEN_TEST_DATABASE_URL")
-
-
-def check_name(name: str, *, sibling: bool = False) -> str:
-    ok = NAME.fullmatch(name) and (name.startswith(NAMESPACE + "_") if sibling
-                                   else name == NAMESPACE or name.startswith(NAMESPACE + "_"))
-    if not ok:
-        kind = f"{NAMESPACE}_*" if sibling else f"{NAMESPACE} or {NAMESPACE}_*"
-        raise Refused(f"database {name!r} is outside the benchmark namespace ({kind})")
+def check_name(name: str, allowed: tuple[str, ...] = DATABASES) -> str:
+    if name not in allowed:
+        raise Refused(f"database {name!r} is not an approved benchmark database ({', '.join(allowed)})")
     return name
 
 
+def bench_url() -> str:
+    url = env_url("ECOMGEN_BENCH_URL")
+    check_name(dbname_of(url))
+    return url
+
+
 def db_url(name: str) -> str:
-    return urlsplit(admin_url())._replace(path=f"/{check_name(name)}").geturl()
+    return urlsplit(bench_url())._replace(path=f"/{check_name(name)}").geturl()
 
 
-def exists(name: str) -> bool:
-    with psycopg.connect(admin_url()) as c:
-        return c.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,)).fetchone() is not None
+def _schemas() -> tuple[str, ...]:
+    from ecomgen import config
+    pg = config.load(os.environ.get("CONFIG", "config/generator.example.yaml")).postgres
+    return pg.application_schema, pg.integration_schema, pg.metadata_schema
 
 
-def create(name: str) -> None:
-    check_name(name)
-    if exists(name):
-        raise Refused(f"database {name} already exists; the benchmark never reuses a database")
-    with psycopg.connect(admin_url(), autocommit=True) as c:
-        c.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
-    print(f"created {name}")
+def preflight() -> None:
+    """Refuse unless the role is unprivileged and owns every approved database, each still empty."""
+    bench_url()
+    schemas = _schemas()
+    for name in DATABASES:
+        with psycopg.connect(db_url(name)) as c:
+            row = c.execute(sql.SQL("SELECT current_user, {}, pg_get_userbyid(d.datdba)"
+                                    " FROM pg_roles r, pg_database d"
+                                    " WHERE r.rolname = current_user AND d.datname = current_database()").format(
+                sql.SQL(", ").join(sql.SQL("r.") + sql.Identifier(p) for p in PRIVILEGES))).fetchone()
+            assert row is not None
+            user, *flags, owner = row
+            held = [p for p, on in zip(PRIVILEGES, flags, strict=True) if on]
+            if held:
+                raise Refused(f"role {user} holds {', '.join(held)}; the benchmark needs a least-privilege role")
+            if owner != user:
+                raise Refused(f"database {name} is owned by {owner}, not {user}")
+            member_of = [r for (r,) in c.execute(
+                "SELECT pg_get_userbyid(roleid) FROM pg_auth_members WHERE member = to_regrole(current_user)")]
+            if member_of:  # e.g. pg_write_all_data, or another owner role: privileges beyond our databases
+                raise Refused(f"role {user} is a member of {', '.join(member_of)}; it must belong to no role")
+            others = [d for (d,) in c.execute(
+                "SELECT datname FROM pg_database WHERE datdba = to_regrole(current_user) AND datname <> ALL(%s)",
+                (list(DATABASES),))]
+            if others:
+                raise Refused(f"role {user} also owns {', '.join(others)}; it must own only {', '.join(DATABASES)}")
+            present = [s for (s,) in c.execute("SELECT nspname FROM pg_namespace WHERE nspname = ANY(%s)",
+                                               (list(schemas),))]
+            if present:
+                raise Refused(f"database {name} is not empty (schemas {', '.join(present)} exist); the benchmark "
+                              "never reuses a database: recreate it by hand (approved cleanup) first")
+            version = c.execute("SHOW server_version").fetchone()[0]  # type: ignore[index]
+            port = c.execute("SELECT inet_server_port()").fetchone()[0]  # type: ignore[index]
+    print(f"role {user} (no privileges, no memberships) owns only {', '.join(DATABASES)}, all empty; "
+          f"PostgreSQL {version}, port {port}")
 
 
-def drop(name: str) -> None:
-    check_name(name, sibling=True)
-    with psycopg.connect(admin_url(), autocommit=True) as c:
-        c.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
-    print(f"dropped {name}")
+def same_server(kind: str, ref: str) -> None:
+    """Exit 1 unless the server behind ECOMGEN_BENCH_URL is the one being measured: our backend's PID is in the
+    systemd unit's cgroup (`cgroup PATH`) or is a postgres process inside the container (`container ID`)."""
+    with psycopg.connect(bench_url()) as c:
+        pid = c.execute("SELECT pg_backend_pid()").fetchone()[0]  # type: ignore[index]
+        if kind == "cgroup":
+            with open(os.path.join(ref, "cgroup.procs")) as f:
+                ok = str(pid) in f.read().split()
+        elif kind == "container":
+            import subprocess
+            cmd = subprocess.run(["docker", "exec", ref, "cat", f"/proc/{pid}/cmdline"], capture_output=True)
+            ok = cmd.returncode == 0 and b"postgres" in cmd.stdout
+        else:
+            raise Refused(f"unknown server kind {kind!r}")
+    print(f"backend {pid} {'is' if ok else 'is NOT'} in {kind} {ref}")
+    sys.exit(0 if ok else 1)
 
 
-def system_id() -> None:
-    """Cluster identity, compared with the container's own value so we know the URL reaches our container."""
-    with psycopg.connect(admin_url()) as c:
-        print(c.execute("SELECT system_identifier FROM pg_control_system()").fetchone()[0])  # type: ignore[index]
+def server_major() -> None:
+    with psycopg.connect(bench_url()) as c:
+        print(int(c.execute("SHOW server_version_num").fetchone()[0]) // 10000)  # type: ignore[index]
 
 
 def wal_lsn() -> None:
-    with psycopg.connect(admin_url()) as c:
+    with psycopg.connect(bench_url()) as c:
         print(c.execute("SELECT pg_current_wal_lsn()").fetchone()[0])  # type: ignore[index]
 
 
 def wal_bytes_since(lsn: str) -> None:
-    with psycopg.connect(admin_url()) as c:
+    with psycopg.connect(bench_url()) as c:
         print(int(c.execute("SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), %s)", (lsn,)).fetchone()[0]))  # type: ignore[index]
-
-
-def _schema() -> str:
-    from ecomgen import config
-    return config.load(os.environ.get("CONFIG", "config/generator.example.yaml")).postgres.application_schema
 
 
 def sizes(name: str) -> None:
@@ -109,45 +145,86 @@ def sizes(name: str) -> None:
         print(f"database {name} {c.execute('SELECT pg_database_size(current_database())').fetchone()[0]} bytes")  # type: ignore[index]
         for rel, rows, size in c.execute(
             "SELECT relname, n_live_tup, pg_total_relation_size(relid) FROM pg_stat_user_tables"
-            " WHERE schemaname = %s ORDER BY 3 DESC", (_schema(),)):
+            " WHERE schemaname = %s ORDER BY 3 DESC", (_schemas()[0],)):
             print(f"  {rel} rows={rows} bytes={size}")
 
 
 def digest(name: str) -> None:
-    """Row count + md5 over every source table, rows sorted by text: equal output = identical data."""
-    schema = _schema()
+    """Row count + md5 over every source table, rows sorted by text: equal output = identical data. Row text is
+    pinned to UTC/ISO and sorted bytewise (COLLATE "C"), so it doesn't depend on the server's time zone or locale."""
+    schema = _schemas()[0]
     with psycopg.connect(db_url(name)) as c:
+        c.execute("SET TIME ZONE 'UTC'")
+        c.execute("SET DateStyle = 'ISO, MDY'")
         for t in TABLES:
             n, md5 = c.execute(sql.SQL(
-                "SELECT count(*), md5(coalesce(string_agg(x::text, '|' ORDER BY x::text), '')) FROM {}.{} x"
-            ).format(sql.Identifier(schema), sql.Identifier(t))).fetchone()  # type: ignore[misc]
+                "SELECT count(*), md5(coalesce(string_agg(x::text, '|' ORDER BY x::text COLLATE \"C\"), ''))"
+                " FROM {}.{} x").format(sql.Identifier(schema), sql.Identifier(t))).fetchone()  # type: ignore[misc]
             print(f"{t} {n} {md5}")
 
 
+def leftovers(name: str) -> None:
+    """Exit 1 if other sessions or prepared transactions remain in the database (e.g. after a SIGKILL); the killed
+    client's backend may take a moment to notice, so wait up to 10 s."""
+    with psycopg.connect(db_url(name), autocommit=True) as c:
+        for _ in range(50):
+            sessions, prepared = c.execute(
+                "SELECT (SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                " AND backend_type = 'client backend' AND pid <> pg_backend_pid()),"  # not autovacuum workers
+                " (SELECT count(*) FROM pg_prepared_xacts"
+                " WHERE database = current_database())").fetchone()  # type: ignore[misc]
+            if sessions == 0 and prepared == 0:
+                print(f"{name}: no other sessions, no prepared transactions")
+                return
+            time.sleep(0.2)
+    print(f"{name}: {sessions} other sessions, {prepared} prepared transactions")
+    sys.exit(1)
+
+
 def pg_stats() -> None:
-    """Read-only per-database size and user-table write counters (EXISTING_PG_URL), to prove other databases were
-    untouched. User tables only: autovacuum/autoanalyze write the system catalogs, so pg_stat_database's tuple
-    counters can move on an idle database."""
-    base = env_url("EXISTING_PG_URL")
-    with psycopg.connect(base) as c:
-        names = [r[0] for r in c.execute("SELECT datname FROM pg_database WHERE NOT datistemplate ORDER BY 1")]
-    for name in names:
+    """Read-only per-database size and user-table write counters, plus non-default server settings, for every
+    PostgreSQL in EXISTING_PG_URL (space-separated), to prove other databases and the server were untouched. User
+    tables only: autovacuum/autoanalyze write the system catalogs, so pg_stat_database counters move when idle.
+    Settings are those the URL's role may see (all only with superuser or pg_read_all_settings); for the homelab's
+    host cluster host_snapshot.sh reads the same as the postgres superuser instead (PG_LOCAL_SUPERUSER=1)."""
+    urls = os.environ.get("EXISTING_PG_URL", "").split()
+    if not urls:
+        raise Refused("EXISTING_PG_URL is not set")
+    for base in urls:
+        dbname_of(base)
+    for base in urls:
+        parts = urlsplit(base)
+        print(f"server {parts.hostname}:{parts.port or 5432}")
         try:
-            with psycopg.connect(urlsplit(base)._replace(path=f"/{name}").geturl(), autocommit=True) as c:
-                c.execute("SET default_transaction_read_only = on")
-                size, ins, upd, dele = c.execute(
-                    "SELECT pg_database_size(current_database()), coalesce(sum(n_tup_ins), 0),"
-                    " coalesce(sum(n_tup_upd), 0), coalesce(sum(n_tup_del), 0) FROM pg_stat_user_tables").fetchone()  # type: ignore[misc]
-            print(f"db {name} size={size} user_inserted={ins} user_updated={upd} user_deleted={dele}")
+            with psycopg.connect(base) as c:
+                names = [r[0] for r in c.execute("SELECT datname FROM pg_database WHERE NOT datistemplate ORDER BY 1")]
+                roles = [r[0] for r in c.execute("SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY 1")]
+                settings = c.execute("SELECT name, setting FROM pg_settings WHERE source NOT IN ('default',"
+                                     " 'override', 'client', 'session') ORDER BY 1").fetchall()
         except psycopg.Error as e:
-            print(f"db {name} not readable with this user ({type(e).__name__})")
+            print(f"server not readable with this URL ({type(e).__name__})")
+            continue
+        print(f"roles {' '.join(roles)}")
+        for k, v in settings:
+            print(f"setting {k}={v}")
+        for name in names:
+            try:
+                with psycopg.connect(parts._replace(path=f"/{name}").geturl(), autocommit=True) as c:
+                    c.execute("SET default_transaction_read_only = on")
+                    size, ins, upd, dele = c.execute(
+                        "SELECT pg_database_size(current_database()), coalesce(sum(n_tup_ins), 0),"
+                        " coalesce(sum(n_tup_upd), 0), coalesce(sum(n_tup_del), 0)"
+                        " FROM pg_stat_user_tables").fetchone()  # type: ignore[misc]
+                print(f"db {name} size={size} user_inserted={ins} user_updated={upd} user_deleted={dele}")
+            except psycopg.Error as e:
+                print(f"db {name} not readable with this user ({type(e).__name__})")
 
 
 def crash(config_path: str, entity: str, chunk_no: str) -> None:
-    """Run generate against ECOMMERCE_DATABASE_URL (must be a namespace sibling) and SIGKILL this process just
+    """Run generate against ECOMMERCE_DATABASE_URL (must be the crash database) and SIGKILL this process just
     before writing (entity, chunk_no): a real hard crash."""
     url = env_url("ECOMMERCE_DATABASE_URL")
-    check_name(dbname_of(url), sibling=True)
+    check_name(dbname_of(url), (CRASH_DB,))
     from ecomgen import config, generate, load
 
     real = generate.generate_chunk
@@ -164,9 +241,10 @@ def crash(config_path: str, entity: str, chunk_no: str) -> None:
 
 
 COMMANDS: dict[str, Callable[..., None]] = {
-    "url": lambda name: print(db_url(name)), "exists": lambda name: sys.exit(0 if exists(name) else 1),
-    "create": create, "drop": drop, "system-id": system_id, "wal-lsn": wal_lsn, "wal-bytes-since": wal_bytes_since,
-    "sizes": sizes, "digest": digest, "pg-stats": pg_stats, "crash": crash,
+    "url": lambda name: print(db_url(name)), "preflight": preflight, "same-server": same_server,
+    "server-major": server_major,
+    "wal-lsn": wal_lsn, "wal-bytes-since": wal_bytes_since, "sizes": sizes, "digest": digest,
+    "leftovers": leftovers, "pg-stats": pg_stats, "crash": crash,
 }
 
 if __name__ == "__main__":

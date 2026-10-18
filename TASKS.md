@@ -1,16 +1,10 @@
 # Tasks
 
 ## Active
-- [ ] `chore/mvp-run` (stacked on PR #8): 10k MVP run + restart recorded in `docs/BENCHMARKS.md`; awaiting approval to commit/PR
-- [ ] PR #10 `chore/homelab-tooling` (base `chore/mvp-run`): compose scoping, benchmark + snapshot scripts, runbook; reviewed, 10 findings fixed
-- [ ] Merge stack #5 → #9 + tooling into `main` and tag (approved: option a; confirm before merging)
-- [ ] Ubuntu: Step 0 inventory, then runbook `docs/HOMELAB_DEPLOYMENT.md` (needs approval to execute)
-- [ ] Phase 2 file feeds (CSV/JSONL + staging + manifests); its acceptance includes checking files on Ubuntu
-- [ ] PR #8 `feat/status-resume` (base `feat/validate`): `status` + `resume`; reviewed twice, all findings fixed; awaiting merge (order: #5 → #6 → #7 → #8)
-- [ ] PR #7 `feat/validate` (base `feat/copy-loader-smoke`): `validate [--run-id]`; reviewed, 10 findings fixed; awaiting merge (order: #5 → #6 → #7)
-- [ ] After #5 merges (GitHub-confirmed): `gh pr edit 6 --base main`; after #6 merges: retarget #7 to `main`
-- [ ] PR #6 `feat/copy-loader-smoke` (stacked on PR #5): COPY loader + chunk ledger + `generate --profile smoke`; reviewed, 10 findings fixed; awaiting merge after #5
-- [ ] PR #5 `feat/deterministic-generation`: pure generator module + tests; reviewed, 8 findings fixed; awaiting merge
+- [ ] PR `fix/host-postgres-tooling` (base `docs/post-merge-handoff`, PR #11): host PostgreSQL 18 + least-privilege role, no automatic drops, mount gate, digest fix; reviewed, 10 findings fixed; then merge #11 + this, tag `v0.1.1-homelab`
+- [ ] Ubuntu (operator runs each step by hand): Stage 1 directories + checkout, Stage 2 role/DBs, Stage 3-5 benchmark per `docs/HOMELAB_DEPLOYMENT.md` at `v0.1.1-homelab`
+- [ ] Record Ubuntu results in `docs/BENCHMARKS.md` (PR from the Mac)
+- [ ] Phase 2 file feeds (CSV/JSONL + staging + manifests); its acceptance includes checking files on Ubuntu; homelab `filesystem.root` = `/srv/homelab/ecommerce/data` (spec/example still say `/srv/ecommerce-data`)
 
 ## Next (Phase 1)
 
@@ -24,6 +18,7 @@
 - Clearer error when `metadata_schema` is renamed after apply (currently fails loudly with DuplicateTable)
 
 ## Done
+- [x] PRs #5-#10 merged into `main` (merge commits, each pinned to its reviewed head); tag `v0.1.0-homelab` -> `05bccd0`; `main` tree = tested #10 head; 139 passed / 0 skipped, mypy clean (2026-10-18)
 - [x] Dev DB recreated (user-approved); smoke run + validate: 12/12 pass (2026-10-17)
 - [x] PR #1 workflow rules (CLAUDE.md, handoff, .gitignore fix)
 - [x] PR #2 package skeleton
