@@ -3,14 +3,14 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-18
-**Branch:** `feat/cleanup-files` (from `main` `1e8be96` = PR #16 replay-files merged, CI green 216/0). PR B of 3:
-plan approved (no `--older-than`), implemented, reviewed (10 findings fixed); awaiting push approval.
+**Branch:** `chore/benchmark-files` (from `main` `b619622` = PR #17 cleanup-files merged, CI green 235/0). PR C of
+3: plan presented, awaiting approval.
 **Deployed on Ubuntu:** `v0.1.1-homelab` (`8c581ad`; no files). Keep it until `v0.2.0-homelab` passes there.
 **Approved (2026-10-18):** Part 2 plan (replay → cleanup → benchmark + release); user will recreate the three
 Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleaning a run's originals makes
 `validate` fail with "deleted by cleanup" (plan defaults, accepted with the plan).
 
-## This task: PR B, `cleanup-files` (`docs/FEEDS.md` "Cleanup")
+## Previous task: PR B, `cleanup-files` (PR #17, merged) (`docs/FEEDS.md` "Cleanup")
 - `cleanup.py`: `Target` (staging | replay | run), `plan` (read-only, hashes candidates: ledger-recorded,
   not-deleted files of a COMPLETED run/replay (gone ones included, changed ones kept out), or known `staging/<id>`
   dirs of runs/replays/cleanups; manifests kept; `check_root`), `token`, `run` (run lock; token must match before
@@ -41,7 +41,7 @@ Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleani
 | 9 | No index on deleted_by | Partial indexes in 0007 |
 | 10 | Duplicated id patterns; cln_* staging "unknown" | Shared RUN_ID/REPLAY_ID/CLEANUP_ID; cleanups known |
 
-## Previous task: PR A, `replay-files` (PR #16, merged) (`docs/FEEDS.md` "Replay")
+## Earlier: PR A, `replay-files` (PR #16, merged) (`docs/FEEDS.md` "Replay")
 - `replay.py`: `Params` (from/to/feeds/delay/jitter/dup pct, validated), `replay_id` (hash of run + params +
   REPLAY_VERSION), pure `schedule` (arrival = end of partition day + delay + jitter; dup 1-24 h later; both rng draws
   always made), `delivery_manifest` (plan only, reproducible), `_originals` (manifest vs ledger sha, each original vs
@@ -131,5 +131,5 @@ Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleani
 - Phase 2 file feeds not implemented: `data/` stays empty; `filesystem.root` default still `/srv/ecommerce-data`.
 
 ## Next step
-User approves the PR B plan → implement `cleanup-files` → independent review → push + PR (ask) → merge → PR C
-(benchmark with files + `v0.2.0-homelab`).
+User approves the PR C plan → benchmark with files + Mac rehearsals (PG 17, PG 18) → review → PR → merge → tag
+`v0.2.0-homelab` (ask) → user runs it on Ubuntu (recreate the 3 DBs by hand first) → results PR.
