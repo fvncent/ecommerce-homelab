@@ -6,6 +6,9 @@ Feeds (schema_version 1), partitioned by event date (UTC) under the data root:
 - clickstream (JSONL, `clickstream/date=D/{run}-part-NNNNN.jsonl`): World.clickstream_events browsing events in
   sessions of SESSION_EVENTS (`evt_N`, `ses_N`), plus one `order_placed` event per order (`evt_ord_N`).
 Rows within a file follow generation order, not event time. Files roll over at filesystem.max_file_size_mb.
+A clock step (`advance`) publishes the events of its window (previous_as_of, as_of] only (the first step:
+[clock_start, as_of]): settlements whose settled_at is in it, order_placed events of the orders placed in it, and
+browsing events whose event_time is in it. All steps of a chain together hold exactly the one-shot run's records.
 
 Publishing (DB and filesystem writes are not atomic together, so this converges instead):
 1. Every file of the run is regenerated into `staging/{run}/` (our own incomplete output, cleared first).
@@ -200,38 +203,79 @@ def enabled(cfg: Config) -> list[str]:
     return [f for f, on in (("payment_settlement", cfg.filesystem.csv), ("clickstream", cfg.filesystem.jsonl)) if on]
 
 
-def write_staged(world: generate.World, cfg: Config, run_id: str, staging: Path) -> dict[str, FileStat]:
-    """Write every enabled feed of the run into staging; return per-file stats keyed by relative path."""
+def in_window(plan: generate.StepPlan, at: datetime) -> bool:
+    """True if a step's files hold an event at `at`: (previous_as_of, as_of] (first step: everything up to as_of)."""
+    return (plan.previous is None or at > plan.previous) and at <= plan.as_of
+
+
+def _in_window_text(plan: generate.StepPlan, at: str) -> bool:
+    """in_window for a ts() string: the fixed-width UTC format sorts like the time, so no parsing per event."""
+    return (plan.previous is None or at > ts(plan.previous)) and at <= ts(plan.as_of)
+
+
+def _sessions(world: generate.World, rows: int) -> Iterator[list[dict[str, object]]]:
+    """All browsing events, a bounded batch of sessions at a time. Entities are pure functions of their number, so a
+    bounded cache can't change output; it saves regenerating the same products (and their sellers) per event."""
+    customer: Callable[[int], generate.Customer] = functools.lru_cache(maxsize=CACHE_ENTITIES)(world.customer)
+    product: Callable[[int], generate.Product] = functools.lru_cache(maxsize=CACHE_ENTITIES)(world.product)
+    per_chunk = max(1, rows // SESSION_EVENTS)
+    for first in range(1, session_count(world) + 1, per_chunk):
+        last = min(session_count(world), first + per_chunk - 1)
+        yield [e for s in range(first, last + 1) for e in session_events(world, s, customer, product)]
+
+
+def browsing_events_by(world: generate.World, as_of: datetime, rows: int) -> int:
+    """How many browsing events happened by as_of (all of them at clock_end)."""
+    if as_of >= world.clock_end:
+        return world.clickstream_events
+    limit = ts(as_of)
+    return sum(1 for batch in _sessions(world, rows) for e in batch if str(e["event_time"]) <= limit)
+
+
+def write_staged(world: generate.World, cfg: Config, run_id: str, staging: Path,
+                 plan: generate.StepPlan | None = None) -> dict[str, FileStat]:
+    """Write every enabled feed of the run (or of the clock step `plan`: its window only) into staging; return
+    per-file stats keyed by relative path. A whole run is the single step from nothing to clock_end, so both share
+    one code path (and all steps together give exactly the whole run's records)."""
+    plan = plan or generate.plan_step(world, None, world.clock_end)
     feeds = enabled(cfg)
     w = _Writer(staging, cfg.filesystem.max_file_size_mb * 1024 * 1024)
     rows = cfg.generator.chunk_rows
-    header = _csv_line(list(SETTLEMENT_COLUMNS))
-    for chunk_no in range(generate.chunk_count(world, "orders", rows)):
-        tables = generate.generate_chunk(world, "orders", chunk_no, rows).tables
+    for orders, payments in _order_batches(world, rows, plan):
         if "payment_settlement" in feeds:
-            by_base: dict[str, list[tuple[str, datetime]]] = {}
-            for p in cast(list[generate.PaymentAttempt], tables["payment_attempts"]):
-                row = settlement_row(p)
-                if row:
-                    base = (f"source_feeds/payment_settlement/date={row['settlement_date']}/"
-                            f"{run_id}-{row['provider']}")
-                    by_base.setdefault(base, []).append((_csv_line([row[c] for c in SETTLEMENT_COLUMNS]),
-                                                         p.updated_at))
-            for base, recs in sorted(by_base.items()):
-                w.add("payment_settlement", base, "csv", header, recs)
+            _add_settlements(w, run_id, payments)
         if "clickstream" in feeds:
-            _add_events(w, run_id, [order_event(world, o) for o in cast(list[generate.Order], tables["orders"])])
+            _add_events(w, run_id, [order_event(world, o) for o in orders])
     if "clickstream" in feeds:
-        # Entities are pure functions of their number, so a bounded cache can't change output; it saves regenerating
-        # the same products (and their sellers) for every event.
-        customer: Callable[[int], generate.Customer] = functools.lru_cache(maxsize=CACHE_ENTITIES)(world.customer)
-        product: Callable[[int], generate.Product] = functools.lru_cache(maxsize=CACHE_ENTITIES)(world.product)
-        per_chunk = max(1, rows // SESSION_EVENTS)
-        for first in range(1, session_count(world) + 1, per_chunk):
-            last = min(session_count(world), first + per_chunk - 1)
-            _add_events(w, run_id, [e for s in range(first, last + 1)
-                                    for e in session_events(world, s, customer, product)])
+        for batch in _sessions(world, rows):
+            _add_events(w, run_id, [e for e in batch if _in_window_text(plan, str(e["event_time"]))])
     return w.files
+
+
+def _order_batches(world: generate.World, rows: int, plan: generate.StepPlan
+                   ) -> Iterator[tuple[list[generate.Order], list[generate.PaymentAttempt]]]:
+    """(orders placed, payment attempts settled) in the step window, one chunk of orders at a time. A step looks at
+    the orders it writes or revisits: every order that can settle in its window is among them."""
+    for first in range(plan.orders.start, plan.orders.stop, rows):
+        orders, payments = [], []
+        for n in range(first, min(plan.orders.stop, first + rows)):
+            order, _, attempts = world.order(n, plan.as_of)
+            if n > plan.known:  # placed in the window
+                orders.append(order)
+            payments += [p for p in attempts if p.state == "SETTLED" and in_window(plan, p.updated_at)]
+        yield orders, payments
+
+
+def _add_settlements(w: _Writer, run_id: str, payments: list[generate.PaymentAttempt]) -> None:
+    header = _csv_line(list(SETTLEMENT_COLUMNS))
+    by_base: dict[str, list[tuple[str, datetime]]] = {}
+    for p in payments:
+        row = settlement_row(p)
+        if row:
+            base = f"source_feeds/payment_settlement/date={row['settlement_date']}/{run_id}-{row['provider']}"
+            by_base.setdefault(base, []).append((_csv_line([row[c] for c in SETTLEMENT_COLUMNS]), p.updated_at))
+    for base, recs in sorted(by_base.items()):
+        w.add("payment_settlement", base, "csv", header, recs)
 
 
 def _add_events(w: _Writer, run_id: str, events: list[dict[str, object]]) -> None:
@@ -365,16 +409,27 @@ def _place(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path, rel: 
 
 
 def manifest(conn: psycopg.Connection, cfg: Config, run_id: str) -> dict[str, object]:
-    """The run manifest, built only from the database (ledger + run), so rebuilding it yields the same bytes."""
-    run = conn.execute(db.q(cfg, "SELECT generator_version, config_sha256, seed, resume_fields->'data_version'"
+    """The run manifest, built only from the database (ledger + run), so rebuilding it yields the same bytes. A clock
+    step's manifest also names the step: its window, and the chain's first step."""
+    clock = "previous_as_of, as_of" if db.has_column(conn, cfg, "generation_runs", "as_of") else "NULL, NULL"
+    run = conn.execute(db.q(cfg, "SELECT generator_version, config_sha256, seed, resume_fields->'data_version',"
+                                 f" {clock}, resume_fields->'world'->>'clock_start'"
                                  " FROM {meta}.generation_runs WHERE run_id = %s"), (run_id,)).fetchone()
     assert run is not None
     files = conn.execute(db.q(cfg, "SELECT rel_path, feed, format, schema_version, start_event_time,"
                                    " end_event_time, records, bytes, sha256, published_at FROM {meta}.published_files"
                                    " WHERE run_id = %s AND feed <> 'manifest' ORDER BY rel_path"), (run_id,)).fetchall()
+    step: dict[str, object] = {}
+    if run[5] is not None:
+        first = conn.execute(db.q(cfg, "SELECT run_id FROM {meta}.generation_runs WHERE previous_as_of IS NULL"
+                                       " AND as_of IS NOT NULL ORDER BY as_of, run_id LIMIT 1")).fetchone()
+        step = {"clock_step": {
+            "first_step_run_id": first[0] if first else None, "previous_as_of": ts(run[4]) if run[4] else None,
+            "as_of": ts(run[5]), "window": "(previous_as_of, as_of]" if run[4] else "[clock_start, as_of]",
+            "window_start": ts(run[4]) if run[4] else ts(datetime.fromisoformat(run[6]))}}
     return {
         "run_id": run_id, "generator_version": run[0], "data_version": run[3], "config_sha256": run[1],
-        "seed": run[2], "files": [
+        "seed": run[2], **step, "files": [
             {"source_system": SOURCE_SYSTEMS[f[1]], "feed": f[1], "file_path": f[0], "format": f[2],
              "schema_version": f[3], "start_event_time": ts(f[4]) if f[4] else None,
              "end_event_time": ts(f[5]) if f[5] else None, "records_written": f[6], "bytes": f[7], "sha256": f[8],
@@ -386,9 +441,10 @@ def manifest_path(run_id: str) -> str:
     return f"manifests/run_id={run_id}/manifest.json"
 
 
-def publish(conn: psycopg.Connection, cfg: Config, run_id: str, world: generate.World, root: Path) -> Published:
-    """Stage, publish and record every file of the run, then its manifest. Idempotent: safe to repeat after any
-    crash; files already published (and unchanged) are left alone."""
+def publish(conn: psycopg.Connection, cfg: Config, run_id: str, world: generate.World, root: Path,
+            plan: generate.StepPlan | None = None) -> Published:
+    """Stage, publish and record every file of the run (or clock step), then its manifest. Idempotent: safe to repeat
+    after any crash; files already published (and unchanged) are left alone."""
     feeds = enabled(cfg)
     if not feeds:
         return Published(0, 0, {})
@@ -402,7 +458,7 @@ def publish(conn: psycopg.Connection, cfg: Config, run_id: str, world: generate.
     ledger = _ledger(conn, cfg, run_id)
     if manifest_path(run_id) in ledger:  # everything was published (crash before COMPLETED): only verify
         return _verified(conn, cfg, run_id, root, ledger)
-    stats = write_staged(world, cfg, run_id, staging)
+    stats = write_staged(world, cfg, run_id, staging, plan)
     unknown = set(ledger) - set(stats) - {manifest_path(run_id)}
     if unknown:
         raise FeedError(f"ledger records files this run would not produce: {sorted(unknown)[:3]}")

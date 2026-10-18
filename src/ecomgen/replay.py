@@ -191,6 +191,22 @@ def originals(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path,
     return row[0], sorted(out, key=lambda o: o.path)
 
 
+def _refuse_split_days(conn: psycopg.Connection, cfg: Config, run_id: str, params: Params) -> None:
+    """A replay copies one run's files. In a chain of clock steps a date partition can hold files of several steps
+    (a step ending mid-day); replaying one of them would deliver part of a day, so that is refused."""
+    others = conn.execute(db.q(cfg, "SELECT DISTINCT run_id, substring(rel_path from 'date=([0-9-]{{10}})')"
+                                    " FROM {meta}.published_files WHERE run_id <> %s AND feed = ANY(%s)"
+                                    " AND substring(rel_path from 'date=([0-9-]{{10}})') BETWEEN %s AND %s"
+                                    " ORDER BY 2, 1"),
+                          (run_id, list(params.feeds), params.start.isoformat(), params.end.isoformat())).fetchall()
+    if others:
+        days = sorted({d for _, d in others})
+        raise ReplayError(f"{len(days)} date(s) in range ({days[0]}{' ..' if len(days) > 1 else ''}) also hold files "
+                          f"of other clock steps ({', '.join(sorted({r for r, _ in others}))}); replaying {run_id} "
+                          "alone would deliver part of a day. Replay dates that lie wholly inside one step's window "
+                          "(steps on day boundaries keep days whole)")
+
+
 def replay(conn: psycopg.Connection, cfg: Config, params: Params, run_id: str | None = None) -> ReplayResult:
     """Deliver (or finish delivering, or verify) the replay these parameters define. Holds the run lock, so it
     never overlaps a generate/resume, another replay or a cleanup."""
@@ -215,6 +231,7 @@ def replay(conn: psycopg.Connection, cfg: Config, params: Params, run_id: str | 
         unknown = set(params.feeds) - set((recorded or {}).get("feeds", {}).get("enabled") or [])
         if unknown:
             raise ReplayError(f"run {run_id} did not publish {', '.join(sorted(unknown))}")
+        _refuse_split_days(conn, cfg, run_id, params)
         rid = replay_id(run_id, params)
         staging = root / "staging" / rid
         feeds.no_links(root, staging)

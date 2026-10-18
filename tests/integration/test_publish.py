@@ -315,6 +315,12 @@ def _drop_order_placed(lines: list[str]) -> list[str]:
     return lines[:i] + lines[i + 1:]
 
 
+def _event_after_the_window(lines: list[str]) -> list[str]:
+    event = json.loads(lines[-1])
+    event["event_time"] = "2027-01-01T00:00:00Z"
+    return lines[:-1] + [json.dumps(event) + "\n"]
+
+
 # Each corruption must be caught by its check (other checks may fail too: e.g. a rewritten file no longer matches
 # the manifest's checksum).
 FEED_CORRUPTIONS: dict[str, Callable[[psycopg.Connection, Path], object]] = {
@@ -327,6 +333,7 @@ FEED_CORRUPTIONS: dict[str, Callable[[psycopg.Connection, Path], object]] = {
                     "product_id": None, "payload": {}}) + "\n"]),
     "orders_placed_once": lambda c, r: _rewrite(c, r, _first(r, ".jsonl"), _drop_order_placed),
     "events_unique_and_complete": lambda c, r: _rewrite(c, r, _first(r, ".jsonl"), lambda ls: ls + ls[-1:]),
+    "records_in_their_step_window": lambda c, r: _rewrite(c, r, _first(r, ".jsonl"), _event_after_the_window),
     "files_match_ledger": lambda c, r: (r / _first(r, ".jsonl")).write_text("truncated\n"),
     "manifest_matches_ledger": lambda c, r: c.execute(
         "UPDATE generator_meta.published_files SET rel_path = rel_path || '.renamed'"

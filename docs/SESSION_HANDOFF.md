@@ -3,9 +3,9 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-18
-**Branch:** `feat/advance-clock` (from `main` `35e7278` = PR #20 user guide merged). Phase 3A of the approved
-Phase 3 plan (3A advance → 3B files per step → 3C outbox → 3D inventory → 3E catch-up/pacing; decision: as-of clock
-inside the config's clock_start..clock_end, so stepping to the end == generate and DATA_VERSION/goldens stay).
+**Branch:** `feat/step-files` (from `main` `3e1d5a0` = PR #21 Phase 3A `advance` merged, CI 276/0 on PG 17 + 18).
+Phase 3B (files per clock step) of the approved Phase 3 plan (3A done → 3B → 3C outbox → 3D inventory → 3E
+catch-up/pacing). Decision kept: as-of clock inside clock_start..clock_end. Ubuntu stays on `v0.2.0-homelab`.
 **Practice dataset (Ubuntu, user-created 2026-10-18):** role `ecomgen_practice` (no privileges) owns `ecommerce_oltp`
 (CONNECT revoked from PUBLIC); config/env in `/srv/homelab/ecommerce/practice/` (`practice-10k.yaml` = example
 config, `practice.env` mode 600); files in `/srv/homelab/ecommerce/data/practice`; run
@@ -192,7 +192,7 @@ SQL without `!` (e.g. `NOT LIKE 'pg\_%'`).
 - Replay timing/duplicates depend on the run id: compared with the local plan, not across machines.
 - Not yet: Parquet snapshots, supplier/courier feeds, age-based retention, profiles above 10k, `workers: 2`.
 
-## This task: 3A `advance` (`docs/GENERATOR_USER_GUIDE.md` "Clock steps")
+## Previous task: 3A `advance` (PR #21, merged) (`docs/GENERATOR_USER_GUIDE.md` "Clock steps")
 - `generate.py`: `World.order(n, as_of)` (state as of a time; same draws), `placed_at`, `orders_by(t)` (binary
   search; placed_at never decreases), `LIFECYCLE_MAX` (800,760 s: after placed + it an order is final),
   `check_step`, `step_orders` (orders placed after previous - LIFECYCLE_MAX .. by as_of), `step_chunk` (inserts for
@@ -224,5 +224,41 @@ SQL without `!` (e.g. `NOT LIKE 'pg\_%'`).
 
 Suite after fixes: 276 passed with DB, 141 passed / 135 skipped without; mypy clean.
 
+## This task: 3B files per step (`docs/FEEDS.md` "Clock steps", user guide "Clock steps")
+- `feeds.py`: `in_window(plan, t)` ((previous, as_of]; first step [clock_start, as_of]); `write_staged(..., plan)`:
+  settlements of payments SETTLED in the window (`_order_batches` over plan.orders), order_placed of orders placed in
+  it (n > plan.known), browsing events with event_time in it (`_sessions` scans all sessions);
+  `browsing_events_by(world, t)`; `publish(..., plan)`; manifest gets `clock_step` for steps only (one-shot bytes
+  unchanged; FEED_GOLDEN unchanged).
+- `load.py`: steps publish after their DB chunks, before COMPLETED (same protocol as generate); feeds refusal
+  removed; `CHAIN_MUST_MATCH` += data_root, feeds; `recorded_world` public.
+- `validate.py`: `_file_runs` (a chain: every step), `_file_results` over several runs (`_load_run_files`), browse
+  count = browsing events by the latest as_of.
+- Tests: `tests/test_feeds.py` +5 (steps' records == one-shot, half-open windows, browse count);
+  `tests/integration/test_step_files.py` (15: 5-step chain validated after each step + manifest/window checks +
+  converges to generate rows and records; determinism across chains; real SIGKILL at db/csv/jsonl/place/manifest/
+  complete → resume; repeat changes no file; deleted/corrupted file reported; read-only tree → FAILED → resume;
+  DB error in manifest → FAILED → resume; chain data root; replay + cleanup of a step).
+  Suite: 296 passed with DB, 146/150 without; mypy clean.
+- Mac 10k, 4 steps with files: 8,295 settlements + 110,000 events identical to generate's; validate 19/19; ~2.5 s
+  per step (session scan dominates; a run-independent session time would need a DATA_VERSION bump).
+
+## 3B review (`/code-review high`) — 8 fixed, 2 deferred (decision for the user)
+| # | Finding | Fix |
+|---|---|---|
+| 1 | validate couldn't tell if a record was in the right step's window | `records_in_their_step_window` (event_time / settled_at + run_id in the temp tables, `pg_temp.feed_windows`); corruption test + "event moved to the wrong step" test |
+| 2 | replay of a step delivered part of a day split across steps | `_refuse_split_days`: refused with the steps named; day-aligned steps replay whole days; test |
+| 3 | unfinished step = hundreds of file violations | one `files_match_ledger` reason per unfinished step; asserted in the SIGKILL tests |
+| 4 | malformed resume fields crashed validate | ValidateError (exit 3); test |
+| 5-6 | every step / validate scans all browsing sessions (O(N) per step) | **deferred**: needs session start = slot s (like orders) → DATA_VERSION 3, new goldens + references, Ubuntu re-verify |
+| 7 | ts() → parse per event to filter | fixed-width string compare (`_in_window_text`) |
+| 8 | separate plan=None code path | a whole run = `plan_step(world, None, clock_end)`; one path (FEED_GOLDEN unchanged) |
+| 9 | chain locked max_file_size_mb | `CHAIN_MUST_MATCH` compares `feeds.enabled` (nested keys in `_mismatch`); test |
+| 10 | first_step_run_id lookup unordered | `ORDER BY as_of, run_id LIMIT 1` |
+
+Suite after fixes: 301 passed with DB, 146 / 155 skipped without; mypy clean. validate now has 20 checks for a
+run with both feeds (was 19).
+
 ## Next step
-Push `feat/advance-clock` + PR (ask) → CI → merge (ask) → 3B (files per step).
+Ask to push `feat/step-files` + PR; decide on the session-time change (DATA_VERSION 3) as its own PR. No
+merge/tag/deploy without approval.

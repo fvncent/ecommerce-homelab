@@ -82,8 +82,10 @@ def _write(cur: psycopg.Cursor[tuple[object, ...]], cfg: Config, table: str,
 # run recorded (so config edits to seed/clock/counts can't change it) and requires the rest to match, including
 # where and how its files are published (a different root or layout would publish a second, different set).
 RESUME_MUST_MATCH = ("data_version", "chunk_rows", "application_schema", "data_root", "feeds")
-# Every step of a chain must generate the same world into the same schema (chunk_rows may differ per step).
-CHAIN_MUST_MATCH = ("data_version", "world", "application_schema")
+# Every step of a chain must generate the same world into the same schema and publish the same feeds under the same
+# data root (validate checks the chain's files together); chunk_rows and max_file_size_mb (how files are split) may
+# differ per step.
+CHAIN_MUST_MATCH = ("data_version", "world", "application_schema", "data_root", "feeds.enabled")
 
 
 def resume_fields(cfg: Config, world: generate.World) -> dict[str, object]:
@@ -100,7 +102,7 @@ def resume_fields(cfg: Config, world: generate.World) -> dict[str, object]:
     return normalized
 
 
-def _recorded_world(recorded: dict[str, object]) -> generate.World:
+def recorded_world(recorded: dict[str, object]) -> generate.World:
     w = recorded.get("world")
     try:
         assert isinstance(w, dict)
@@ -251,14 +253,13 @@ def run(conn: psycopg.Connection, cfg: Config, preset: str | None = None) -> Run
 
 
 def advance(conn: psycopg.Connection, cfg: Config, to: datetime | None = None) -> RunResult | None:
-    """Move the simulation clock to `to` (default clock_end) as a new step run. None if the clock is already there.
-    The first step starts from an empty schema set; each later one needs the previous step COMPLETED and the same
-    world (seed, clock, counts)."""
+    """Move the simulation clock to `to` (default clock_end) as a new step run: database changes first, then the
+    step's files (its window's events), then COMPLETED. None if a completed step already reached `to`. The first
+    step starts from an empty schema set; each later one needs the previous step COMPLETED and the same world, data
+    root and feeds."""
     _require_loadable(conn, cfg)
     _require_clock(conn, cfg)
-    if feeds.enabled(cfg):
-        raise LoadError("advance writes database rows only (files per step are not implemented yet): use a config "
-                        "with filesystem.csv and filesystem.jsonl set to false")
+    _require_data_root(cfg)
     world = generate.World.from_config(cfg)
     if to is not None and to.utcoffset() is None:
         raise LoadError(f"as_of {to.isoformat()} has no time zone")
@@ -331,7 +332,7 @@ def resume(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -> 
                             "regenerated chunks wouldn't match committed ones; restore the original config "
                             "(e.g. git checkout) or generator version")
         _require_data_root(cfg)
-        world = _recorded_world(recorded)
+        world = recorded_world(recorded)
         # error is kept (a later failure overwrites it), so a crash during resume doesn't lose the first reason
         conn.execute(db.q(cfg, "UPDATE {meta}.generation_runs SET state = 'RUNNING', finished_at = NULL"
                                " WHERE run_id = %s"), (run_id,))
@@ -396,8 +397,13 @@ def _resume_mismatch(recorded: dict[str, object] | None, cfg: Config) -> list[st
     return _mismatch(recorded, current, RESUME_MUST_MATCH)
 
 
-def _mismatch(recorded: dict[str, object], current: dict[str, object], keys: Sequence[str]) -> list[str]:
-    return [k for k in keys if recorded.get(k) != current[k]]
+def _mismatch(recorded: dict[str, Any], current: dict[str, Any], keys: Sequence[str]) -> list[str]:
+    """Keys whose values differ; "a.b" compares a nested field."""
+    def get(d: dict[str, Any], key: str) -> object:
+        for part in key.split("."):
+            d = d.get(part) if isinstance(d, dict) else None  # type: ignore[assignment]
+        return d
+    return [k for k in keys if get(recorded, k) != get(current, k)]
 
 
 def _lock_holder(conn: psycopg.Connection) -> int | None:
@@ -453,7 +459,8 @@ def _execute(conn: psycopg.Connection, cfg: Config, run_id: str, world: generate
             published = feeds.publish(conn, cfg, run_id, world, Path(config.data_root(cfg)))  # DB first, then files
         else:
             written, skipped = write_step(conn, cfg, run_id, world, *step)
-            published = feeds.Published(0, 0, {})  # steps write no files (yet)
+            published = feeds.publish(conn, cfg, run_id, world, Path(config.data_root(cfg)),
+                                      generate.plan_step(world, *step))  # the step's window only
         totals = _complete(conn, cfg, run_id)
     except BaseException as e:
         _fail(conn, cfg, run_id, e)

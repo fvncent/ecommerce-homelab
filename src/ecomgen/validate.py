@@ -6,14 +6,18 @@ every row there (the state as of the latest step), run_completed and ledger_comp
 ledger_matches_tables sums the ledger of every run in the schema set (the chain's inserts add up to the tables).
 
 File checks (runs that publish feeds): every recorded file is intact and listed in the manifest, and each
-published feed agrees with PostgreSQL both ways (the Phase 2 gate). Feed rows are streamed into temporary tables
+published feed agrees with PostgreSQL both ways (the Phase 2 gate). For a chain of clock steps the files of every
+step are checked together against the current tables (each step holds only its window's events), so a record that
+two steps both published, or that none did, is a violation. Feed rows are streamed into temporary tables
 inside the same snapshot as the database checks, checked with the same id-per-violation queries, then dropped.
 """
 
 import csv
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import psycopg
 from psycopg import sql
@@ -135,9 +139,22 @@ MANIFEST_MATCHES = Check("manifest_matches_ledger", "the run manifest lists exac
 # the run published that feed. Comparisons are NULL-safe: a field missing from a row is a violation.
 TEMP_TABLES = {
     "feed_settlements": "settlement_id text, payment_id text, order_id text, currency text, gross numeric,"
-                        " fee numeric, net numeric, settled_at timestamptz",
-    "feed_events": "event_id text, event_type text, customer_id text, product_id text, order_id text",
+                        " fee numeric, net numeric, settled_at timestamptz, run_id text",
+    "feed_events": "event_id text, event_type text, customer_id text, product_id text, order_id text,"
+                   " event_time timestamptz, run_id text",
+    "feed_windows": "run_id text, clock_start timestamptz, window_start timestamptz, window_end timestamptz",
 }
+# Every record lies in the window of the run that published it: (previous_as_of, as_of] for a clock step (first step:
+# from clock_start), [clock_start, clock_end) for a generate run. With the per-feed "exactly once" checks this pins
+# each record to exactly one step.
+WINDOW_CHECK = Check("records_in_their_step_window", "every settlement / event lies in the time window of the run "
+                     "(clock step) that published it", """
+    SELECT f.id FROM (
+        SELECT settlement_id AS id, settled_at AS at, run_id FROM pg_temp.feed_settlements
+        UNION ALL SELECT event_id, event_time, run_id FROM pg_temp.feed_events) f
+    JOIN pg_temp.feed_windows w USING (run_id)
+    WHERE f.at IS NULL OR f.at < w.clock_start OR f.at > w.window_end
+       OR (w.window_start IS NOT NULL AND f.at <= w.window_start)""")
 SETTLEMENT_CHECKS = (
     Check("settlements_match_payments", "each settlement row is a SETTLED payment with the same order, amount, "
           "currency and time; fee >= 0 and fee + net = gross; no field missing", """
@@ -168,14 +185,14 @@ CLICKSTREAM_CHECKS = (
                    GROUP BY 1) e USING (order_id)
         WHERE coalesce(e.n, 0) <> 1"""),
     Check("events_unique_and_complete", "event IDs are unique, every event has an ID and type (order_placed: an "
-          "order); browsing events = the run's clickstream_events", """
+          "order); browsing events = the run's clickstream_events (a chain: those up to its latest step)", """
         SELECT event_id AS id FROM pg_temp.feed_events WHERE event_id IS NOT NULL GROUP BY 1 HAVING count(*) > 1
         UNION ALL SELECT 'malformed event ' || coalesce(event_id, '(no event_id)') FROM pg_temp.feed_events
         WHERE event_id IS NULL OR event_type IS NULL OR (event_type = 'order_placed' AND order_id IS NULL)
         UNION ALL SELECT 'browsing events: ' || count(*) || ', expected ' || %(browse)s
         FROM pg_temp.feed_events WHERE event_type <> 'order_placed' HAVING count(*) <> %(browse)s"""),
 )
-FEED_CHECKS = SETTLEMENT_CHECKS + CLICKSTREAM_CHECKS
+FEED_CHECKS = SETTLEMENT_CHECKS + CLICKSTREAM_CHECKS + (WINDOW_CHECK,)
 
 
 def _run_check(conn: psycopg.Connection, cfg: Config, check: Check, run_id: str,
@@ -207,13 +224,22 @@ def validate(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             run_id = db.resolve_run(conn, cfg, run_id)
             results = [_run_check(conn, cfg, c, run_id) for c in CHECKS]
-            row = conn.execute(db.q(cfg, "SELECT resume_fields FROM {meta}.generation_runs WHERE run_id = %s"),
-                               (run_id,)).fetchone()
-            recorded = row[0] if row and isinstance(row[0], dict) else {}
+            runs, as_of = _file_runs(conn, cfg, run_id)
+            recorded = runs[0][1] if runs else {}
             published = recorded.get("feeds", {}).get("enabled") or []
             if published:  # runs from before file feeds (or with feeds disabled) publish nothing to check
-                results += _file_results(conn, cfg, run_id, Path(recorded["data_root"]), published,
-                                         int(recorded["world"]["clickstream_events"]))
+                unfinished = [f"{r} is {state}: a clock step's files are checked once it completes"
+                              for r, _, state in runs if state != "COMPLETED"] if as_of is not None else []
+                if unfinished:  # one clear reason instead of every missing file and record of that step
+                    return run_id, results + [Result(FILES_INTACT, len(unfinished), _sample(unfinished))]
+                try:
+                    world = load.recorded_world(recorded)
+                    browse = (world.clickstream_events if as_of is None else
+                              feeds.browsing_events_by(world, as_of, int(recorded["chunk_rows"])))
+                except (load.LoadError, KeyError, TypeError, ValueError) as e:
+                    raise ValidateError(f"run {run_id}'s recorded resume fields are malformed: {e}") from None
+                results += _file_results(conn, cfg, [r for r, _, _ in runs], Path(recorded["data_root"]),
+                                         published, browse)
             return run_id, results
     finally:
         if conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE:
@@ -222,19 +248,61 @@ def validate(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -
                     conn.execute(f"DROP TABLE IF EXISTS pg_temp.{name}")
 
 
+def _file_runs(conn: psycopg.Connection, cfg: Config,
+               run_id: str) -> tuple[list[tuple[str, dict[str, Any], str]], datetime | None]:
+    """The runs whose files are checked, with their resume_fields and state, and the latest clock time (None: a
+    generate run). A generate run alone; for a clock step, every step in the schema set (the chain shares root and
+    feeds)."""
+    clock = "as_of" if db.has_column(conn, cfg, "generation_runs", "as_of") else "NULL::timestamptz"
+    row = conn.execute(db.q(cfg, f"SELECT resume_fields, {clock}, state FROM {{meta}}.generation_runs"
+                                 " WHERE run_id = %s"), (run_id,)).fetchone()
+    if row is None or not isinstance(row[0], dict):
+        return [], None
+    if row[1] is None:
+        return [(run_id, row[0], row[2])], None
+    steps = conn.execute(db.q(cfg, "SELECT run_id, resume_fields, state, as_of FROM {meta}.generation_runs"
+                                   " ORDER BY as_of")).fetchall()
+    return [(r[0], r[1], r[2]) for r in steps], steps[-1][3]
+
+
 def _sample(bad: list[str]) -> list[str]:
     return sorted(bad, key=lambda s: (len(s), s))[:SAMPLE]
 
 
-def _file_results(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path, published: list[str],
+def _file_results(conn: psycopg.Connection, cfg: Config, run_ids: list[str], root: Path, published: list[str],
                   browse: int) -> list[Result]:
-    """Check the run's files against the ledger and manifest, load the intact ones into the temp tables, and
+    """Check the runs' files against their ledgers and manifests, load the intact ones into the temp tables, and
     check the published feeds against PostgreSQL. Memory: one record at a time."""
+    broken: list[str] = []
+    manifest_bad: list[str] = []
+    for run_id in run_ids:
+        _load_run_files(conn, cfg, run_id, root, broken, manifest_bad)
+    _load_windows(conn, cfg, run_ids)
+    results = [Result(FILES_INTACT, len(broken), _sample(broken)),
+               Result(MANIFEST_MATCHES, len(manifest_bad), _sample(manifest_bad))]
+    checks = (SETTLEMENT_CHECKS if "payment_settlement" in published else ()) + (
+        CLICKSTREAM_CHECKS if "clickstream" in published else ()) + (WINDOW_CHECK,)
+    return results + [_run_check(conn, cfg, c, run_ids[-1], {"browse": browse}) for c in checks]
+
+
+def _load_windows(conn: psycopg.Connection, cfg: Config, run_ids: list[str]) -> None:
+    """pg_temp.feed_windows: each run's time window, from its recorded world and clock columns."""
+    clock = "previous_as_of, as_of" if db.has_column(conn, cfg, "generation_runs", "as_of") else "NULL, NULL"
+    conn.execute(db.q(cfg, "INSERT INTO pg_temp.feed_windows (run_id, clock_start, window_start, window_end)"
+                           " SELECT run_id, (resume_fields->'world'->>'clock_start')::timestamptz, w.previous,"
+                           " coalesce(w.as_of, (resume_fields->'world'->>'clock_end')::timestamptz)"
+                           f" FROM {{meta}}.generation_runs, LATERAL (SELECT {clock}) AS w (previous, as_of)"
+                           " WHERE run_id = ANY(%s)"), (run_ids,))
+
+
+def _load_run_files(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path, broken: list[str],
+                    manifest_bad: list[str]) -> None:
+    """One run's file and manifest checks (appended to broken / manifest_bad); intact feed files go into the temp
+    tables."""
     deleted_by = "deleted_by" if db.has_table(conn, cfg, "cleanups") else "NULL"  # before migration 0007
     ledger = conn.execute(db.q(cfg, f"SELECT rel_path, feed, format, records, bytes, sha256, {deleted_by}"
                                     " FROM {meta}.published_files WHERE run_id = %s ORDER BY rel_path"),
                           (run_id,)).fetchall()
-    broken: list[str] = []
     intact = []
     for rel, feed, fmt, records, size, sha, cleaned_by in ledger:
         path = root / rel
@@ -255,12 +323,12 @@ def _file_results(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path
     try:
         doc = json.loads((root / mrel).read_text(encoding="utf-8"))
         listed = {(f["file_path"], f["sha256"]) for f in doc["files"]}
-        manifest_bad = sorted(f"{p} ({'unlisted' if (p, s) in expected else 'not in ledger'})"
-                              for p, s in listed ^ expected)
+        manifest_bad += sorted(f"{p} ({'unlisted' if (p, s) in expected else 'not in ledger'})"
+                               for p, s in listed ^ expected)
         if doc.get("run_id") != run_id:
             manifest_bad.append(f"manifest run_id {doc.get('run_id')!r}")
     except (OSError, ValueError, KeyError, TypeError) as e:
-        manifest_bad = [f"{mrel}: unreadable ({type(e).__name__})"]
+        manifest_bad.append(f"{mrel}: unreadable ({type(e).__name__})")
     for rel, feed, fmt, records, path in intact:
         if feed == "manifest":
             continue
@@ -274,12 +342,12 @@ def _file_results(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path
                     if feed == "payment_settlement":
                         copy.write_row(tuple(r[k] for k in ("settlement_id", "payment_id", "order_id", "currency",
                                                             "gross_amount", "fee_amount", "net_amount",
-                                                            "settled_at")))
+                                                            "settled_at")) + (run_id,))
                     else:
                         payload = r.get("payload")
                         order_id = payload.get("order_id") if isinstance(payload, dict) else None
                         copy.write_row((r["event_id"], r["event_type"], r["customer_id"], r["product_id"],
-                                        order_id))
+                                        order_id, r.get("event_time"), run_id))
         except (ValueError, KeyError, TypeError, AttributeError, csv.Error, psycopg.DataError) as e:
             broken.append(f"{rel}: unparseable record {n} ({type(e).__name__})")
             continue
@@ -288,8 +356,3 @@ def _file_results(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path
             continue
         if n != records:
             broken.append(f"{rel}: {n} records, ledger says {records}")
-    results = [Result(FILES_INTACT, len(broken), _sample(broken)),
-               Result(MANIFEST_MATCHES, len(manifest_bad), _sample(manifest_bad))]
-    checks = (SETTLEMENT_CHECKS if "payment_settlement" in published else ()) + (
-        CLICKSTREAM_CHECKS if "clickstream" in published else ())
-    return results + [_run_check(conn, cfg, c, run_id, {"browse": browse}) for c in checks]
