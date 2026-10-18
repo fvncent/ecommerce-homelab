@@ -2,7 +2,7 @@
 
 **Status:** Planning / specification only — no generator application is included yet.  
 **Prepared:** 2026-10-17  
-**Hardware baseline:** Ubuntu Server; AMD Ryzen 5 5600; 16 GB RAM; 2 TB storage (SSD/HDD not yet confirmed).  
+**Hardware baseline:** Ubuntu Server; AMD Ryzen 5 5600; 16 GB RAM; 1 TB NVMe for project data (`/srv/homelab`); host PostgreSQL 18.  
 **Goal:** Build a reproducible, realistic e-commerce **source-system simulator**, independently build reliable data engineering pipelines, and **later** use their curated outputs for AI engineering (RAG, recommendations, forecasting and model evaluation).
 
 ## Development
@@ -75,7 +75,7 @@ Entity generation (`src/ecomgen/generate.py`) is pure and deterministic: entity 
 Python CLI / optional Streamlit dashboard
        | shared deterministic simulation engine
        +--> PostgreSQL (normalized e-commerce OLTP + outbox)
-       +--> /srv/ecommerce-data (CSV / JSONL / Parquet / manifests)
+       +--> /srv/homelab/ecommerce/data (CSV / JSONL / Parquet / manifests)
                          |
            YOUR INDEPENDENT PIPELINE
         batch files / PostgreSQL extraction / CDC
