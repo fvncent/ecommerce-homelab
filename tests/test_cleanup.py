@@ -1,6 +1,7 @@
 """cleanup-files rules without a database: the confirmation token, root refusals and path checks
 (deletion with PostgreSQL: integration/test_cleanup_files.py)."""
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -42,20 +43,55 @@ def test_filesystem_root_home_and_missing_root_are_refused(tmp_path: Path) -> No
             cleanup.check_root(root)
 
 
-def test_paths_must_stay_inside_the_root_without_symlinks(tmp_path: Path) -> None:
-    root = tmp_path / "root"
-    (root / "a").mkdir(parents=True)
-    (root / "a" / "f.csv").write_text("x\n")
-    assert cleanup._safe_file(root, "a/f.csv") == root / "a" / "f.csv"
-    for rel in ("../outside.csv", "/etc/hosts", "a/../a/f.csv", "a//f.csv"):
-        with pytest.raises(feeds.FeedError, match="unsafe"):
-            cleanup._safe_file(root, rel)
-    outside = tmp_path / "elsewhere"
+def _file(root: Path, rel: str, data: bytes = b"x\n") -> cleanup.Candidate:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return cleanup.Candidate(rel, hashlib.sha256(data).hexdigest(), len(data), "published_files")
+
+
+def test_unsafe_paths_and_symlinks_are_never_followed(tmp_path: Path) -> None:
+    root, outside = tmp_path / "root", tmp_path / "elsewhere"
     outside.mkdir()
-    (outside / "f.csv").write_text("victim\n")
-    (root / "link").symlink_to(outside)
-    with pytest.raises(feeds.FeedError, match="symlink"):
-        cleanup._safe_file(root, "link/f.csv")
-    (root / "a" / "g.csv").symlink_to(outside / "f.csv")
-    with pytest.raises(feeds.FeedError, match="symlink"):
-        cleanup._safe_file(root, "a/g.csv")
+    (outside / "f.csv").write_bytes(b"x\n")
+    c = _file(root, "a/f.csv")
+    assert cleanup._inspect(root, c) == "present"
+    for rel in ("../elsewhere/f.csv", "/etc/hosts", "a/../a/f.csv", "a//f.csv"):
+        with pytest.raises(feeds.FeedError, match="unsafe"):
+            cleanup._delete(root, cleanup.Candidate(rel, c.sha256, 2, "published_files"))
+    (root / "link").symlink_to(outside)  # a directory link on the way
+    with pytest.raises(cleanup.CleanupError, match="symlink"):
+        cleanup._delete(root, cleanup.Candidate("link/f.csv", c.sha256, 2, "published_files"))
+    (root / "a" / "g.csv").symlink_to(outside / "f.csv")  # the file itself is a link
+    with pytest.raises(cleanup.CleanupError, match="symlink"):
+        cleanup._delete(root, cleanup.Candidate("a/g.csv", c.sha256, 2, "published_files"))
+    assert (outside / "f.csv").read_bytes() == b"x\n"
+    assert cleanup._delete(root, c) == "deleted" and not (root / "a" / "f.csv").exists()
+    assert cleanup._delete(root, c) == "gone" and cleanup._inspect(root, c) == "gone"
+    assert cleanup._inspect(root, cleanup.Candidate("missing/dir/f.csv", c.sha256, 2, "published_files")) == "gone"
+
+
+def test_directory_swapped_for_a_symlink_mid_delete_cannot_redirect_it(tmp_path: Path,
+                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    root, outside = tmp_path / "root", tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "f.csv").write_bytes(b"x\n")  # same name and bytes: the attacker's target
+    c = _file(root, "a/f.csv")
+    real = cleanup._sha_at
+
+    def swap_then_hash(dir_fd: int, name: str) -> str:  # while we hash, a/ becomes a link to elsewhere/
+        (root / "a").rename(root / "a.moved")
+        (root / "a").symlink_to(outside)
+        return real(dir_fd, name)
+    monkeypatch.setattr(cleanup, "_sha_at", swap_then_hash)
+    assert cleanup._delete(root, c) == "deleted"
+    assert (outside / "f.csv").read_bytes() == b"x\n"  # untouched: deletion went through the pinned directory
+    assert not (root / "a.moved" / "f.csv").exists()
+
+
+def test_changed_file_is_not_deleted(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    c = _file(root, "a/f.csv")
+    (root / "a" / "f.csv").write_bytes(b"edited\n")
+    assert cleanup._inspect(root, c) == "changed" and cleanup._delete(root, c) == "changed"
+    assert (root / "a" / "f.csv").read_bytes() == b"edited\n"

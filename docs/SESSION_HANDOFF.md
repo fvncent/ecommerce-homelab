@@ -4,25 +4,42 @@ Update before compaction or ending a significant session. Overwrite; git history
 
 **Updated:** 2026-10-18
 **Branch:** `feat/cleanup-files` (from `main` `1e8be96` = PR #16 replay-files merged, CI green 216/0). PR B of 3:
-plan approved (no `--older-than`), implemented, independent review next.
+plan approved (no `--older-than`), implemented, reviewed (10 findings fixed); awaiting push approval.
 **Deployed on Ubuntu:** `v0.1.1-homelab` (`8c581ad`; no files). Keep it until `v0.2.0-homelab` passes there.
 **Approved (2026-10-18):** Part 2 plan (replay → cleanup → benchmark + release); user will recreate the three
 Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleaning a run's originals makes
 `validate` fail with "deleted by cleanup" (plan defaults, accepted with the plan).
 
 ## This task: PR B, `cleanup-files` (`docs/FEEDS.md` "Cleanup")
-- `cleanup.py`: `Target` (staging | replay | run), `plan` (read-only: ledger-recorded, not-deleted files of a
-  COMPLETED run/replay, or known `staging/<id>` dirs; manifests kept; root guards `check_root`), `token` (hash of
-  target + candidates), `run` (run lock; finishes RUNNING cleanups' audits; token must match; cleanups row → per
-  file `_safe_file` (safe_rel, no_links, resolved inside root) + checksum unchanged → unlink → fsync dir → mark
-  `deleted_at/by` → details → `_finish_audit` (DB-only JSON, place_file) → COMPLETED).
-- Migration 0007: `cleanups` (target, token, details, state), `deleted_at/deleted_by` on both ledgers with CHECKs
-  (both or neither; manifests never deleted).
+- `cleanup.py`: `Target` (staging | replay | run), `plan` (read-only, hashes candidates: ledger-recorded,
+  not-deleted files of a COMPLETED run/replay (gone ones included, changed ones kept out), or known `staging/<id>`
+  dirs of runs/replays/cleanups; manifests kept; `check_root`), `token`, `run` (run lock; token must match before
+  any side effect; finishes RUNNING cleanups of the same root; cleanups row → per item `_delete` (fd chain from
+  root with O_NOFOLLOW, regular file, checksum + inode, unlink / fd rmtree, fsync) → one transaction: mark + note
+  in details → `_finish_audit` (DB-only JSON; already-gone not counted as deleted) → COMPLETED).
+- Migration 0007: `cleanups` (target, token, data_root, details, state), `deleted_at/deleted_by` on both ledgers
+  with CHECKs (both or neither; manifests never deleted), partial indexes on deleted_by.
+- `feeds.RUN_ID`, `replay.REPLAY_ID`, `cleanup.CLEANUP_ID` patterns shared (staging recognition).
 - `validate`: deleted files → files_match_ledger "deleted by cleanup <id>". `replay`: cleaned originals refused,
   cleaned replay verify refused (named). CLI `cleanup-files` (exit 0/1/2/3; --delete needs --confirm).
-- Tests: 6 unit (`tests/test_cleanup.py`), 10 integration (`tests/integration/test_cleanup_files.py`, incl. a
-  real SIGKILL after the 3rd unlink before its mark → rerun: 1 already gone, first audit finished, ledger == disk).
-  Suite: 232 passed with DB, 107 passed / 125 skipped without; mypy clean (29 files).
+- Tests: 8 unit (`tests/test_cleanup.py`, incl. a directory swapped for a symlink mid-delete), 11 integration
+  (`tests/integration/test_cleanup_files.py`, incl. a real SIGKILL after the 3rd unlink before its mark → rerun:
+  1 already gone, first audit finished, refused delete side-effect free, ledger == disk; pre-0007 databases).
+  Suite: 235 passed with DB, 109 passed / 126 skipped without; mypy clean (29 files).
+
+## PR B review (`/code-review high`) — all 10 fixed
+| # | Finding | Fix |
+|---|---|---|
+| 1 | validate/replay crash on pre-0007 databases | `db.has_table("cleanups")` gates deleted_by reads; test on a 0006-shaped DB |
+| 2 | TOCTOU: symlink swap between check and unlink | fd chain with O_NOFOLLOW; hash, inode check and unlink via dir fd; fd rmtree; race test |
+| 3 | Already-gone counted as deleted in audit | Recorded in details with the mark; excluded from deleted_files/bytes; test |
+| 4 | Pending audits finished under any root, before token check | `cleanups.data_root`; finished only for the same root, only after the token matches; test |
+| 5 | Staging dirs reported as removed before removal | Recorded per dir after rmtree (`staging_dirs_removed`) |
+| 6 | Changed files stay candidates; cleanup_id collisions | Changed files excluded at plan time; random cleanup_id suffix; test |
+| 7 | Docs exit 3 vs missing-0007 exit 1 | Missing 0007 → RunLookupError (exit 3) |
+| 8 | `--replay-id ""` traceback | `is not None` + CleanupError → exit 2; test |
+| 9 | No index on deleted_by | Partial indexes in 0007 |
+| 10 | Duplicated id patterns; cln_* staging "unknown" | Shared RUN_ID/REPLAY_ID/CLEANUP_ID; cleanups known |
 
 ## Previous task: PR A, `replay-files` (PR #16, merged) (`docs/FEEDS.md` "Replay")
 - `replay.py`: `Params` (from/to/feeds/delay/jitter/dup pct, validated), `replay_id` (hash of run + params +

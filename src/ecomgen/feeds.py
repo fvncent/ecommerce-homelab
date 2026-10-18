@@ -53,7 +53,7 @@ BROWSE_TYPES = (("product_viewed", 60), ("search", 15), ("added_to_cart", 15), (
 SETTLEMENT_COLUMNS = ("settlement_id", "batch_id", "payment_id", "order_id", "provider", "method", "currency",
                       "gross_amount", "fee_amount", "net_amount", "settled_at", "settlement_date")
 SOURCE_SYSTEMS = {"payment_settlement": "payment_processor", "clickstream": "web_app"}
-_RUN_ID = re.compile(r"run_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{6}")
+RUN_ID = re.compile(r"run_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{6}")
 
 
 class FeedError(RuntimeError):
@@ -392,7 +392,7 @@ def publish(conn: psycopg.Connection, cfg: Config, run_id: str, world: generate.
     feeds = enabled(cfg)
     if not feeds:
         return Published(0, 0, {})
-    if not _RUN_ID.fullmatch(run_id):
+    if not RUN_ID.fullmatch(run_id):
         raise FeedError(f"unexpected run id {run_id!r}")
     if not root.is_dir():
         raise FeedError(f"data root {root} does not exist (create it, or set ECOMGEN_DATA_ROOT)")

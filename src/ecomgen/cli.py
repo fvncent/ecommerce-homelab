@@ -345,8 +345,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "resume":
         return resume_cmd(args.config, args.run_id)
     if args.command == "cleanup-files":
-        target = (cleanup.Target("staging") if args.staging else
-                  cleanup.Target("replay", args.replay_id) if args.replay_id else cleanup.Target("run", args.run_id))
+        try:
+            target = (cleanup.Target("staging") if args.staging else
+                      cleanup.Target("replay", args.replay_id) if args.replay_id is not None else
+                      cleanup.Target("run", args.run_id))
+        except cleanup.CleanupError as e:
+            print(f"cleanup error: {e}", file=sys.stderr)
+            return 2
         return cleanup_cmd(args.config, target, args.delete, args.confirm)
     if args.command == "replay-files":
         return replay_cmd(args.config, args.run_id, args.start, args.end, args.feed, args.delay_hours,

@@ -25,18 +25,19 @@ pytestmark = pytest.mark.skipif(not ADMIN_URL, reason="ECOMGEN_TEST_DATABASE_URL
 Migrated = Callable[..., psycopg.Connection]
 PARAMS = replay.Params(date(2026, 1, 5), date(2026, 1, 8), ("clickstream", "payment_settlement"), 24, 6, 20)
 
-# cleanup --delete in a child process that SIGKILLs itself after the Nth directory fsync (argv[4]), i.e. right
-# after unlinking a file and before its ledger row is marked
+# cleanup --delete in a child process that SIGKILLs itself right after the Nth file is unlinked and its directory
+# fsynced (argv[4]), before its ledger row is marked
 CRASH_IN_CLEANUP = """
 import os, signal, sys, psycopg
-from ecomgen import cleanup, config, feeds
-real, n = feeds._fsync_dir, [0]
-def crash(path):
-    real(path)
+from ecomgen import cleanup, config
+real, n = cleanup._delete, [0]
+def crash(root, c):
+    outcome = real(root, c)
     n[0] += 1
     if n[0] == int(sys.argv[4]):
         os.kill(os.getpid(), signal.SIGKILL)
-feeds._fsync_dir = crash
+    return outcome
+cleanup._delete = crash
 with psycopg.connect(sys.argv[2], autocommit=True) as conn:
     cleanup.run(conn, config.load(sys.argv[1]), cleanup.Target("replay", sys.argv[3]), sys.argv[5])
 """
@@ -145,14 +146,19 @@ def test_changed_files_and_symlinks_are_not_deleted(setup: tuple[psycopg.Connect
                                                     small_cfg: config.Config, data_root: Path,
                                                     tmp_path: Path) -> None:
     conn, _, run_id, rid = setup
-    plan, _ = cleanup.run(conn, small_cfg, cleanup.Target("replay", rid), None)
-    changed = data_root / plan.candidates[0].path
+    first, _ = cleanup.run(conn, small_cfg, cleanup.Target("replay", rid), None)
+    changed = data_root / first.candidates[0].path
     changed.write_text("edited by someone\n")
+    with pytest.raises(cleanup.CleanupError, match="does not match"):  # changed after the dry run: stale token
+        cleanup.run(conn, small_cfg, cleanup.Target("replay", rid), first.token)
+    plan, _ = cleanup.run(conn, small_cfg, cleanup.Target("replay", rid), None)
+    assert first.candidates[0].path not in {c.path for c in plan.candidates}  # not ours any more: not a candidate
+    assert f"{first.candidates[0].path} (changed since it was recorded: not ours to delete, kept)" in plan.kept
     _, result = cleanup.run(conn, small_cfg, cleanup.Target("replay", rid), plan.token)
-    assert result is not None and result.kept_changed == [plan.candidates[0].path]
+    assert result is not None and result.deleted == len(plan.candidates)
     assert changed.read_text() == "edited by someone\n"
-    audit = json.loads((data_root / str(result.audit_path)).read_text())
-    assert audit["kept_changed"] == [plan.candidates[0].path]
+    again, _ = cleanup.run(conn, small_cfg, cleanup.Target("replay", rid), None)
+    assert again.candidates == []  # the kept file doesn't keep coming back as work
     # a symlink swapped in for a recorded file: refused, and the link target survives
     plan, _ = cleanup.run(conn, small_cfg, cleanup.Target("run", run_id), None)
     victim = data_root / plan.candidates[0].path
@@ -160,8 +166,8 @@ def test_changed_files_and_symlinks_are_not_deleted(setup: tuple[psycopg.Connect
     outside.write_bytes(victim.read_bytes())
     victim.unlink()
     victim.symlink_to(outside)
-    with pytest.raises(feeds.FeedError, match="symlink"):
-        cleanup.run(conn, small_cfg, cleanup.Target("run", run_id), plan.token)
+    with pytest.raises(cleanup.CleanupError, match="symlink"):
+        cleanup.run(conn, small_cfg, cleanup.Target("run", run_id), None)
     assert outside.is_file()
 
 
@@ -212,7 +218,7 @@ def test_staging_only_known_directories(setup: tuple[psycopg.Connection, str, st
     assert result is not None
     assert sorted(p.name for p in (data_root / "staging").iterdir()) == ["rpl_ffffffffffff", "someone-elses"]
     audit = json.loads((data_root / str(result.audit_path)).read_text())
-    assert audit["staging_dirs"] == [c.path for c in plan.candidates] and audit["deleted_files"] == []
+    assert audit["staging_dirs_removed"] == [c.path for c in plan.candidates] and audit["deleted_files"] == []
 
 
 def test_sigkill_mid_delete_then_rerun(setup: tuple[psycopg.Connection, str, str, str], cfg_path: Path,
@@ -229,11 +235,21 @@ def test_sigkill_mid_delete_then_rerun(setup: tuple[psycopg.Connection, str, str
     assert marked == (2,)  # the 3rd file is unlinked but not yet marked
     plan2, _ = cleanup.run(conn, small_cfg, cleanup.Target("replay", rid), None)
     assert len(plan2.candidates) == len(plan.candidates) - 2 and plan2.token != plan.token
+    assert [c.gone for c in plan2.candidates].count(True) == 1
+    assert any(k.startswith(f"interrupted cleanup {first[0]}") for k in plan2.kept)
+    with pytest.raises(cleanup.CleanupError, match="does not match"):  # a refused delete changes nothing
+        cleanup.run(conn, small_cfg, cleanup.Target("replay", rid), "000000000000")
+    assert conn.execute("SELECT state FROM generator_meta.cleanups").fetchone() == ("RUNNING",)
     _, result = cleanup.run(conn, small_cfg, cleanup.Target("replay", rid), plan2.token)
     assert result is not None and result.already_gone == 1 and result.deleted == len(plan.candidates) - 3
     states: dict[str, str] = {r[0]: r[1] for r in conn.execute("SELECT cleanup_id, state FROM generator_meta.cleanups")}
     assert states == {first[0]: "COMPLETED", result.cleanup_id: "COMPLETED"}  # the interrupted one's audit finished
-    assert (data_root / cleanup.audit_path(first[0])).is_file()
+    first_audit = json.loads((data_root / cleanup.audit_path(first[0])).read_text())
+    assert len(first_audit["deleted_files"]) == 2 and first_audit["already_gone"] == []
+    audit = json.loads((data_root / str(result.audit_path)).read_text())
+    assert len(audit["already_gone"]) == 1 and audit["already_gone"][0] not in {d["path"]
+                                                                                for d in audit["deleted_files"]}
+    assert audit["deleted_bytes"] == result.bytes  # the audit and the CLI agree
     unmarked = conn.execute("SELECT count(*) FROM generator_meta.file_deliveries WHERE replay_id = %s"
                             " AND original_path IS NOT NULL AND deleted_at IS NULL", (rid,)).fetchone()
     assert unmarked == (0,)  # ledger == disk
@@ -257,3 +273,18 @@ def test_cli_cleanup(db_url: str, monkeypatch: pytest.MonkeyPatch, capsys: pytes
     assert main(["cleanup-files", cfg, "--run-id", "run_20990101T000000Z_000000"]) == 3
     with pytest.raises(SystemExit, match="2"):
         main(["cleanup-files", cfg])  # a target is required (argparse)
+    assert main(["cleanup-files", cfg, "--replay-id", ""]) == 2  # e.g. an unset shell variable
+
+
+def test_databases_before_migration_0007_still_validate_and_replay(migrated: Migrated, small_cfg: config.Config,
+                                                                   data_root: Path) -> None:
+    c = migrated(small_cfg)
+    load.run(c, small_cfg, "smoke")
+    c.execute("DROP TABLE generator_meta.cleanups CASCADE")  # back to the 0006 shape
+    for t in ("published_files", "file_deliveries"):
+        c.execute(f"ALTER TABLE generator_meta.{t} DROP COLUMN deleted_at, DROP COLUMN deleted_by")
+    assert [r.check.name for r in validate.validate(c, small_cfg)[1] if not r.ok] == []
+    assert not replay.replay(c, small_cfg, PARAMS).verified_only
+    assert replay.replay(c, small_cfg, PARAMS).verified_only
+    with pytest.raises(db.RunLookupError, match="pending migrations"):
+        cleanup.run(c, small_cfg, cleanup.Target("staging"), None)
