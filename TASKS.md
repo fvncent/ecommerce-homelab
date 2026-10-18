@@ -1,7 +1,7 @@
 # Tasks
 
 ## Active
-- [ ] PR C (branch `chore/benchmark-files`, PR #18, reviewed twice (20 findings fixed), Mac rehearsals PG 17/18 green, awaiting merge approval; decisions 2026-10-18: publish crash in the smoke DB's own `_pc` schemas, replay cleanup dry run unless `CLEANUP_REPLAY=1`): benchmark with files (per-feed throughput, sha256 MB/s, feed digest vs macOS reference, publish-crash + replay-crash), then tag `v0.2.0-homelab`; Ubuntu: user recreates the 3 benchmark DBs by hand (approved 2026-10-18), `ECOMGEN_DATA_ROOT=/srv/homelab/ecommerce/data`; keep `v0.1.1-homelab` until it passes
+- [ ] Phase 3: not started; waits for the user's go-ahead (Phase 2 Ubuntu release benchmark passed 2026-10-18)
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 
 ## Next (Phase 1)
@@ -14,6 +14,9 @@
 - Clearer error when `metadata_schema` is renamed after apply (currently fails loudly with DuplicateTable)
 
 ## Done
+- [x] Ubuntu Phase 2 release verification (2026-10-18): `v0.2.0-homelab` (`de90a6a`) on host PG 18.6; 3 DBs recreated by the user after inventory; benchmark 49/49 PASS, exit 0; files/rows identical to macOS references; snapshot diff = only the 3 DBs' sizes/counters; replay cleanup dry run (`docs/BENCHMARKS.md`)
+- [x] Tag `v0.2.0-homelab` -> `de90a6a` (user-approved); `v0.1.1-homelab` kept at `8c581ad` (2026-10-18)
+- [x] PR #18 Phase 2 part 2 C (benchmark with files) merged at reviewed head `959fce9`; `main` `de90a6a` CI green, 251 tests / 0 skipped on PG 17 + 18 (2026-10-18)
 - [x] PR #17 Phase 2 part 2 B (`cleanup-files`) merged; `main` `b619622` CI green, 235 passed / 0 skipped on PG 17 + 18 (2026-10-18)
 - [x] PR #16 Phase 2 part 2 A (`replay-files`) merged; `main` `1e8be96` CI green, 216 passed / 0 skipped on PG 17 + 18 (2026-10-18)
 - [x] PR #15 Phase 2 part 1 (file feeds) merged; `main` `5cf4280` CI green, 184 passed / 0 skipped on PG 17 + 18 (2026-10-18)
