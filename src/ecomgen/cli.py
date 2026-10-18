@@ -88,6 +88,51 @@ def generate_cmd(path: str, profile: str | None) -> int:
     return 0
 
 
+def advance_cmd(path: str, to: str) -> int:
+    """Exit 0: step completed (or the clock was already there). 1: refused or failed. 2: config/argument error."""
+    loaded = _connect_cfg(path)
+    if isinstance(loaded, int):
+        return loaded
+    cfg, url = loaded
+    try:
+        as_of = None if to == "end" else dt.datetime.fromisoformat(to)
+    except ValueError:
+        print(f"argument error: --to {to!r} is not an ISO timestamp (e.g. 2026-01-08T00:00:00Z) or 'end'",
+              file=sys.stderr)
+        return 2
+    if as_of is not None:
+        if as_of.utcoffset() is None:
+            print(f"argument error: --to {to!r} has no time zone; add Z for UTC", file=sys.stderr)
+            return 2
+        as_of = as_of.astimezone(dt.UTC)
+    started = time.perf_counter()
+    try:
+        with psycopg.connect(url, autocommit=True) as conn:
+            result = load.advance(conn, cfg, as_of)
+    except config.ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 2
+    except (load.LoadError, generate.GenerationError) as e:
+        print(f"advance error: {e}", file=sys.stderr)
+        return 1
+    except psycopg.Error as e:
+        print(f"database error: {type(e).__name__}: {e}".rstrip(), file=sys.stderr)
+        return 1
+    if result is None:
+        print(f"a completed step already reached {to}; nothing to do")
+        return 0
+    _print_step(result, f"{result.chunks_written} chunks in {time.perf_counter() - started:.1f}s")
+    return 0
+
+
+def _print_step(r: load.RunResult, timing: str) -> None:
+    start = r.previous_as_of.isoformat() if r.previous_as_of else "start"
+    assert r.as_of is not None
+    print(f"step {r.run_id} COMPLETED: clock {start} -> {r.as_of.isoformat()}, {timing}")
+    print("  inserted " + " ".join(f"{t}={n}" for t, n in r.counts.items() if n))
+    print("  updated " + " ".join(f"{t}={n}" for t, n in r.updated.items()))
+
+
 def _print_files(p: feeds.Published) -> None:
     if p.files:
         print(f"  files: {p.files} recorded ({p.newly_published} newly published); "
@@ -138,6 +183,10 @@ def status_cmd(path: str, run_id: str | None) -> int:
         print(f"database error: {type(e).__name__}: {e}".rstrip(), file=sys.stderr)
         return 3
     print(f"run {st.run_id}: {st.state} (profile {st.profile}, generator {st.generator_version})")
+    if st.as_of is not None:
+        start = st.previous_as_of.isoformat() if st.previous_as_of else "start"
+        print(f"  clock step: {start} -> {st.as_of.isoformat()} (orders = every order this step wrote or re-checked:"
+              " placed by then, or possibly still changing at the previous step)")
     print(f"  started {st.started_at.isoformat()}" + (f", finished {st.finished_at.isoformat()}" if st.finished_at else ""))
     print("  progress: " + ", ".join(f"{e} {d}/{p}" for e, (d, p) in st.progress.items()))
     if st.error:
@@ -181,6 +230,10 @@ def resume_cmd(path: str, run_id: str | None) -> int:
         return 1
     if result is None:
         print("run is already COMPLETED; nothing to resume")
+        return 0
+    if result.as_of is not None:
+        _print_step(result, f"{result.chunks_written} chunks written, {result.chunks_skipped} already committed, in"
+                            f" {time.perf_counter() - started:.1f}s")
         return 0
     print(f"run {result.run_id} COMPLETED: {result.chunks_written} chunks written, {result.chunks_skipped} already"
           f" committed, in {time.perf_counter() - started:.1f}s")
@@ -290,6 +343,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("config", help="path to generator YAML")
     p.add_argument("--profile", choices=sorted(load.PROFILE_COUNTS),
                    help="use built-in counts (smoke: 1,000 orders) instead of the config's counts")
+    p = sub.add_parser("advance", help="move the simulation clock forward: add the orders placed since the last "
+                                       "step and update the ones that changed",
+                       description="Each step is a run in the same schema set: it inserts the orders placed up to "
+                                   "--to and updates earlier orders and payments whose state changed. Stepping to "
+                                   "the end in any number of steps gives exactly the rows `generate` writes. Needs "
+                                   "an empty schema set for the first step (not one holding a generate run) and a "
+                                   "config with file feeds off. A crashed step is finished with `resume`. Exit codes: "
+                                   "0 done (or already there), 1 refused or failed, 2 config/argument error.")
+    p.add_argument("config", help="path to generator YAML (the same for every step)")
+    p.add_argument("--to", required=True,
+                   help="new clock time, ISO 8601 with a time zone (2026-01-08T00:00:00Z), or 'end' for clock_end")
     p = sub.add_parser("validate", help="check cross-row invariants and run-ledger completeness",
                        description="Exit codes: 0 all checks pass, 1 a check failed, 2 config error, 3 could not "
                                    "validate (no run, run not found, database error). Data checks cover the whole "
@@ -338,6 +402,8 @@ def main(argv: list[str] | None = None) -> int:
         return init_db(args.config)
     if args.command == "generate":
         return generate_cmd(args.config, args.profile)
+    if args.command == "advance":
+        return advance_cmd(args.config, args.to)
     if args.command == "validate":
         return validate_cmd(args.config, args.run_id)
     if args.command == "status":

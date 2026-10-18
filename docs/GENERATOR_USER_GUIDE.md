@@ -121,6 +121,41 @@ Then `check-config`, `init-db`, `generate`, `validate` with `practice-100k.yaml`
 profiling. Different schema names per dataset is the benchmark's own approach (`*_pc` schemas), but true
 incremental generation (new orders appended to an existing dataset) is a Phase 3 feature, not available yet.
 
+## Clock steps (`advance`; after `v0.2.0-homelab`, not deployed yet)
+
+`generate` writes a dataset as it stands at `clock_end` in one go. `advance` moves a simulation clock through the
+same period instead, so the database changes the way a live shop does: each step is a run that **inserts** the
+orders placed since the previous step and **updates** earlier orders and payments whose status changed (CONFIRMED →
+SHIPPED → DELIVERED, CAPTURED → SETTLED). Stepping to the end, in any number of steps, gives exactly the rows
+`generate` writes for the same config.
+
+Rules: a schema set holds either one `generate` run or one chain of steps, so give the stepped dataset its own
+schema names; the config must have `filesystem.csv: false` and `filesystem.jsonl: false` (files per step are not
+implemented yet); every step uses the same config; the clock only moves forward, within `clock_start`..`clock_end`.
+
+```bash
+cd /srv/homelab/ecommerce/practice
+cp practice-10k.yaml stepped-10k.yaml
+sed -i -e 's/^  csv: true$/  csv: false/' -e 's/^  jsonl: true$/  jsonl: false/' -e 's/^  application_schema: commerce$/  application_schema: commerce_stepped/' -e 's/^  integration_schema: integration$/  integration_schema: integration_stepped/' -e 's/^  metadata_schema: generator_meta$/  metadata_schema: generator_meta_stepped/' stepped-10k.yaml
+cd /srv/homelab/projects/ecommerce-homelab
+uv run ecomgen init-db /srv/homelab/ecommerce/practice/stepped-10k.yaml
+uv run ecomgen advance /srv/homelab/ecommerce/practice/stepped-10k.yaml --to 2026-01-08T00:00:00Z
+uv run ecomgen advance /srv/homelab/ecommerce/practice/stepped-10k.yaml --to 2026-01-15T00:00:00Z
+uv run ecomgen advance /srv/homelab/ecommerce/practice/stepped-10k.yaml --to end
+uv run ecomgen validate /srv/homelab/ecommerce/practice/stepped-10k.yaml
+```
+
+Each step prints `step run_… COMPLETED: clock <previous> -> <as_of>`, the rows inserted and the rows updated.
+`--to` needs a time zone (`Z` for UTC; other offsets are converted) or `end`. Repeating a step that is already
+done, the latest or an earlier one, prints "a completed step already reached …" and changes nothing, so the whole
+list of commands can be re-run safely. A step killed midway stays RUNNING; `advance` then refuses until `ecomgen resume CONFIG` finishes
+it. If a row was changed by hand in between, the step stops ("not as the previous step left them") without
+writing that chunk. The steps of a chain:
+
+```sql
+SELECT run_id, state, previous_as_of, as_of, counts->'written' FROM generator_meta_stepped.generation_runs ORDER BY as_of;
+```
+
 ## Crashes and history
 
 - `status` shows the latest run (`--run-id` for another): `COMPLETED`, `FAILED` (with `last error`), or

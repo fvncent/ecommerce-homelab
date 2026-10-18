@@ -1,8 +1,9 @@
 """Cross-row invariants the schema can't enforce, plus run-ledger completeness.
 
 Each check is a query returning one `id` per violation; only the count and a few sample IDs come back.
-Scope: the application schema holds exactly one run's data (generate refuses a second run), so data checks
-cover every row there; only the ledger checks are scoped to the run. Revisit when resume/increments add runs.
+Scope: the application schema holds one generate run, or one chain of clock steps (`advance`); data checks cover
+every row there (the state as of the latest step), run_completed and ledger_complete are scoped to the run, and
+ledger_matches_tables sums the ledger of every run in the schema set (the chain's inserts add up to the tables).
 
 File checks (runs that publish feeds): every recorded file is intact and listed in the manifest, and each
 published feed agrees with PostgreSQL both ways (the Phase 2 gate). Feed rows are streamed into temporary tables
@@ -59,11 +60,11 @@ LEDGER_CHECKS = (
                    FROM {meta}.generation_chunks WHERE run_id = %(run)s GROUP BY 1) c ON c.entity = p.key
         WHERE p.key IS NULL OR c.entity IS NULL OR c.n <> p.value::bigint OR c.max_no <> c.chunks - 1"""),
     # Table names come from the fixed load.TABLES tuple.
-    Check("ledger_matches_tables", "ledger table_rows totals equal actual table row counts", " UNION ALL ".join(f"""
+    Check("ledger_matches_tables", "ledger table_rows totals (every run in the schema set) equal actual table row "
+          "counts", " UNION ALL ".join(f"""
         SELECT '{t}: ledger ' || coalesce(l.n, 0) || ', table ' || c.n AS id
         FROM (SELECT count(*) n FROM {{app}}.{t}) c,
-             (SELECT sum((table_rows->>'{t}')::bigint) n FROM {{meta}}.generation_chunks
-              WHERE run_id = %(run)s) l
+             (SELECT sum((table_rows->>'{t}')::bigint) n FROM {{meta}}.generation_chunks) l
         WHERE coalesce(l.n, 0) <> c.n""" for t in load.TABLES)),
 )
 
