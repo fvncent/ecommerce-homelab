@@ -3,7 +3,9 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-18
-**Branch:** `docs/ubuntu-v0.2.0-benchmark` (from `main` `de90a6a`): records the Ubuntu Phase 2 release run.
+**Branch:** `docs/generator-user-guide` (from `main` `fe6d478` = PR #19 Ubuntu results merged, CI green 251/0).
+Interactive operator walkthrough on Ubuntu (user runs commands, one small read-only step at a time) feeding
+`docs/GENERATOR_USER_GUIDE.md`; no database/role changes without approval.
 **Released:** PR #18 merged at reviewed head `959fce9` → `main` `de90a6a` (CI 251/0 on PG 17 + 18); tag
 `v0.2.0-homelab` → `de90a6a` (user-approved); `v0.1.1-homelab` kept at `8c581ad`.
 **Deployed on Ubuntu:** `v0.2.0-homelab`, verified 2026-10-18: the user dropped/recreated the 3 DBs by hand after a
@@ -187,5 +189,6 @@ SQL without `!` (e.g. `NOT LIKE 'pg\_%'`).
 - Not yet: Parquet snapshots, supplier/courier feeds, age-based retention, profiles above 10k, `workers: 2`.
 
 ## Next step
-Push `docs/ubuntu-v0.2.0-benchmark` and open the results PR (ask first) → merge (ask). Then Phase 3 planning only
-after the user's go-ahead.
+Walkthrough: inspect benchmark data (read-only) → psql/DBeaver over SSH tunnel → manual generation → persistent
+`ecommerce_oltp` proposal (commands need approval; one run per schema set: `generate` refuses a database that
+already holds a run) → write `docs/GENERATOR_USER_GUIDE.md` → PR. Phase 3 only after the walkthrough.
