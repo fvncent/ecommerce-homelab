@@ -7,11 +7,47 @@ Add a row per run; note the environment. The target is the Ubuntu server; macOS 
 
 | Date | Env | Commit | Profile | Orders / items / payments | Chunks | Wall | CPU user+sys | Peak RSS | WAL | DB size | validate |
 |---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-10-18 | **Ubuntu homelab**, same host, **with files** (120 files, 31.6 MB) | `de90a6a` (`v0.2.0-homelab`) | mvp (config counts, `clickstream_events: 100000`) | 10,000 / 18,776 / 12,265 | 6 | 4.62 s (DB + files) | 3.44 + 0.11 s | 68 MB | 16.6 MB | 20.0 MB | pass, 1.35 s |
 | 2026-10-18 | **Ubuntu homelab** (Ryzen 5 5600, ~14 GiB; Ubuntu 26.04, kernel 7.0.0-38; host PG 18.6; NVMe ext4) | `8c581ad` | mvp (config counts, `chunk_rows: 5000`, 1 worker) | 10,000 / 18,776 / 12,265 | 6 | 1.78 s | 1.04 + 0.02 s | 66 MB | 16.5 MB | 19.7 MB | 12/12, 0.21 s |
 | 2026-10-17 | macOS dev (M1, 8 GB; Docker PG 17.11, VM 8 CPU / 4 GB) | `1e98a36` | mvp (config counts, `chunk_rows: 5000`, 1 worker) | 10,000 / 18,776 / 12,265 | 6 | 2.04 s (load 1.9 s) | 1.17 + 0.03 s | 63 MB | 16 MB | 19 MB | 12/12, 0.40 s |
 
 Measured with `/usr/bin/time -l` (macOS) around `ecomgen generate`; WAL = `pg_wal_lsn_diff` across the run (server-wide;
 no other activity on the server at the time). Largest tables: order_items 3.9 MB, orders 3.2 MB, payment_attempts 2.7 MB.
+
+## Ubuntu Phase 2 release verification (`v0.2.0-homelab`, 2026-10-18)
+
+Operator-run per `docs/HOMELAB_DEPLOYMENT.md` "Phase 2 release": tag `v0.2.0-homelab` = `main` `de90a6a` (PR #18
+merge, tree = reviewed head `959fce9`, CI 251 tests / 0 skipped on PG 17.11 and 18.6), clone
+`/srv/homelab/projects/ecommerce-homelab` at the tag, clean tree. The three databases held the `v0.1.1-homelab` run;
+after a read-only inventory (owner `ecomgen_app`; 9.6 / 19 / 19 MB) the operator dropped and recreated them by hand
+(approved), empty, owner `ecomgen_app`, `CONNECT`/`TEMPORARY` revoked from `PUBLIC`. Port 5432 (`SHOW port`), data
+root `/srv/homelab/ecommerce/data` on the NVMe (UUID `d263e3fd-…`, rw, hard links work). Output
+`/srv/homelab/ecommerce/benchmarks/20261018T073745Z`. `scripts/homelab_benchmark.sh`: **49/49 PASS, 0 FAIL, exit 0,
+all expectations passed**; replay cleanup as a dry run (`CLEANUP_REPLAY` unset).
+
+| Phase | Result |
+|---|---|
+| Preflight | PG 18.6 on 5432; backend PID in the `postgresql@18-main` cgroup; role with no privileges/memberships owning only the three empty databases; both feeds enabled |
+| Smoke 1k (DB + files) | 1.04 s, 50 MB RSS, server 133 MB; validate (DB + files) pass; **files identical to the macOS reference**; no orphans or staging |
+| Publish crash 1k (`*_pc` schemas in the smoke DB) | SIGKILL after placing file 4, before its ledger row → exit 137; no sessions/prepared xacts left; validate fails as designed; resume 0.79 s adopts the placed file; validate pass; **files identical to the uninterrupted reference, rows identical to the smoke run**; ledger == disk |
+| MVP 10k (DB + files) | 4.62 s wall (3.44 + 0.11 s CPU), 68 MB RSS; server 179 MB peak, CPU 0.73 s; WAL 16.6 MB; DB 20.0 MB; **2,165 orders/s, 10,429 rows/s** end-to-end; validate 1.35 s; **rows and files identical to the macOS references** |
+| Files (10k) | payment_settlement 88 files / 8,295 rows / 1.0 MB; clickstream 31 files / 110,000 events / 30.6 MB; manifest 1 file / 119 entries; sha256 re-verification of 120 files (31.6 MB) at 1,072 MB/s, 0 mismatches, 0 orphans, 0 staging |
+| Feed-only throughput | payment_settlement 10,139 rows/s (1.2 MB/s, 63 MB RSS); clickstream 48,156 events/s (12.8 MB/s, 62 MB RSS) |
+| Load crash + resume | SIGKILL before orders chunk 1 → exit 137; no leftovers; status reports the crash; validate fails and generate refuses as designed; resume 3.71 s (68 MB RSS, server 283 MB); second resume no-op; **rows and files identical to the clean run**; no orphans or staging |
+| Replay (2026-01-05..10, delay 24 h, jitter 6 h, 10 % dup) | SIGKILL after delivery 6 → exit 137; rerun finishes (`rpl_aba99c06f638`: 27 deliveries, 3 duplicates, 21 new, 0.30 s); second rerun only verifies; **replayed originals identical to the macOS reference**; deliveries = the plan exactly |
+| Cleanup (dry run) | replay proven created by this run; would delete 27 items (6.1 MB), only this replay's copies (`cleanup_plan.txt`); nothing deleted |
+| Totals | smoke 11.9 MB (both schema sets), test 20.1 MB, crash 20.0 MB; data root 73.8 MB; `/srv/homelab` 598 MB → 703 MB used, 906 GB free |
+
+Untouched (host snapshot as root, read-only, `before-v0.2.0.txt` after the recreate vs `after-v0.2.0.txt`, 0
+unreadable paths, Docker readable): the **only** differences are the three `db` lines of `ecommerce_homelab_{crash,
+smoke,test}` (size 7.9 MB → 19.9 / 12.5 / 20.0 MB; inserted 48,315 / 10,054 / 48,344 rows; 2-3 updates; 0 deletes).
+Identical: role `ecomgen_app` and the ACLs, other roles and memberships, server settings, the `postgres` database,
+the `postgresql@18-main` start time, Docker containers (VLSIM engine + TMS, PostgreSQL 17 on 55432, Redpanda),
+volumes, ports, and every file under `/srv/homelab` outside the project path and clone.
+
+Compared with the macOS PG 17 rehearsal: MVP end-to-end 4.62 vs 4.74 s; feed-only 10,139 vs 9,157 rows/s (CSV) and
+48,156 vs 44,520 events/s (JSONL); same data, files and WAL. The feeds account for most of the 10k run (feed-only
+0.95 + 2.41 s, mostly CPU in clickstream rendering); database-only was 1.78 s on `v0.1.1-homelab`.
 
 ## Ubuntu homelab verification (2026-10-18)
 

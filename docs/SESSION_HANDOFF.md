@@ -3,15 +3,17 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-18
-**Branch:** `chore/benchmark-files` (from `main` `b619622` = PR #17 cleanup-files merged, CI green 235/0). PR C of
-3: PR #18 open; reviewed twice (10 + 10 findings fixed), Mac rehearsals green after the final fixes (PG 17 53/53
-with cleanup, PG 18 49/49); awaiting merge approval. No reset or deployment without approval.
-**Deployed on Ubuntu:** `v0.1.1-homelab` (`8c581ad`; no files). Keep it until `v0.2.0-homelab` passes there.
-**Approved (2026-10-18):** Part 2 plan (replay → cleanup → benchmark + release); user will recreate the three
-Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleaning a run's originals makes
-`validate` fail with "deleted by cleanup" (plan defaults, accepted with the plan).
+**Branch:** `docs/ubuntu-v0.2.0-benchmark` (from `main` `de90a6a`): records the Ubuntu Phase 2 release run.
+**Released:** PR #18 merged at reviewed head `959fce9` → `main` `de90a6a` (CI 251/0 on PG 17 + 18); tag
+`v0.2.0-homelab` → `de90a6a` (user-approved); `v0.1.1-homelab` kept at `8c581ad`.
+**Deployed on Ubuntu:** `v0.2.0-homelab`, verified 2026-10-18: the user dropped/recreated the 3 DBs by hand after a
+read-only inventory; benchmark 49/49 PASS, exit 0; snapshot diff = only the 3 DBs' sizes/counters; replay cleanup
+dry run only (`docs/BENCHMARKS.md`). Benchmark data kept in the DBs and `/srv/homelab/ecommerce/data`.
+**Phase 3:** not started; needs the user's go-ahead.
+**Ubuntu shell gotcha:** `!` inside double quotes triggers bash history expansion (`!~: event not found`); give
+SQL without `!` (e.g. `NOT LIKE 'pg\_%'`).
 
-## This task: PR C, benchmark with files (`docs/HOMELAB_DEPLOYMENT.md`)
+## Previous task: PR C, benchmark with files (PR #18, merged) (`docs/HOMELAB_DEPLOYMENT.md`)
 - Decisions (user, 2026-10-18): publish crash in the smoke database, sequentially after the clean smoke run, from a
   clean baseline without any reset: its own schema set (`*_pc`, derived config `generator_pc.yaml` in OUT; preflight
   requires both schema sets empty). Replay cleanup: dry run unless `CLEANUP_REPLAY=1`, only for the replay this run
@@ -179,10 +181,11 @@ Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleani
   codes) are unchanged: see git history of this file (commit `4e356de`).
 
 ## Known failures / limitations
-- No CI. Mount gate's pass path and systemd cgroup path untested until Ubuntu.
+- Ubuntu-only gates (mount UUID, systemd cgroup, pinned DATA_ROOT) are exercised only by the Ubuntu run (passed).
 - Snapshot can't see inside paths `serveradmin` can't read (counted), or docker if not permitted (warned).
-- Phase 2 file feeds not implemented: `data/` stays empty; `filesystem.root` default still `/srv/ecommerce-data`.
+- Replay timing/duplicates depend on the run id: compared with the local plan, not across machines.
+- Not yet: Parquet snapshots, supplier/courier feeds, age-based retention, profiles above 10k, `workers: 2`.
 
 ## Next step
-User approves the PR C plan → benchmark with files + Mac rehearsals (PG 17, PG 18) → review → PR → merge → tag
-`v0.2.0-homelab` (ask) → user runs it on Ubuntu (recreate the 3 DBs by hand first) → results PR.
+Push `docs/ubuntu-v0.2.0-benchmark` and open the results PR (ask first) → merge (ask). Then Phase 3 planning only
+after the user's go-ahead.
