@@ -43,7 +43,7 @@ def env_url(var: str) -> str:
 def dbname_of(url: str) -> str:
     """The database a URL connects to, refusing forms whose effective database differs from the path."""
     parts = urlsplit(url)
-    if "dbname" in parse_qs(parts.query) or "%" in parts.path:
+    if "dbname" in parse_qs(parts.query, keep_blank_values=True) or "%" in parts.path:  # empty dbname = user name
         raise Refused("URL must name its database only in the path (no ?dbname=, no percent-encoding)")
     return parts.path.lstrip("/")
 
@@ -87,6 +87,15 @@ def preflight() -> None:
                 raise Refused(f"role {user} holds {', '.join(held)}; the benchmark needs a least-privilege role")
             if owner != user:
                 raise Refused(f"database {name} is owned by {owner}, not {user}")
+            member_of = [r for (r,) in c.execute(
+                "SELECT pg_get_userbyid(roleid) FROM pg_auth_members WHERE member = to_regrole(current_user)")]
+            if member_of:  # e.g. pg_write_all_data, or another owner role: privileges beyond our databases
+                raise Refused(f"role {user} is a member of {', '.join(member_of)}; it must belong to no role")
+            others = [d for (d,) in c.execute(
+                "SELECT datname FROM pg_database WHERE datdba = to_regrole(current_user) AND datname <> ALL(%s)",
+                (list(DATABASES),))]
+            if others:
+                raise Refused(f"role {user} also owns {', '.join(others)}; it must own only {', '.join(DATABASES)}")
             present = [s for (s,) in c.execute("SELECT nspname FROM pg_namespace WHERE nspname = ANY(%s)",
                                                (list(schemas),))]
             if present:
@@ -94,7 +103,26 @@ def preflight() -> None:
                               "never reuses a database: recreate it by hand (approved cleanup) first")
             version = c.execute("SHOW server_version").fetchone()[0]  # type: ignore[index]
             port = c.execute("SELECT inet_server_port()").fetchone()[0]  # type: ignore[index]
-    print(f"role {user} (unprivileged) owns {', '.join(DATABASES)}, all empty; PostgreSQL {version}, port {port}")
+    print(f"role {user} (no privileges, no memberships) owns only {', '.join(DATABASES)}, all empty; "
+          f"PostgreSQL {version}, port {port}")
+
+
+def same_server(kind: str, ref: str) -> None:
+    """Exit 1 unless the server behind ECOMGEN_BENCH_URL is the one being measured: our backend's PID is in the
+    systemd unit's cgroup (`cgroup PATH`) or is a postgres process inside the container (`container ID`)."""
+    with psycopg.connect(bench_url()) as c:
+        pid = c.execute("SELECT pg_backend_pid()").fetchone()[0]  # type: ignore[index]
+        if kind == "cgroup":
+            with open(os.path.join(ref, "cgroup.procs")) as f:
+                ok = str(pid) in f.read().split()
+        elif kind == "container":
+            import subprocess
+            cmd = subprocess.run(["docker", "exec", ref, "cat", f"/proc/{pid}/cmdline"], capture_output=True)
+            ok = cmd.returncode == 0 and b"postgres" in cmd.stdout
+        else:
+            raise Refused(f"unknown server kind {kind!r}")
+    print(f"backend {pid} {'is' if ok else 'is NOT'} in {kind} {ref}")
+    sys.exit(0 if ok else 1)
 
 
 def server_major() -> None:
@@ -142,7 +170,8 @@ def leftovers(name: str) -> None:
         for _ in range(50):
             sessions, prepared = c.execute(
                 "SELECT (SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
-                " AND pid <> pg_backend_pid()), (SELECT count(*) FROM pg_prepared_xacts"
+                " AND backend_type = 'client backend' AND pid <> pg_backend_pid()),"  # not autovacuum workers
+                " (SELECT count(*) FROM pg_prepared_xacts"
                 " WHERE database = current_database())").fetchone()  # type: ignore[misc]
             if sessions == 0 and prepared == 0:
                 print(f"{name}: no other sessions, no prepared transactions")
@@ -155,7 +184,9 @@ def leftovers(name: str) -> None:
 def pg_stats() -> None:
     """Read-only per-database size and user-table write counters, plus non-default server settings, for every
     PostgreSQL in EXISTING_PG_URL (space-separated), to prove other databases and the server were untouched. User
-    tables only: autovacuum/autoanalyze write the system catalogs, so pg_stat_database counters move when idle."""
+    tables only: autovacuum/autoanalyze write the system catalogs, so pg_stat_database counters move when idle.
+    Settings are those the URL's role may see (all only with superuser or pg_read_all_settings); for the homelab's
+    host cluster host_snapshot.sh reads the same as the postgres superuser instead (PG_LOCAL_SUPERUSER=1)."""
     urls = os.environ.get("EXISTING_PG_URL", "").split()
     if not urls:
         raise Refused("EXISTING_PG_URL is not set")
@@ -164,11 +195,15 @@ def pg_stats() -> None:
     for base in urls:
         parts = urlsplit(base)
         print(f"server {parts.hostname}:{parts.port or 5432}")
-        with psycopg.connect(base) as c:
-            names = [r[0] for r in c.execute("SELECT datname FROM pg_database WHERE NOT datistemplate ORDER BY 1")]
-            roles = [r[0] for r in c.execute("SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY 1")]
-            settings = c.execute("SELECT name, setting FROM pg_settings WHERE source NOT IN ('default', 'override',"
-                                 " 'client', 'session') ORDER BY 1").fetchall()
+        try:
+            with psycopg.connect(base) as c:
+                names = [r[0] for r in c.execute("SELECT datname FROM pg_database WHERE NOT datistemplate ORDER BY 1")]
+                roles = [r[0] for r in c.execute("SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY 1")]
+                settings = c.execute("SELECT name, setting FROM pg_settings WHERE source NOT IN ('default',"
+                                     " 'override', 'client', 'session') ORDER BY 1").fetchall()
+        except psycopg.Error as e:
+            print(f"server not readable with this URL ({type(e).__name__})")
+            continue
         print(f"roles {' '.join(roles)}")
         for k, v in settings:
             print(f"setting {k}={v}")
@@ -206,7 +241,8 @@ def crash(config_path: str, entity: str, chunk_no: str) -> None:
 
 
 COMMANDS: dict[str, Callable[..., None]] = {
-    "url": lambda name: print(db_url(name)), "preflight": preflight, "server-major": server_major,
+    "url": lambda name: print(db_url(name)), "preflight": preflight, "same-server": same_server,
+    "server-major": server_major,
     "wal-lsn": wal_lsn, "wal-bytes-since": wal_bytes_since, "sizes": sizes, "digest": digest,
     "leftovers": leftovers, "pg-stats": pg_stats, "crash": crash,
 }

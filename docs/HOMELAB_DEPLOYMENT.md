@@ -18,12 +18,15 @@ it is read-only.
   ```
 - PostgreSQL: the existing host cluster `18/main` on `127.0.0.1:5432`. No new container, no server setting changes,
   no `pg_hba.conf` edits (the default `scram-sha-256` for `127.0.0.1` is used).
-- Role `ecomgen_app`: `LOGIN`, no superuser / createdb / createrole / replication / bypassrls. It owns exactly three
-  databases: `ecommerce_homelab_smoke`, `ecommerce_homelab_test`, `ecommerce_homelab_crash`, with `CONNECT` revoked
-  from `PUBLIC`. Superuser (`sudo -u postgres psql`) is used only to create them.
-- `scripts/homelab_benchmark.sh` never creates or drops a database. Its preflight refuses unless the role is
-  unprivileged, owns all three databases and they are empty; it refuses a wrong commit, a dirty tree, a missing
-  NVMe mount (UUID + read-write checked), another PostgreSQL major version, and < 10 GB free.
+- Role `ecomgen_app`: `LOGIN`, no superuser / createdb / createrole / replication / bypassrls, member of no role.
+  It owns exactly three databases: `ecommerce_homelab_smoke`, `ecommerce_homelab_test`, `ecommerce_homelab_crash`,
+  with `CONNECT` revoked from `PUBLIC`. Superuser (`sudo -u postgres psql`) is used only to create them and for
+  read-only snapshots.
+- `scripts/homelab_benchmark.sh` never creates or drops a database. Its preflight refuses unless the role has no
+  privileges or memberships, owns only those three databases and they are empty; it also refuses a wrong commit, a
+  dirty tree, output outside `/srv/homelab/ecommerce` or not on the NVMe mount (UUID + read-write checked), a
+  `PG_SERVICE` that isn't the server the URL reaches (our backend PID must be in its cgroup), another PostgreSQL major
+  version, and < 10 GB free.
 - Other services (VLSIM engine + TMS, PostgreSQL 17 container on 55432, Redpanda) are never stopped, restarted or
   reconfigured. `scripts/host_snapshot.sh` records their container IDs, start times and restart counts.
 - Secrets: the role password is set with `\password` (never in shell history or argv); `.env` is mode 600 and
@@ -42,13 +45,21 @@ sudo install -d -o serveradmin -g serveradmin -m 750 /srv/homelab/ecommerce
 mkdir -p /srv/homelab/ecommerce/{data/{csv,jsonl,parquet,events},checkpoints,logs,benchmarks,metadata}
 git clone https://github.com/fvncent/ecommerce-homelab.git /srv/homelab/ecommerce/source
 cd /srv/homelab/ecommerce/source && git checkout --detach <APPROVED_TAG>
-git rev-parse HEAD          # must equal the tag's commit reported in docs/SESSION_HANDOFF.md
+git rev-parse HEAD          # must equal the approved tag's commit (docs/SESSION_HANDOFF.md, "Deploy target")
 ```
 
 Tools: `git`, `findmnt` (util-linux), GNU time (`sudo apt install time`), `uv` (user-local install, then
 `uv sync --frozen`; uv fetches Python 3.12 if the system Python is older).
 
 ## Stage 2: PostgreSQL role, databases, environment
+
+Take the "before" snapshot first, so the role and databases created here show up in the diff:
+
+```bash
+cd /srv/homelab/ecommerce/source
+PG_LOCAL_SUPERUSER=1 PG_SERVICE=postgresql@18-main bash scripts/host_snapshot.sh \
+  > /srv/homelab/ecommerce/benchmarks/before.txt          # read-only; sudo asks for your password
+```
 
 ```bash
 sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
@@ -73,13 +84,12 @@ by the benchmark (`init-db` per database), or by hand with `ECOMMERCE_DATABASE_U
 ## Stage 3-5: snapshot, smoke, benchmark, crash/resume
 
 ```bash
-export EXISTING_PG_URL="postgresql://ecomgen_app:<pw>@127.0.0.1:5432/postgres"   # read-only stats of the cluster
-export PG_SERVICE=postgresql@18-main
-bash scripts/host_snapshot.sh > /srv/homelab/ecommerce/benchmarks/before.txt
+set -a; . ./.env; set +a                               # password comes from .env, never typed on a command line
 uv run pytest                                          # unit tests; integration tests listed as skipped
 EXPECTED_SHA=<APPROVED_TAG> MOUNT_UUID=<uuid> PG_MAJOR=18 PG_SERVICE=postgresql@18-main \
   bash scripts/homelab_benchmark.sh
-bash scripts/host_snapshot.sh > /srv/homelab/ecommerce/benchmarks/after.txt
+PG_LOCAL_SUPERUSER=1 PG_SERVICE=postgresql@18-main bash scripts/host_snapshot.sh \
+  > /srv/homelab/ecommerce/benchmarks/after.txt
 diff /srv/homelab/ecommerce/benchmarks/before.txt /srv/homelab/ecommerce/benchmarks/after.txt
 ```
 
@@ -91,9 +101,13 @@ locale don't matter), no sessions or prepared transactions left after the SIGKIL
 the clean run. WAL growth is server-wide (other activity on the cluster would add to it). Copy `summary.md` into
 `docs/BENCHMARKS.md` via a PR from the Mac.
 
-Expected diff: only the three `ecommerce_homelab_*` databases change (size, write counters) and `ecomgen_app`
-appears in the role list if the before snapshot was taken before Stage 2; containers, volumes, ports, settings,
-the PostgreSQL unit's start time and files under `/srv/homelab` outside the project path are identical.
+Expected diff (rehearsed on PostgreSQL 18.6): `ecomgen_app` added (`super=false createdb=false`), three `acl`
+lines (owner `ecomgen_app`, only it may connect) and three `db` lines (sizes, write counters). Unchanged: other
+roles and memberships, all non-default settings (read as superuser, so complete), the `postgres` database, the
+PostgreSQL unit's start time, container IDs / start times / restart counts, volumes, ports, and every file under
+`/srv/homelab` outside the project path. Check the snapshot's "unreadable paths" count: changes inside paths it
+couldn't read are not seen (run as a user that can read them for a fuller check). If it says `DOCKER UNAVAILABLE`,
+the container sections prove nothing; stop and decide how to read them (a system change, so it needs approval).
 
 ## Cleanup and rollback (each needs explicit approval; smallest first)
 
@@ -105,7 +119,7 @@ the PostgreSQL unit's start time and files under `/srv/homelab` outside the proj
 3. Remove everything: drop the three databases, then `DROP ROLE ecomgen_app`; `rm -rf /srv/homelab/ecommerce`.
 4. Re-run `scripts/host_snapshot.sh` and diff against `before.txt`.
 
-## Expected resources (macOS rehearsal on PostgreSQL 17, least-privilege role)
+## Expected resources (macOS rehearsals on PostgreSQL 17.11 and 18.6, least-privilege role)
 
 | Run | Wall | Generator RSS | PostgreSQL server | DB size | WAL |
 |---|---|---|---|---|---|

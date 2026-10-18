@@ -7,12 +7,14 @@
 # empty. This script never creates or drops a database (cleanup is a manual, approved step).
 #
 # Required env: ECOMGEN_BENCH_URL (or ECOMMERCE_DATABASE_URL) = URL of one of those databases as that role.
-# On Linux also: MOUNT_UUID = filesystem UUID that must be mounted at MOUNT_TARGET (/srv/homelab) and hold DATA_ROOT.
-# Optional env: DATA_ROOT (/srv/homelab/ecommerce), OUT (DATA_ROOT/benchmarks/<UTC>; its parent must exist),
+# On Linux also: MOUNT_UUID = filesystem UUID that must be mounted (read-write) at MOUNT_TARGET (/srv/homelab) and
+#   hold OUT; PG_SERVICE = systemd unit of the server (e.g. postgresql@18-main), proven to be the server the URL reaches.
+# Optional env: DATA_ROOT (/srv/homelab/ecommerce), OUT (DATA_ROOT/benchmarks/<UTC>; must be under DATA_ROOT, its
+#   parent must exist),
 #   CONFIG (config/generator.example.yaml), EXPECTED_SHA (refuse unless HEAD is that commit/tag and the tree is
 #   clean), EXPECTED_DIGEST (scripts/expected_mvp_digest.txt, the macOS baseline; must exist), PG_MAJOR (refuse
-#   another server major version), PG_SERVICE (systemd unit of the server, e.g. postgresql@18-main) or PG_CONTAINER
-#   (docker container) for server memory/CPU, PG_DATA_PATH (/var/lib/postgresql; free-space gate), MIN_FREE_GB (10).
+#   another server major version), PG_CONTAINER (docker container, instead of PG_SERVICE, for server memory/CPU on
+#   macOS), PG_DATA_PATH (/var/lib/postgresql; free-space gate), MIN_FREE_GB (10).
 # Exit 0 only if every check holds; 2 = aborted by a gate or a failed step.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -81,17 +83,20 @@ use_db() { ECOMMERCE_DATABASE_URL="$(bench url "$1")" || die "cannot build URL f
 free_gb() { df -Pk "$1" 2>/dev/null | awk 'NR == 2 {print int($4 / 1048576)}'; }
 
 # ---------- gates before anything is written ----------
+case "$OUT" in "$DATA_ROOT"/*) ;; *) early_die "OUT $OUT is not under DATA_ROOT $DATA_ROOT";; esac
+PARENT="$(dirname "$OUT")"
 if [ -n "${MOUNT_UUID:-}" ]; then
   command -v findmnt >/dev/null || early_die "findmnt not found"
-  mnt() { findmnt -no "$1" -T "$DATA_ROOT" 2>/dev/null; }  # one field per call: an empty UUID can't shift fields
+  mnt() { findmnt -no "$1" -T "$PARENT" 2>/dev/null; }  # one field per call: an empty UUID can't shift fields
   m_target="$(mnt TARGET)"; m_uuid="$(mnt UUID)"; m_opts="$(mnt OPTIONS)"
-  [ "${m_target:-}" = "$MOUNT_TARGET" ] || early_die "$DATA_ROOT is not on the $MOUNT_TARGET mount (found ${m_target:-nothing}); is the NVMe mounted?"
+  [ "${m_target:-}" = "$MOUNT_TARGET" ] || early_die "$PARENT is not on the $MOUNT_TARGET mount (found ${m_target:-nothing}); is the NVMe mounted?"
   [ "${m_uuid:-}" = "$MOUNT_UUID" ] || early_die "$MOUNT_TARGET is filesystem ${m_uuid:-?}, expected $MOUNT_UUID"
   case ",${m_opts:-}," in *,rw,*) ;; *) early_die "$MOUNT_TARGET is not mounted read-write (${m_opts:-})";; esac
 elif [ "$(uname -s)" = Linux ]; then
   early_die "MOUNT_UUID not set (the filesystem UUID expected at $MOUNT_TARGET)"
 fi
-[ -d "$(dirname "$OUT")" ] || early_die "$(dirname "$OUT") does not exist (create the project directories first)"
+[ "$(uname -s)" != Linux ] || [ -n "${PG_SERVICE:-}" ] || early_die "PG_SERVICE not set (e.g. postgresql@18-main)"
+[ -d "$PARENT" ] || early_die "$PARENT does not exist (create the project directories first)"
 mkdir "$OUT" || early_die "cannot create $OUT"
 : > "$OUT/summary.md"; : > "$OUT/log.txt"
 trap cleanup EXIT
@@ -120,9 +125,11 @@ if [ -n "${PG_SERVICE:-}" ]; then
   cg="$(systemctl show -p ControlGroup --value "$PG_SERVICE" 2>/dev/null)"
   PG_CGROUP="/sys/fs/cgroup$cg"
   [ -n "$cg" ] && [ -r "$PG_CGROUP/memory.current" ] || die "cannot read memory.current of $PG_SERVICE ($PG_CGROUP)"
-  note "- server metrics: systemd unit $PG_SERVICE ($PG_CGROUP)"
+  same="$(bench same-server cgroup "$PG_CGROUP" 2>&1)" || die "the URL's server is not $PG_SERVICE: $same"
+  note "- server metrics: systemd unit $PG_SERVICE ($PG_CGROUP); $same"
 elif [ -n "${PG_CONTAINER:-}" ]; then
-  note "- server metrics: container $PG_CONTAINER"
+  same="$(bench same-server container "$PG_CONTAINER" 2>&1)" || die "the URL's server is not container $PG_CONTAINER: $same"
+  note "- server metrics: container $PG_CONTAINER; $same"
 else
   note "- server metrics: not measured (set PG_SERVICE or PG_CONTAINER)"
 fi

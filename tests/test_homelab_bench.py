@@ -55,6 +55,7 @@ def test_base_url_must_name_an_approved_database(bench: ModuleType, base: str,
     "postgresql://u:p@h/ecommerce_homelab_test?dbname=ecommerce_oltp",
     "postgresql://u:p@h/ecommerce%5Foltp",
     "postgresql://u:p@h/x?sslmode=disable&dbname=ecommerce_oltp",
+    "postgresql://u:p@h/ecommerce_homelab_crash?dbname=",  # empty dbname: libpq falls back to the user name
 ])
 def test_urls_that_hide_the_real_database_are_refused(bench: ModuleType, url: str,
                                                       monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,9 +1,10 @@
 # Tasks
 
 ## Active
-- [ ] Ubuntu: Step 0 inventory, then runbook `docs/HOMELAB_DEPLOYMENT.md` at tag `v0.1.0-homelab` (needs approval to execute)
+- [ ] PR `fix/host-postgres-tooling` (base `docs/post-merge-handoff`, PR #11): host PostgreSQL 18 + least-privilege role, no automatic drops, mount gate, digest fix; reviewed, 10 findings fixed; then merge #11 + this, tag `v0.1.1-homelab`
+- [ ] Ubuntu (operator runs each step by hand): Stage 1 directories + checkout, Stage 2 role/DBs, Stage 3-5 benchmark per `docs/HOMELAB_DEPLOYMENT.md` at `v0.1.1-homelab`
 - [ ] Record Ubuntu results in `docs/BENCHMARKS.md` (PR from the Mac)
-- [ ] Phase 2 file feeds (CSV/JSONL + staging + manifests); its acceptance includes checking files on Ubuntu
+- [ ] Phase 2 file feeds (CSV/JSONL + staging + manifests); its acceptance includes checking files on Ubuntu; homelab `filesystem.root` = `/srv/homelab/ecommerce/data` (spec/example still say `/srv/ecommerce-data`)
 
 ## Next (Phase 1)
 
