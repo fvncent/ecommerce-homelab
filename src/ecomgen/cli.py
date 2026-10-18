@@ -5,7 +5,7 @@ import time
 
 import psycopg
 
-from ecomgen import __version__, config, db, generate, load, validate
+from ecomgen import __version__, config, db, feeds, generate, load, validate
 
 
 def _connect_cfg(path: str) -> tuple[config.Config, str] | int:
@@ -28,6 +28,8 @@ def check_config(path: str) -> int:
     print(f"  profile={g.profile} seed={g.seed} orders={g.counts['orders']} chunk_rows={g.chunk_rows} workers={g.workers}")
     print(f"  clock {g.clock_start.isoformat()} -> {g.clock_end.isoformat()}")
     try:
+        root = config.data_root(cfg)
+        print(f"  files: {', '.join(feeds.enabled(cfg)) or 'none'} under {root}")
         config.database_url(cfg)
     except config.ConfigError as e:
         print(f"environment error: {e}", file=sys.stderr)
@@ -63,8 +65,15 @@ def generate_cmd(path: str, profile: str | None) -> int:
     try:
         with psycopg.connect(url, autocommit=True) as conn:
             result = load.run(conn, cfg, profile)
-    except (load.LoadError, generate.GenerationError) as e:
+    except config.ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 2
+    except (load.LoadError, generate.GenerationError, feeds.FeedError) as e:
         print(f"generate error: {e}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"file error: {e}; if a run was started it is now FAILED (see `ecomgen status`): fix the cause and "
+              "run `ecomgen resume`", file=sys.stderr)
         return 1
     except psycopg.Error as e:
         print(f"database error: {type(e).__name__}: {e}".rstrip(), file=sys.stderr)
@@ -74,7 +83,14 @@ def generate_cmd(path: str, profile: str | None) -> int:
     print(f"run {result.run_id} COMPLETED: {result.chunks_written} chunks in {time.perf_counter() - started:.1f}s,"
           f" peak RSS {rss_mb:.0f} MB")
     print("  " + " ".join(f"{t}={n}" for t, n in result.counts.items()))
+    _print_files(result.files)
     return 0
+
+
+def _print_files(p: feeds.Published) -> None:
+    if p.files:
+        print(f"  files: {p.files} recorded ({p.newly_published} newly published); "
+              + " ".join(f"{f}={n}" for f, n in p.records.items()))
 
 
 def validate_cmd(path: str, run_id: str | None) -> int:
@@ -86,7 +102,7 @@ def validate_cmd(path: str, run_id: str | None) -> int:
     try:
         with psycopg.connect(url, autocommit=True) as conn:
             run_id, results = validate.validate(conn, cfg, run_id)
-    except (validate.ValidateError, db.RunLookupError) as e:
+    except (validate.ValidateError, db.RunLookupError, OSError) as e:
         print(f"validate error: {e}", file=sys.stderr)
         return 3
     except psycopg.Error as e:
@@ -134,8 +150,6 @@ def status_cmd(path: str, run_id: str | None) -> int:
         print("  no process is writing: the run crashed; run `ecomgen resume`")
     elif st.state == "FAILED":
         print("  run `ecomgen resume` to finish it")
-    elif st.state == "FAILED":
-        print("  run `ecomgen resume` to finish it")
     return 0
 
 
@@ -149,11 +163,17 @@ def resume_cmd(path: str, run_id: str | None) -> int:
     try:
         with psycopg.connect(url, autocommit=True) as conn:
             result = load.resume(conn, cfg, run_id)
+    except config.ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 2
     except db.RunLookupError as e:
         print(f"resume error: {e}", file=sys.stderr)
         return 3
-    except (load.LoadError, generate.GenerationError) as e:
+    except (load.LoadError, generate.GenerationError, feeds.FeedError) as e:
         print(f"resume error: {e}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"file error: {e}; fix the cause and run `ecomgen resume` again", file=sys.stderr)
         return 1
     except psycopg.Error as e:
         print(f"database error: {type(e).__name__}: {e}".rstrip(), file=sys.stderr)
@@ -164,6 +184,7 @@ def resume_cmd(path: str, run_id: str | None) -> int:
     print(f"run {result.run_id} COMPLETED: {result.chunks_written} chunks written, {result.chunks_skipped} already"
           f" committed, in {time.perf_counter() - started:.1f}s")
     print("  " + " ".join(f"{t}={n}" for t, n in result.counts.items()))
+    _print_files(result.files)
     return 0
 
 

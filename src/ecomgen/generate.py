@@ -26,9 +26,10 @@ from ecomgen.config import Config
 ENTITY_ORDER = ("sellers", "categories", "customers", "products", "orders")
 MAX_LINES = 5
 MAX_ATTEMPTS = 3
-# Bump whenever generated rows change for the same inputs (the golden test is keyed by it): resume refuses
-# runs written under another data version, since regenerated chunks would no longer match committed ones.
-DATA_VERSION = 1
+# Bump whenever generated rows or files change for the same inputs (the golden tests are keyed by it): resume
+# refuses runs written under another data version, since regenerated chunks would no longer match committed ones.
+# 2: file feeds (feeds.py) and World.clickstream_events; database rows are unchanged from 1.
+DATA_VERSION = 2
 PROBE_TRIES = 32
 CURRENCY = "USD"  # MVP: single-currency marketplace; per-market currencies come later
 MASTER_DATA_HISTORY = timedelta(days=730)  # master data is created in [clock_start - 730d, clock_start)
@@ -201,6 +202,7 @@ class World:
     customers: int
     products: int
     orders: int
+    clickstream_events: int = 0  # browsing events in the clickstream feed (feeds.py), besides one per order
 
     def __post_init__(self) -> None:
         for name in ("clock_start", "clock_end"):
@@ -212,12 +214,15 @@ class World:
         for name in ("sellers", "customers", "products", "orders"):
             if getattr(self, name) < 1:
                 raise GenerationError(f"{name} must be >= 1")
+        if self.clickstream_events < 0:
+            raise GenerationError("clickstream_events must be >= 0")
 
     @classmethod
     def from_config(cls, cfg: Config) -> "World":
         g = cfg.generator
         c = g.counts
-        return cls(g.seed, g.clock_start, g.clock_end, c["sellers"], c["customers"], c["products"], c["orders"])
+        return cls(g.seed, g.clock_start, g.clock_end, c["sellers"], c["customers"], c["products"], c["orders"],
+                   c["clickstream_events"])
 
     def count(self, entity: str) -> int:
         if entity == "categories":

@@ -20,7 +20,8 @@ SPARSE = replace(WORLD, seed=7, sellers=2, customers=5, products=3, orders=200)
 # fingerprint of rows(WORLD) + rows(SPARSE), per generate.DATA_VERSION. NEVER edit an existing entry for a data change:
 # bump DATA_VERSION and add an entry (resume refuses runs from another data version; an edited entry would let it
 # mix old and new rows). Editing is only right when the test's inputs change, not the generator's output.
-GOLDEN = {1: "6747ce23f4146509c9294cb0b2a755c2a35ce2e3ddb10666f5ce9bbf516776d4"}
+GOLDEN = {1: "6747ce23f4146509c9294cb0b2a755c2a35ce2e3ddb10666f5ce9bbf516776d4",
+          2: "6747ce23f4146509c9294cb0b2a755c2a35ce2e3ddb10666f5ce9bbf516776d4"}  # 2 changed files only
 ORDER_FLOW = ["CREATED", "CONFIRMED", "PROCESSING", "SHIPPED", "DELIVERED"]
 
 

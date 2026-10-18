@@ -12,17 +12,19 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import psycopg
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
-from ecomgen import __version__, db, generate
+from ecomgen import __version__, config, db, feeds, generate
 from ecomgen.config import Config
 
 # Built-in profile counts; other profiles take counts from the config file.
-PROFILE_COUNTS = {"smoke": {"sellers": 20, "customers": 500, "products": 200, "orders": 1000}}
+PROFILE_COUNTS = {"smoke": {"sellers": 20, "customers": 500, "products": 200, "orders": 1000,
+                             "clickstream_events": 10_000}}
 TABLES = ("sellers", "categories", "customers", "products", "orders", "order_items", "payment_attempts")
 # Arbitrary constant; held for the whole run so two generate/resume processes never write concurrently.
 _RUN_LOCK_ID = 7_302_410_002
@@ -38,6 +40,7 @@ class RunResult:
     counts: dict[str, int]  # rows written per table, from the chunk ledger
     chunks_written: int
     chunks_skipped: int
+    files: feeds.Published
 
 
 def world_for(cfg: Config, preset: str | None) -> generate.World:
@@ -46,7 +49,8 @@ def world_for(cfg: Config, preset: str | None) -> generate.World:
     if preset is None:
         return world
     c = PROFILE_COUNTS[preset]
-    return replace(world, sellers=c["sellers"], customers=c["customers"], products=c["products"], orders=c["orders"])
+    return replace(world, sellers=c["sellers"], customers=c["customers"], products=c["products"], orders=c["orders"],
+                   clickstream_events=c["clickstream_events"])
 
 
 def _write(cur: psycopg.Cursor[tuple[object, ...]], cfg: Config, table: str,
@@ -66,8 +70,9 @@ def _write(cur: psycopg.Cursor[tuple[object, ...]], cfg: Config, table: str,
 
 
 # Generation is a pure function of the World, DATA_VERSION and chunk_rows. Resume rebuilds the World from what the
-# run recorded (so config edits to seed/clock/counts can't change it) and requires the rest to match.
-RESUME_MUST_MATCH = ("data_version", "chunk_rows", "application_schema")
+# run recorded (so config edits to seed/clock/counts can't change it) and requires the rest to match, including
+# where and how its files are published (a different root or layout would publish a second, different set).
+RESUME_MUST_MATCH = ("data_version", "chunk_rows", "application_schema", "data_root", "feeds")
 
 
 def resume_fields(cfg: Config, world: generate.World) -> dict[str, object]:
@@ -77,6 +82,8 @@ def resume_fields(cfg: Config, world: generate.World) -> dict[str, object]:
         "data_version": generate.DATA_VERSION,
         "world": {f.name: getattr(world, f.name) for f in dataclasses.fields(world)},
         "chunk_rows": cfg.generator.chunk_rows, "application_schema": cfg.postgres.application_schema,
+        "data_root": str(config.data_root(cfg)) if feeds.enabled(cfg) else None,  # nothing written there otherwise
+        "feeds": {"enabled": feeds.enabled(cfg), "max_file_size_mb": cfg.filesystem.max_file_size_mb},
     }
     normalized: dict[str, object] = json.loads(json.dumps(fields, default=datetime.isoformat))
     return normalized
@@ -158,6 +165,7 @@ def _complete(conn: psycopg.Connection, cfg: Config, run_id: str) -> dict[str, i
 def run(conn: psycopg.Connection, cfg: Config, preset: str | None = None) -> RunResult:
     """Start a new run and write every chunk. On error the run is marked FAILED (a hard crash leaves it RUNNING)."""
     _require_loadable(conn, cfg)
+    _require_data_root(cfg)
     world = world_for(cfg, preset)
     with _run_lock(conn):
         run_id = _start_run(conn, cfg, preset or cfg.generator.profile, world)
@@ -181,6 +189,7 @@ def resume(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -> 
             raise LoadError(f"can't resume run {run_id}: {', '.join(differs)} differ from what it started with, so "
                             "regenerated chunks wouldn't match committed ones; restore the original config "
                             "(e.g. git checkout) or generator version")
+        _require_data_root(cfg)
         world = _recorded_world(recorded)
         # error is kept (a later failure overwrites it), so a crash during resume doesn't lose the first reason
         conn.execute(db.q(cfg, "UPDATE {meta}.generation_runs SET state = 'RUNNING', finished_at = NULL"
@@ -226,7 +235,10 @@ def _resume_mismatch(recorded: dict[str, object] | None, cfg: Config) -> list[st
     """Names of RESUME_MUST_MATCH fields that differ between the run's record and this config/generator."""
     if recorded is None:
         return ["resume fields (run predates migration 0003)"]
-    current = resume_fields(cfg, generate.World.from_config(cfg))
+    try:
+        current = resume_fields(cfg, generate.World.from_config(cfg))
+    except config.ConfigError as e:  # e.g. an invalid ECOMGEN_DATA_ROOT: report it, don't crash status
+        return [f"data_root ({e})"]
     return [k for k in RESUME_MUST_MATCH if recorded.get(k) != current[k]]
 
 
@@ -237,6 +249,13 @@ def _lock_holder(conn: psycopg.Connection) -> int | None:
         " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
         " AND classid = %s AND objid = %s", (_RUN_LOCK_ID >> 32, _RUN_LOCK_ID & 0xFFFFFFFF)).fetchone()
     return int(row[0]) if row else None
+
+
+def _require_data_root(cfg: Config) -> None:
+    root = Path(config.data_root(cfg))
+    if feeds.enabled(cfg) and not root.is_dir():
+        raise LoadError(f"data root {root} does not exist; create it or point {config.DATA_ROOT_ENV} at a "
+                        "directory (filesystem.csv/jsonl are enabled)")
 
 
 def _require_loadable(conn: psycopg.Connection, cfg: Config) -> None:
@@ -265,11 +284,12 @@ def _run_lock(conn: psycopg.Connection) -> Iterator[None]:
 def _execute(conn: psycopg.Connection, cfg: Config, run_id: str, world: generate.World) -> RunResult:
     try:
         written, skipped = write_chunks(conn, cfg, run_id, world)
+        published = feeds.publish(conn, cfg, run_id, world, Path(config.data_root(cfg)))  # DB first, then files
         counts = _complete(conn, cfg, run_id)
     except BaseException as e:
         _fail(conn, cfg, run_id, e)
         raise
-    return RunResult(run_id, counts, written, skipped)
+    return RunResult(run_id, counts, written, skipped, published)
 
 
 def _fail(conn: psycopg.Connection, cfg: Config, run_id: str, e: BaseException) -> None:

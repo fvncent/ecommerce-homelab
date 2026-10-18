@@ -1,0 +1,162 @@
+"""File feeds without a database: determinism, contracts, money and rollover.
+Publishing with PostgreSQL: integration/test_publish.py."""
+
+import hashlib
+from dataclasses import replace
+from datetime import UTC, datetime
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from ecomgen import config, feeds
+from ecomgen import generate as g
+
+EXAMPLE = Path(__file__).parents[1] / "config" / "generator.example.yaml"
+WORLD = g.World(seed=42, clock_start=datetime(2026, 1, 1, tzinfo=UTC), clock_end=datetime(2026, 1, 15, tzinfo=UTC),
+                sellers=10, customers=200, products=100, orders=600, clickstream_events=2003)
+RUN = "run_20260101T000000Z_abcdef"
+# sha256 over (relative path, file bytes) of every staged file of WORLD, per generate.DATA_VERSION. Same rules as
+# GOLDEN in test_generate.py: never edit an entry for a data change; bump DATA_VERSION and add one.
+FEED_GOLDEN = {2: "bfb7276d62db9a2f1487ea597baf383fe245c44457ad8d2d43ff1b0d39caf385"}
+
+
+def cfg(chunk_rows: int = 250, max_mb: int = 128, csv: bool = True, jsonl: bool = True) -> config.Config:
+    c = config.load(EXAMPLE)
+    return replace(c, generator=replace(c.generator, chunk_rows=chunk_rows),
+                   filesystem=replace(c.filesystem, max_file_size_mb=max_mb, csv=csv, jsonl=jsonl))
+
+
+def staged(tmp: Path, c: config.Config, world: g.World = WORLD) -> tuple[dict[str, feeds.FileStat], dict[str, bytes]]:
+    stats = feeds.write_staged(world, c, RUN, tmp)
+    return stats, {rel: (tmp / rel).read_bytes() for rel in stats}
+
+
+def fingerprint(files: dict[str, bytes]) -> str:
+    h = hashlib.sha256()
+    for rel in sorted(files):
+        h.update(rel.encode() + b"\0" + files[rel] + b"\0")
+    return h.hexdigest()
+
+
+def payments(world: g.World = WORLD) -> list[g.PaymentAttempt]:
+    return [p for n in range(1, world.orders + 1) for p in world.order(n)[2]]
+
+
+def test_files_are_deterministic_and_independent_of_chunk_size(tmp_path: Path) -> None:
+    _, a = staged(tmp_path / "a", cfg(chunk_rows=250))
+    _, b = staged(tmp_path / "b", cfg(chunk_rows=7))
+    _, c = staged(tmp_path / "c", cfg(chunk_rows=100_000))
+    assert a == b == c
+    _, other = staged(tmp_path / "d", cfg(), replace(WORLD, seed=43))
+    assert other != a
+
+
+def test_feed_golden_fingerprint(tmp_path: Path) -> None:
+    _, files = staged(tmp_path, cfg())
+    assert max(FEED_GOLDEN) == g.DATA_VERSION
+    assert fingerprint(files) == FEED_GOLDEN[g.DATA_VERSION]
+
+
+def test_layout_and_stats(tmp_path: Path) -> None:
+    stats, files = staged(tmp_path, cfg())
+    for rel, st in stats.items():
+        day = rel.split("date=")[1].split("/")[0]
+        assert rel.startswith(("source_feeds/payment_settlement/date=", "clickstream/date=")), rel
+        assert f"/{RUN}-" in rel and rel.endswith(("-part-00000.csv", "-part-00000.jsonl"))
+        records = list(feeds.iter_records(tmp_path / rel, st.fmt))
+        assert len(records) == st.records > 0
+        assert st.start is not None and st.end is not None
+        assert st.start.date().isoformat() == st.end.date().isoformat() == day  # partitioned by event date
+    assert {st.feed for st in stats.values()} == {"payment_settlement", "clickstream"}
+
+
+def test_settlements_cover_exactly_the_settled_payments(tmp_path: Path) -> None:
+    stats, _ = staged(tmp_path, cfg())
+    rows = [r for rel, st in stats.items() if st.feed == "payment_settlement"
+            for r in feeds.iter_records(tmp_path / rel, "csv")]
+    settled = {p.payment_id: p for p in payments() if p.state == "SETTLED"}
+    assert settled and sorted(str(r["payment_id"]) for r in rows) == sorted(settled)
+    for r in rows:
+        p = settled[str(r["payment_id"])]
+        gross, fee, net = (Decimal(str(r[k])) for k in ("gross_amount", "fee_amount", "net_amount"))
+        assert (r["order_id"], gross, r["currency"], r["provider"]) == (p.order_id, p.amount, p.currency, p.provider)
+        assert fee + net == gross and Decimal(0) <= fee <= gross and fee == fee.quantize(Decimal("0.01"))
+        assert r["settled_at"] == feeds.ts(p.updated_at) and r["settlement_date"] == r["settled_at"][:10]
+        assert r["batch_id"] == f"{p.provider}-{r['settlement_date']}"
+        assert r["settlement_id"] == "stl_" + p.payment_id[4:]
+
+
+def test_fee_is_exact_and_capped() -> None:
+    p = payments()[0]
+    row = feeds.settlement_row(p._replace(state="SETTLED", amount=Decimal("100.00"), provider="adyen-sim"))
+    assert row and (row["fee_amount"], row["net_amount"]) == ("2.75", "97.25")
+    tiny = feeds.settlement_row(p._replace(state="SETTLED", amount=Decimal("0.10"), provider="payco-sim"))
+    assert tiny and (tiny["fee_amount"], tiny["net_amount"]) == ("0.10", "0.00")
+    assert feeds.settlement_row(p._replace(state="CAPTURED")) is None
+
+
+def test_clickstream_contract(tmp_path: Path) -> None:
+    stats, _ = staged(tmp_path, cfg())
+    events = [e for rel, st in stats.items() if st.feed == "clickstream"
+              for e in feeds.iter_records(tmp_path / rel, "jsonl")]
+    assert len(events) == WORLD.clickstream_events + WORLD.orders
+    assert len({e["event_id"] for e in events}) == len(events)
+    orders = {o.order_id: o for o in (WORLD.order(n)[0] for n in range(1, WORLD.orders + 1))}
+    customers = {WORLD.customer(n).customer_id for n in range(1, WORLD.customers + 1)}
+    products = {WORLD.product(n).product_id for n in range(1, WORLD.products + 1)}
+    lo, hi = feeds.ts(WORLD.clock_start), feeds.ts(WORLD.clock_end)
+    for e in events:
+        assert set(e) == {"event_id", "schema_version", "event_type", "customer_id", "session_id", "product_id",
+                          "event_time", "arrived_at", "source_system", "payload"}
+        assert e["schema_version"] == 1 and e["source_system"] == "web_app"
+        assert lo <= str(e["event_time"]) < hi and str(e["arrived_at"]) > str(e["event_time"])
+        assert e["customer_id"] is None or e["customer_id"] in customers
+        assert e["product_id"] is None or e["product_id"] in products
+        if e["event_type"] == "order_placed":
+            payload = e["payload"]
+            assert isinstance(payload, dict)
+            o = orders[str(payload["order_id"])]
+            assert (e["event_id"], e["customer_id"], e["event_time"]) == (f"evt_{o.order_id}", o.customer_id,
+                                                                          feeds.ts(o.placed_at))
+            assert payload["total"] == str(o.total)
+        else:
+            assert e["event_type"] in {t for t, _ in feeds.BROWSE_TYPES}
+            assert (e["product_id"] is None) == (e["event_type"] == "search")
+    # sessions: one customer each, events in time order
+    by_session: dict[object, list[dict[str, object]]] = {}
+    for e in events:
+        by_session.setdefault(e["session_id"], []).append(e)
+    for s in (f"ses_{k}" for k in range(1, feeds.session_count(WORLD) + 1)):
+        evs = sorted(by_session[s], key=lambda e: int(str(e["event_id"])[4:]))
+        assert len({e["customer_id"] for e in evs}) == 1
+        assert [e["event_time"] for e in evs] == sorted(str(e["event_time"]) for e in evs)
+    assert len(by_session["ses_401"]) == 3  # 2003 events: the last session is partial
+
+
+def test_rollover_splits_files_without_losing_records(tmp_path: Path) -> None:
+    w = feeds._Writer(tmp_path, 2_000)  # a 2 kB limit (config's minimum is 1 MB) forces several parts
+    recs = [(f"line {i}\n", datetime(2026, 1, 2, tzinfo=UTC)) for i in range(500)]
+    w.add("clickstream", f"clickstream/date=2026-01-02/{RUN}", "jsonl", None, recs[:200])
+    w.add("clickstream", f"clickstream/date=2026-01-02/{RUN}", "jsonl", None, recs[200:])
+    parts = sorted(w.files)
+    assert len(parts) > 1 and parts[0].endswith("-part-00000.jsonl")
+    lines = [line for rel in parts for line in (tmp_path / rel).read_text().splitlines(keepends=True)]
+    assert lines == [r[0] for r in recs] and sum(w.files[p].records for p in parts) == 500
+    assert all((tmp_path / rel).stat().st_size <= 2_000 + 10 for rel in parts)
+
+
+@pytest.mark.parametrize(("csv", "jsonl", "expected"), [
+    (True, False, {"payment_settlement"}), (False, True, {"clickstream"}), (False, False, set()),
+])
+def test_feed_toggles(tmp_path: Path, csv: bool, jsonl: bool, expected: set[str]) -> None:
+    stats, _ = staged(tmp_path, cfg(csv=csv, jsonl=jsonl))
+    assert {st.feed for st in stats.values()} == expected
+
+
+def test_tiny_window_keeps_events_inside_it(tmp_path: Path) -> None:
+    world = replace(WORLD, clock_end=datetime(2026, 1, 1, 0, 10, tzinfo=UTC), orders=20, clickstream_events=50)
+    stats, _ = staged(tmp_path, cfg(), world)
+    events = [e for rel, st in stats.items() if st.feed == "clickstream"
+              for e in feeds.iter_records(tmp_path / rel, "jsonl")]
+    assert len(events) == 70 and all(str(e["event_time"]) < "2026-01-01T00:10:00Z" for e in events)

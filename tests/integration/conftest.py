@@ -17,6 +17,15 @@ EXAMPLE = Path(__file__).parents[2] / "config" / "generator.example.yaml"
 # Test modules repeat ADMIN_URL/EXAMPLE and their own skipif marker; tests/ is not a package, so no imports.
 
 
+@pytest.fixture(autouse=True)
+def data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Feeds publish under a per-test directory (also inherited by subprocesses)."""
+    root = tmp_path / "data"
+    root.mkdir()
+    monkeypatch.setenv("ECOMGEN_DATA_ROOT", str(root))
+    return root
+
+
 @pytest.fixture
 def new_db() -> Iterator[Callable[[], str]]:
     """Factory: each call creates an empty database and returns its URL; all are dropped afterwards."""

@@ -1,8 +1,9 @@
 # Tasks
 
 ## Active
-- [ ] PR `chore/ci` (base `docs/ubuntu-benchmark`, PR #13): GitHub Actions — mypy, shellcheck, pytest on PG 17.11 + 18.6, fail on any skip; first run green (151 passed, 0 skipped on both); awaiting merge after #13
-- [ ] Phase 2 file feeds (CSV/JSONL + staging + manifests); its acceptance includes checking files on Ubuntu; homelab `filesystem.root` = `/srv/homelab/ecommerce/data` (spec/example still say `/srv/ecommerce-data`)
+- [ ] PR `feat/file-feeds` (Phase 2, part 1): settlement CSV + clickstream JSONL, staged publish + ledger + manifest, resume, validate gate (`docs/FEEDS.md`); reviewed, 10 findings fixed; PR #15, CI green (184 passed, 0 skipped on PG 17 + 18; feed golden identical on Linux); awaiting merge
+- [ ] Phase 2, part 2: `replay-files --from --to` (deterministic filenames), retention/cleanup policy (explicit command only), benchmark script + Ubuntu re-run with files (`ECOMGEN_DATA_ROOT=/srv/homelab/ecommerce/data`), record in `docs/BENCHMARKS.md`
+- [ ] Later in Phase 2/3: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 
 ## Next (Phase 1)
 
@@ -14,6 +15,7 @@
 - Clearer error when `metadata_schema` is renamed after apply (currently fails loudly with DuplicateTable)
 
 ## Done
+- [x] PRs #13 (Ubuntu results) and #14 (CI) merged; `main` CI green (2026-10-18)
 - [x] Phase 0 Ubuntu inspection (user, 2026-10-18): Ryzen 5 5600, ~14 GiB, NVMe 1 TB at `/srv/homelab`, host PG 18
 - [x] Ubuntu homelab verification (2026-10-18): smoke, 10k benchmark, crash/resume on host PG 18.6 at `8c581ad`; all checks passed, data identical to macOS, nothing else changed (`docs/BENCHMARKS.md`)
 - [x] PRs #11 (handoff) and #12 (host-PostgreSQL tooling) merged (2026-10-18)

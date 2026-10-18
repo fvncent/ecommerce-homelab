@@ -3,24 +3,46 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-18
-**Branch:** `chore/ci`, stacked on `docs/ubuntu-benchmark` (PR #13, docs: Ubuntu results). `main` = `8c581ad`,
-tagged **`v0.1.1-homelab`** (annotated; the commit verified on Ubuntu). `v0.1.0-homelab` = old container tooling.
-**Deployed:** `8c581ad` on Ubuntu, clone `/srv/homelab/projects/ecommerce-homelab`. **Ubuntu verification passed**
-(2026-10-18): smoke, 10k (1.78 s, 5,618 orders/s, data identical to macOS), crash/resume; snapshot diff = only our
-role + 3 databases. Details: `docs/BENCHMARKS.md`.
+**Branch:** `feat/file-feeds` (from `main` `d3ff25a`), **PR #15**: CI green (184 passed, 0 skipped on PG 17.11 and 18.6;
+the feed golden test passes on Linux too, so files are byte-identical across platforms).
+**Deployed on Ubuntu:** `v0.1.1-homelab` (`8c581ad`), verified 2026-10-18 (`docs/BENCHMARKS.md`). The new code needs
+`ECOMGEN_DATA_ROOT` there (part 2 updates the benchmark).
 
-## This task: CI (`chore/ci`)
-- `.github/workflows/ci.yml`: `lint` (uv sync --frozen, mypy, `bash -n` + `shellcheck -S warning` on scripts) and
-  `test` (matrix postgres 17.11-bookworm / 18.6-trixie service; `ECOMGEN_TEST_DATABASE_URL` = service superuser;
-  pytest with JUnit, then `scripts/ci_no_skips.py` fails on any skip or zero tests). `permissions: contents: read`,
-  `persist-credentials: false`, concurrency cancels superseded runs. Runs on every PR (any base) and push to main.
-- Pinned: actions/checkout v7.0.1, astral-sh/setup-uv v10.2.0 (v10.3.0 skipped: 9 days old), uv 0.12.13 (= local),
-  runner ubuntu-24.04.
-- shellcheck findings at warning level: unchecked `cd` in both scripts → `|| exit 2`. Info-level notes ignored.
-- Local checks: actionlint 1.7.7 clean; shellcheck 0.10.0 clean; suite with only `ECOMGEN_TEST_DATABASE_URL`
-  set: 146 passed (= CI env); gate exits 0 on that report and 1 on a no-DB report (73 skipped); 5 gate unit tests.
-- PR #14. First GitHub run (39085948076) green: lint 10 s (mypy 20 files clean); PG 17.11 and 18.6 each
-  **151 passed, 0 skipped** (~40 s per job).
+## This task: Phase 2 part 1, file feeds (`docs/FEEDS.md`)
+- `feeds.py`: payment_settlement CSV (SETTLED payments; fee = round_half_up(gross*pct/100 + fixed), capped; net =
+  gross - fee) and clickstream JSONL (`clickstream_events` browsing events in sessions of 5 + one `order_placed` per
+  order), from the same World as the DB rows; date partitions; rollover at max_file_size_mb; bounded entity cache.
+- Publish: staging/<run> → fsync → mkdirs with parent fsyncs → `os.link` (no replace) → dir fsync → ledger row
+  (`published_files`, migration 0005); manifest last (built from DB only: deterministic); run COMPLETED after.
+  Repeat/resume: recorded files must match; unrecorded identical file adopted (after fsync); else FeedError; once
+  the manifest is recorded, verify-only (checksums + manifest lists exactly the ledger files).
+- `load`: `_execute` = chunks → publish → complete; `resume_fields` records `data_root` (only if a feed is on) and
+  `feeds` (enabled + max_file_size_mb), both in RESUME_MUST_MATCH; smoke preset has 10,000 browsing events.
+- `config`: `ECOMGEN_DATA_ROOT` override (`config.data_root`); parquet=true and publish_via_staging=false refused.
+- `generate.DATA_VERSION = 2`, `World.clickstream_events` (default 0); GOLDEN[2] = GOLDEN[1] (DB rows unchanged);
+  `FEED_GOLDEN[2]` in tests/test_feeds.py.
+- `validate`: temp tables created before the RR READ ONLY snapshot (CREATE is refused inside it, COPY into temp
+  tables works), file + feed checks inside it, dropped after; per-feed gating; NULL-safe; unreadable → violation.
+  19 checks for a run with both feeds. DB-corruption tests run with feeds off (one check each); feed corruptions in
+  `tests/integration/test_publish.py` (caught by their check, others may also fire).
+- CLI: files summary; config error (exit 2) for a bad `ECOMGEN_DATA_ROOT` only in generate/resume; OSError → exit 1
+  with a status hint (validate: exit 3). Removed a duplicated `elif` in status.
+- Tests: 184 passed with DB, 89 passed / 95 skipped without; mypy clean (23 files). Includes a real SIGKILL during
+  publishing (4th file) → resume → identical to a clean run.
+
+## Review (`/code-review high`) — all 10 fixed
+| # | Finding | Fix |
+|---|---|---|
+| 1 | All feed checks ran when only one feed was published | Checks gated per published feed; single-feed integration tests |
+| 2 | New directories / adopted files not fsynced | `_mkdirs` fsyncs parents; adoption fsyncs file + dir chain |
+| 3 | NULL fields passed settlement checks | IS DISTINCT FROM + explicit NULL checks; malformed-event check; test |
+| 4 | File checks outside the DB snapshot | Temp tables pre-created; everything in one RR READ ONLY snapshot |
+| 5 | OSError/csv.Error crashed validate | Reported as files_match_ledger violations; CLI exit 3 for others; test |
+| 6 | exists() + os.replace could overwrite | `os.link` (EEXIST → FeedError); race test |
+| 7 | Misleading "run is FAILED" for pre-run OSError | Message conditional, points to status |
+| 8 | Resume restaged everything after full publish | Verify-only fast path once the manifest is recorded |
+| 9 | data_root recorded/validated with feeds off | Recorded only with feeds; only generate/resume validate it; status reports instead of crashing |
+| 10 | Unused field, mixed timestamp formats | `_Writer.run_id` removed; `published_at` via `ts()`; FEEDS.md documents it |
 
 ## Ubuntu facts (from the user, 2026-10-18)
 - Ubuntu Server, Ryzen 5 5600, ~14 GiB usable RAM, user `serveradmin`. Root fs ~73 GB free.
@@ -80,6 +102,6 @@ role + 3 databases. Details: `docs/BENCHMARKS.md`.
 - Phase 2 file feeds not implemented: `data/` stays empty; `filesystem.root` default still `/srv/ecommerce-data`.
 
 ## Next step
-User merges #13 then #14 (CI green) → next roadmap item: Phase 2 file feeds (CSV/JSONL + manifests;
-homelab root `/srv/homelab/ecommerce/data`). Re-running the Ubuntu benchmark needs the three databases recreated
-by hand (approved cleanup, runbook).
+User merges PR #15 → Phase 2 part 2 (replay-files, retention,
+benchmark + Ubuntu re-run with `ECOMGEN_DATA_ROOT=/srv/homelab/ecommerce/data`, new tag). Mac dev `.env` needs
+`ECOMGEN_DATA_ROOT` pointing at an existing directory before `generate` against `ecommerce_oltp`-style DBs.
