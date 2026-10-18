@@ -82,8 +82,9 @@ def test_replay_delivers_byte_identical_copies(run: tuple[psycopg.Connection, st
                                               data_root: Path) -> None:
     conn, _ = run
     before = originals(data_root)
-    r = replay.replay(conn, small_cfg, PARAMS)
-    assert not r.verified_only and r.newly_delivered == r.deliveries and r.duplicates > 0
+    every = replace(PARAMS, duplicate_pct=100)  # every file twice: duplicates don't depend on the random run id
+    r = replay.replay(conn, small_cfg, every)
+    assert not r.verified_only and r.newly_delivered == r.deliveries and r.duplicates * 2 == r.deliveries > 0
     assert originals(data_root) == before  # originals untouched
     doc = json.loads((data_root / replay.delivery_manifest_path(r.replay_id)).read_text())
     assert doc["kind"] == "replayed_delivery" and doc["run_id"] == r.run_id and len(doc["deliveries"]) == r.deliveries
