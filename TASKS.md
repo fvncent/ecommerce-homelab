@@ -1,7 +1,7 @@
 # Tasks
 
 ## Active
-- [ ] PR `chore/ci` (base `docs/ubuntu-benchmark`, PR #13): GitHub Actions — mypy, shellcheck, pytest on PG 17.11 + 18.6, fail on any skip; awaiting first green run
+- [ ] PR `chore/ci` (base `docs/ubuntu-benchmark`, PR #13): GitHub Actions — mypy, shellcheck, pytest on PG 17.11 + 18.6, fail on any skip; first run green (151 passed, 0 skipped on both); awaiting merge after #13
 - [ ] Phase 2 file feeds (CSV/JSONL + staging + manifests); its acceptance includes checking files on Ubuntu; homelab `filesystem.root` = `/srv/homelab/ecommerce/data` (spec/example still say `/srv/ecommerce-data`)
 
 ## Next (Phase 1)

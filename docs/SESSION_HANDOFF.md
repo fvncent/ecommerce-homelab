@@ -19,6 +19,8 @@ role + 3 databases. Details: `docs/BENCHMARKS.md`.
 - shellcheck findings at warning level: unchecked `cd` in both scripts → `|| exit 2`. Info-level notes ignored.
 - Local checks: actionlint 1.7.7 clean; shellcheck 0.10.0 clean; suite with only `ECOMGEN_TEST_DATABASE_URL`
   set: 146 passed (= CI env); gate exits 0 on that report and 1 on a no-DB report (73 skipped); 5 gate unit tests.
+- PR #14. First GitHub run (39085948076) green: lint 10 s (mypy 20 files clean); PG 17.11 and 18.6 each
+  **151 passed, 0 skipped** (~40 s per job).
 
 ## Ubuntu facts (from the user, 2026-10-18)
 - Ubuntu Server, Ryzen 5 5600, ~14 GiB usable RAM, user `serveradmin`. Root fs ~73 GB free.
@@ -78,7 +80,6 @@ role + 3 databases. Details: `docs/BENCHMARKS.md`.
 - Phase 2 file feeds not implemented: `data/` stays empty; `filesystem.root` default still `/srv/ecommerce-data`.
 
 ## Next step
-Push + PR `chore/ci` (base `docs/ubuntu-benchmark`) → first CI run must be green on both PostgreSQL versions (fix
-on the branch if not) → user merges #13 then this → next roadmap item: Phase 2 file feeds (CSV/JSONL + manifests;
+User merges #13 then #14 (CI green) → next roadmap item: Phase 2 file feeds (CSV/JSONL + manifests;
 homelab root `/srv/homelab/ecommerce/data`). Re-running the Ubuntu benchmark needs the three databases recreated
 by hand (approved cleanup, runbook).
