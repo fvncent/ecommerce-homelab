@@ -3,13 +3,14 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-18
-**Branch:** `feat/replay-files` (from `main` `5cf4280` = PR #15 merged, CI green). Phase 2 part 2, PR A of 3.
+**Branch:** `feat/cleanup-files` (from `main` `1e8be96` = PR #16 replay-files merged, CI green 216/0). PR B of 3:
+plan presented, awaiting approval before implementation.
 **Deployed on Ubuntu:** `v0.1.1-homelab` (`8c581ad`; no files). Keep it until `v0.2.0-homelab` passes there.
 **Approved (2026-10-18):** Part 2 plan (replay → cleanup → benchmark + release); user will recreate the three
 Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleaning a run's originals makes
 `validate` fail with "deleted by cleanup" (plan defaults, accepted with the plan).
 
-## This task: PR A, `replay-files` (`docs/FEEDS.md` "Replay")
+## Previous task: PR A, `replay-files` (PR #16, merged) (`docs/FEEDS.md` "Replay")
 - `replay.py`: `Params` (from/to/feeds/delay/jitter/dup pct, validated), `replay_id` (hash of run + params +
   REPLAY_VERSION), pure `schedule` (arrival = end of partition day + delay + jitter; dup 1-24 h later; both rng draws
   always made), `delivery_manifest` (plan only, reproducible), `_originals` (manifest vs ledger sha, each original vs
@@ -99,4 +100,5 @@ Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleani
 - Phase 2 file feeds not implemented: `data/` stays empty; `filesystem.root` default still `/srv/ecommerce-data`.
 
 ## Next step
-Push + PR of PR A (ask) → CI → merge → PR B cleanup-files → PR C benchmark + `v0.2.0-homelab`.
+User approves the PR B plan → implement `cleanup-files` → independent review → push + PR (ask) → merge → PR C
+(benchmark with files + `v0.2.0-homelab`).
