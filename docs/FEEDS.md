@@ -84,7 +84,35 @@ readable, size, sha256, record count) and `manifest_matches_ledger`; for a publi
 violation (NULL-safe comparisons). Feed rows are streamed into temporary tables (created just before the snapshot,
 dropped after), so memory stays bounded and the role needs `TEMPORARY` on the database (owners have it).
 
+## Replay (`ecomgen replay-files`)
+
+Simulated historical delivery of a COMPLETED run's files (code: `src/ecomgen/replay.py`):
+
+```bash
+ecomgen replay-files CONFIG --from 2026-01-05 --to 2026-01-08 [--run-id R] [--feed clickstream]... \
+    [--delay-hours 24] [--jitter-hours 0] [--duplicate-pct 0]
+```
+
+- **Originals come from the run manifest.** The manifest must match its ledger checksum, and every original whose
+  partition date is in `[from, to]` must match the manifest (size + sha256). Otherwise nothing is written and the
+  problems are listed.
+- **Deliveries are byte-identical copies** at `deliveries/replay_id=<id>/arrived=<D>/<original path>`; a duplicate
+  delivery is `<name>.dup1.<ext>`. Originals under `source_feeds/` and `clickstream/` are never touched.
+- **Arrival:** end of the partition's day + `delay_hours` + up to `jitter_hours` (whole seconds); a duplicate
+  (`duplicate_pct` of files) arrives 1-24 h after its first delivery. Deterministic: from a hash of the replay id
+  and the original path. Real-time pacing (waiting until arrival) needs the Phase 3 clock.
+- **Replay id** `rpl_<12 hex>` = hash of run id + parameters + `REPLAY_VERSION`. The same command is the same
+  replay: repeating it finishes an interrupted one or verifies a finished one; other parameters make a new replay.
+- **delivery_manifest.json** (written last): `replay_id, run_id, kind: replayed_delivery, params,
+  source_manifest {file_path, sha256}` and per delivery `delivered_path, original_path, feed, partition_date,
+  sha256, bytes, arrived_at, duplicate`. Built only from the plan, so it is reproducible byte for byte.
+- **Crash-safe like publishing:** copy into `staging/<replay_id>/`, check the copy's sha256, place with the same
+  never-overwriting `place_file`, then a `file_deliveries` row (migration 0006); the manifest's row and
+  `replays.state = COMPLETED` commit together. Holds the run lock (never overlaps generate/resume/cleanup).
+- Refused: a run that isn't COMPLETED, published no files, published under another data root, or lacks a requested
+  feed; an empty range; bad arguments (exit 2). Exit codes: 0 done, 1 refused/failed, 2 argument/config, 3 no run.
+
 ## Not yet
 
-`replay-files --from --to`, retention/cleanup policy, Parquet snapshots, supplier/courier feeds (need warehouses,
+Cleanup/retention command (Phase 2 part 2, next PR), Parquet snapshots, supplier/courier feeds (need warehouses,
 inventory, shipments), anomaly injection (Phase 4).

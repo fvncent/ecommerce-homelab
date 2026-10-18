@@ -1,11 +1,12 @@
 import argparse
+import datetime as dt
 import resource
 import sys
 import time
 
 import psycopg
 
-from ecomgen import __version__, config, db, feeds, generate, load, validate
+from ecomgen import __version__, config, db, feeds, generate, load, replay, validate
 
 
 def _connect_cfg(path: str) -> tuple[config.Config, str] | int:
@@ -188,6 +189,45 @@ def resume_cmd(path: str, run_id: str | None) -> int:
     return 0
 
 
+def replay_cmd(path: str, run_id: str | None, start: str, end: str, feed: list[str] | None, delay: int,
+               jitter: int, duplicate_pct: int) -> int:
+    """Exit 0: delivered (or verified). 1: refused or failed. 2: config or argument error. 3: no run / not found."""
+    loaded = _connect_cfg(path)
+    if isinstance(loaded, int):
+        return loaded
+    cfg, url = loaded
+    try:
+        params = replay.Params(dt.date.fromisoformat(start), dt.date.fromisoformat(end),
+                               tuple(sorted(set(feed or feeds.enabled(cfg)))), delay, jitter, duplicate_pct)
+    except (ValueError, replay.ReplayError) as e:
+        print(f"replay error: {e}", file=sys.stderr)
+        return 2
+    started = time.perf_counter()
+    try:
+        with psycopg.connect(url, autocommit=True) as conn:
+            r = replay.replay(conn, cfg, params, run_id)
+    except config.ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 2
+    except db.RunLookupError as e:
+        print(f"replay error: {e}", file=sys.stderr)
+        return 3
+    except (replay.ReplayError, feeds.FeedError, load.LoadError) as e:
+        print(f"replay error: {e}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"file error: {e}; fix the cause and repeat the same command to finish the replay", file=sys.stderr)
+        return 1
+    except psycopg.Error as e:
+        print(f"database error: {type(e).__name__}: {e}".rstrip(), file=sys.stderr)
+        return 1
+    what = "verified (already complete)" if r.verified_only else f"{r.newly_delivered} newly delivered"
+    print(f"replay {r.replay_id} of run {r.run_id}: {r.deliveries} deliveries ({r.duplicates} duplicates), {what},"
+          f" in {time.perf_counter() - started:.1f}s")
+    print(f"  under {config.data_root(cfg)}/{replay.delivery_manifest_path(r.replay_id).rsplit('/', 1)[0]}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ecomgen", description="Synthetic e-commerce source-data generator")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -212,6 +252,22 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("resume", help="finish a crashed (RUNNING) or FAILED run; committed chunks are skipped")
     p.add_argument("config", help="path to generator YAML (must be identical to the run's)")
     p.add_argument("--run-id", help="run to resume (default: the most recent run)")
+    p = sub.add_parser("replay-files", help="deliver copies of a run's files for a date range (simulated arrival)",
+                       description="Copies published files byte for byte under deliveries/replay_id=<id>/, with "
+                                   "deterministic arrival times and optional duplicates, plus a delivery manifest. "
+                                   "The same arguments always mean the same replay: repeating a command finishes "
+                                   "or verifies it. Originals are never modified. Exit codes: 0 done, 1 refused or "
+                                   "failed, 2 config/argument error, 3 no run / run not found.")
+    p.add_argument("config", help="path to generator YAML")
+    p.add_argument("--from", dest="start", required=True, help="first partition date, YYYY-MM-DD")
+    p.add_argument("--to", dest="end", required=True, help="last partition date, YYYY-MM-DD (inclusive)")
+    p.add_argument("--run-id", help="run whose files to replay (default: the most recent run)")
+    p.add_argument("--feed", action="append", choices=("payment_settlement", "clickstream"),
+                   help="feed to replay (repeatable; default: every feed the config enables)")
+    p.add_argument("--delay-hours", type=int, default=24, help="hours after a partition's day ends (default 24)")
+    p.add_argument("--jitter-hours", type=int, default=0, help="up to this many extra hours per file (default 0)")
+    p.add_argument("--duplicate-pct", type=int, default=0,
+                   help="percent of files delivered a second time, 1-24 h later (default 0)")
     args = parser.parse_args(argv)
     if args.command == "check-config":
         return check_config(args.config)
@@ -225,5 +281,8 @@ def main(argv: list[str] | None = None) -> int:
         return status_cmd(args.config, args.run_id)
     if args.command == "resume":
         return resume_cmd(args.config, args.run_id)
+    if args.command == "replay-files":
+        return replay_cmd(args.config, args.run_id, args.start, args.end, args.feed, args.delay_hours,
+                          args.jitter_hours, args.duplicate_pct)
     parser.print_help()
     return 0

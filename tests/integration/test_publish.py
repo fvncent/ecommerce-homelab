@@ -240,7 +240,7 @@ def test_file_appearing_before_placement_is_not_overwritten(migrated: Migrated, 
         Path(dst).write_bytes(b"restored by hand\n")
         real_link(src, dst)
     monkeypatch.setattr(os, "link", racing_link)
-    with pytest.raises(feeds.FeedError, match="appeared while publishing"):
+    with pytest.raises(feeds.FeedError, match="appeared while placing it"):
         load.run(c, small_cfg, "smoke")
     victim = next(p for p in data_root.rglob("*-part-00000.*") if "staging" not in p.parts)
     assert victim.read_bytes() == b"restored by hand\n"
