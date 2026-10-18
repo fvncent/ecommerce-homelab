@@ -4,11 +4,35 @@ Update before compaction or ending a significant session. Overwrite; git history
 
 **Updated:** 2026-10-18
 **Branch:** `chore/benchmark-files` (from `main` `b619622` = PR #17 cleanup-files merged, CI green 235/0). PR C of
-3: plan presented, awaiting approval.
+3: implemented, Mac rehearsals green; independent review next. No reset or deployment without approval.
 **Deployed on Ubuntu:** `v0.1.1-homelab` (`8c581ad`; no files). Keep it until `v0.2.0-homelab` passes there.
 **Approved (2026-10-18):** Part 2 plan (replay → cleanup → benchmark + release); user will recreate the three
 Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleaning a run's originals makes
 `validate` fail with "deleted by cleanup" (plan defaults, accepted with the plan).
+
+## This task: PR C, benchmark with files (`docs/HOMELAB_DEPLOYMENT.md`)
+- Decisions (user, 2026-10-18): publish crash in the smoke database, sequentially after the clean smoke run, from a
+  clean baseline without any reset: its own schema set (`*_pc`, derived config `generator_pc.yaml` in OUT; preflight
+  requires both schema sets empty). Replay cleanup: dry run unless `CLEANUP_REPLAY=1`, only for the replay this run
+  created (`owned-replay`), only if every earlier check passed; list reported first (`cleanup_plan.txt`).
+- Deployment rules (user): tag + SHA verified, PRs merged + CI green, localhost:5432 only (port 55432 refused in
+  preflight; `EXPECTED_PG_PORT`), inventory of the 3 DBs before proposing drops, no automatic drops, NVMe mount,
+  `ECOMGEN_DATA_ROOT=/srv/homelab/ecommerce/data`, everything under `/srv/homelab/ecommerce`, snapshot diff;
+  approval before creating/pushing `v0.2.0-homelab`; Ubuntu commands one step at a time, wait for output.
+- `homelab_bench.py`: local-only + forbidden-port + expected-port checks; `pc-config`, `run-id`, `feed-digest`,
+  `feed-stats`, `verify-files` (sha256 + orphans + staging), `feed-throughput`, `publish-crash` (kill after placing
+  file N, smoke DB only), `replay-crash` (test DB only), `replay-id`, `replay-originals`, `planned-replay-digest`,
+  `replay-digest`, `verify-replay`, `owned-replay`, `link-test`, `feeds-enabled`.
+- `homelab_benchmark.sh`: phases smoke → publish crash → MVP → feed-only throughput → load crash → replay crash →
+  cleanup; `same_as` (record-once with `RECORD_REFERENCES=1`, macOS only, exit 3); `expect` runs commands in a
+  subshell so SIGKILL notices go to the log.
+- Found: replay timing/duplicates are seeded by the replay id (includes the run id), so they differ per run and
+  can't be a cross-machine reference; the reference is the replayed originals, and deliveries are checked against
+  the locally computed plan. Making the schedule run-independent would be a REPLAY_VERSION 2 change (not done).
+- References: `scripts/expected_smoke_feed_digest.txt`, `expected_feed_digest.txt`, `expected_replay_originals.txt`
+  (recorded on Docker PG 17; `expected_mvp_digest.txt` re-recorded identical).
+- Rehearsals: Docker PG 17.11 (48/48, `CLEANUP_REPLAY=1`) and `postgres:18.6-trixie` (44/44, dry run), exit 0;
+  rehearsal role/DBs/container removed afterwards.
 
 ## Previous task: PR B, `cleanup-files` (PR #17, merged) (`docs/FEEDS.md` "Cleanup")
 - `cleanup.py`: `Target` (staging | replay | run), `plan` (read-only, hashes candidates: ledger-recorded,

@@ -160,6 +160,11 @@ ecomgen cleanup-files CONFIG --replay-id rpl_... --delete --confirm <token>
 - Exit codes: 0 dry run or deleted, 1 refused/failed, 2 config/argument error (including an empty id), 3
   run/replay not found or not migrated. No age-based selection (`--older-than`): left out on purpose (2026-10-18).
 
+## Benchmark
+
+`scripts/homelab_benchmark.sh` exercises all of the above end to end (publish crash, load crash, replay crash,
+cleanup) and compares the files with macOS references: see `docs/HOMELAB_DEPLOYMENT.md`.
+
 ## Not yet
 
 Age-based retention, Parquet snapshots, supplier/courier feeds (need warehouses,

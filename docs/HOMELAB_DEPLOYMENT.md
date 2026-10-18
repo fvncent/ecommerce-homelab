@@ -78,6 +78,7 @@ sudo -u postgres psql -c '\password ecomgen_app'      # paste the value from: op
 
 ```
 ECOMMERCE_DATABASE_URL=postgresql://ecomgen_app:<pw>@127.0.0.1:5432/ecommerce_homelab_test
+ECOMGEN_DATA_ROOT=/srv/homelab/ecommerce/data
 ```
 
 Then `set -a; . ./.env; set +a; uv run ecomgen check-config config/generator.example.yaml`. Migrations are applied
@@ -88,20 +89,42 @@ by the benchmark (`init-db` per database), or by hand with `ECOMMERCE_DATABASE_U
 ```bash
 set -a; . ./.env; set +a                               # password comes from .env, never typed on a command line
 uv run pytest                                          # unit tests; integration tests listed as skipped
-EXPECTED_SHA=<APPROVED_TAG> MOUNT_UUID=<uuid> PG_MAJOR=18 PG_SERVICE=postgresql@18-main \
-  bash scripts/homelab_benchmark.sh
+EXPECTED_SHA=<APPROVED_TAG> MOUNT_UUID=<uuid> PG_MAJOR=18 PG_SERVICE=postgresql@18-main EXPECTED_PG_PORT=5432 \
+  bash scripts/homelab_benchmark.sh                    # add CLEANUP_REPLAY=1 to really delete the replay it made
 sudo PG_LOCAL_SUPERUSER=1 PG_SERVICE=postgresql@18-main SNAP_EXCLUDE="/srv/homelab/ecommerce <CLONE>" \
   bash scripts/host_snapshot.sh > /srv/homelab/ecommerce/benchmarks/after.txt
 diff /srv/homelab/ecommerce/benchmarks/before.txt /srv/homelab/ecommerce/benchmarks/after.txt
 ```
 
-The benchmark writes `summary.md`, `log.txt`, `time_*.txt`, `mem_*.txt` (server cgroup `memory.current` sampled every
-0.2 s per phase; includes page cache), `sizes_mvp.txt`, `status_crashed.txt` and `digest_*.txt` to
-`benchmarks/<UTC>/`. It exits 0 only if every expectation holds, including **data identical to the macOS baseline**
-(`scripts/expected_mvp_digest.txt`; the digest is pinned to UTC and bytewise ordering, so server time zone and
-locale don't matter), no sessions or prepared transactions left after the SIGKILL, and resumed data identical to
-the clean run. WAL growth is server-wide (other activity on the cluster would add to it). Copy `summary.md` into
-`docs/BENCHMARKS.md` via a PR from the Mac.
+Phases (each check is a PASS/FAIL line in `summary.md`):
+
+1. **Smoke** (1k, database + files) in `ecommerce_homelab_smoke`: validate (database + files), files identical to
+   the macOS reference, no orphans or staging left.
+2. **Publish crash** in the same database but its own, empty schema set (`commerce_pc`, `integration_pc`,
+   `generator_meta_pc`, from a derived config in the output directory: a clean baseline with no reset): SIGKILL
+   right after a file is in place, before its ledger row commits → resume → validate; files identical to the
+   uninterrupted reference, database rows identical to the smoke run, ledger == disk.
+3. **MVP** (10k) in `ecommerce_homelab_test`: time, memory, CPU, WAL, sizes, per-feed file counts/sizes, sha256
+   re-verification of every file (MB/s), database rows and files identical to the macOS references.
+4. **Feed-only throughput:** each feed alone (no database) into `benchmarks/<UTC>/feedbench/`: records/s, MB/s,
+   peak RSS.
+5. **Load crash** in `ecommerce_homelab_crash`: SIGKILL before orders chunk 1 → resume; rows and files identical
+   to the clean run.
+6. **Replay** of the MVP run's files (2026-01-05..10, delay 24 h, jitter 6 h, 10 % duplicates): SIGKILL after
+   delivery 6 → rerun → exactly the deterministic plan; a second rerun only verifies; the replayed originals
+   (paths, sha256) match the macOS reference. Arrival times and duplicates are seeded by the replay id, which
+   includes the run id, so they are compared with the plan on the same machine, not across machines.
+7. **Cleanup of that replay:** only if the replay was created by this run (same run id, started after the
+   benchmark began); the dry-run list goes to `cleanup_plan.txt` and must contain only that replay's copies. Real
+   deletion only with `CLEANUP_REPLAY=1` and only if every earlier check passed; then originals must still match
+   and the run still validate.
+
+Pre-flight refuses a non-local server, port 55432 (the VLSIM container), another port than `EXPECTED_PG_PORT`,
+`ECOMGEN_DATA_ROOT` outside `/srv/homelab/ecommerce` or off the NVMe mount, a filesystem without hard links, a
+config without both feeds, missing references, and non-empty databases (both schema sets). It exits 0 only if
+every expectation holds; WAL growth is server-wide. Copy `summary.md` into `docs/BENCHMARKS.md` via a PR from the
+Mac. Everything it writes stays under `/srv/homelab/ecommerce` (`benchmarks/<UTC>/`, `data/`), which the snapshot
+excludes, so the before/after diff shows only changes outside the project scope.
 
 Expected diff (rehearsed on PostgreSQL 18.6): `ecomgen_app` added (`super=false createdb=false`), three `acl`
 lines (owner `ecomgen_app`, only it may connect) and three `db` lines (sizes, write counters). Unchanged: other
@@ -110,6 +133,34 @@ PostgreSQL unit's start time, container IDs / start times / restart counts, volu
 `/srv/homelab` outside the project path. Check the snapshot's "unreadable paths" count: changes inside paths it
 couldn't read are not seen (run as a user that can read them for a fuller check). If it says `DOCKER UNAVAILABLE`,
 the container sections prove nothing; stop and decide how to read them (a system change, so it needs approval).
+
+## Phase 2 release (`v0.2.0-homelab`): re-run on Ubuntu
+
+The databases hold the 2026-10-18 `v0.1.1-homelab` benchmark, so they must be recreated (approved in principle on
+2026-10-18; each command still needs your go-ahead when shown).
+
+1. **Release check (Mac / GitHub):** the tag exists and points at the reviewed `main` commit with CI green.
+   On Ubuntu: `git fetch --tags && git rev-parse 'v0.2.0-homelab^{commit}'` must print that SHA.
+2. **Inventory, read-only** (what would be dropped):
+   ```bash
+   sudo -u postgres psql -X -c "SELECT datname, pg_get_userbyid(datdba) AS owner, pg_size_pretty(pg_database_size(datname)) AS size FROM pg_database WHERE datname LIKE 'ecommerce_homelab_%' ORDER BY 1"
+   for d in smoke test crash; do sudo -u postgres psql -X -d ecommerce_homelab_$d -c "SELECT run_id, state, profile, started_at FROM generator_meta.generation_runs" -c "SELECT nspname FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema' ORDER BY 1"; done
+   sudo -u postgres psql -X -c "SHOW port"            # must be 5432 (never the VLSIM container on 55432)
+   findmnt -no SOURCE,UUID,OPTIONS /srv/homelab        # the Samsung NVMe, rw
+   ```
+   Expected: owner `ecomgen_app`, ~10-20 MB each, one COMPLETED run each, schemas `commerce`, `generator_meta`,
+   `integration`, `public` only.
+3. **Recreate (destructive, only after you approve the inventory)**, one database at a time:
+   ```bash
+   sudo -u postgres psql -v ON_ERROR_STOP=1 -c "DROP DATABASE ecommerce_homelab_smoke" -c "CREATE DATABASE ecommerce_homelab_smoke OWNER ecomgen_app" -c "REVOKE CONNECT, TEMPORARY ON DATABASE ecommerce_homelab_smoke FROM PUBLIC"
+   ```
+   and the same with `_test` and `_crash`.
+4. **Deploy:** in the clone, `git checkout --detach v0.2.0-homelab && uv sync --frozen`; add
+   `ECOMGEN_DATA_ROOT=/srv/homelab/ecommerce/data` to `.env`. The empty `data/csv`, `jsonl`, `parquet`, `events`
+   directories from Stage 1 are unused (the generator writes `source_feeds/`, `clickstream/`, `manifests/`,
+   `deliveries/`, `audit/`); remove them by hand if you like.
+5. **Run:** snapshot before → benchmark (Stage 3-5 above, `EXPECTED_SHA=v0.2.0-homelab`) → snapshot after → diff.
+   `v0.1.1-homelab` stays tagged as the previous working release.
 
 ## Cleanup and rollback (each needs explicit approval; smallest first)
 
@@ -134,4 +185,4 @@ the container figures. Total disk well under 1 GB.
 
 ## Not covered yet
 
-CSV/JSONL/Parquet feeds and manifests are Phase 2 (`TASKS.md`); `data/` stays empty until then.
+Parquet snapshots, supplier/courier feeds and age-based retention (see `docs/FEEDS.md`, "Not yet").

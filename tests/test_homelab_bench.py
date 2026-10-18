@@ -85,3 +85,52 @@ def test_urls_come_from_env_not_argv(bench: ModuleType, monkeypatch: pytest.Monk
     monkeypatch.delenv("ECOMGEN_BENCH_URL")
     with pytest.raises(bench.Refused, match="ECOMGEN_BENCH_URL is not set"):
         bench.preflight()
+
+
+def test_only_local_servers(bench: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert bench.FORBIDDEN_PORTS == {55432: "the VLSIM PostgreSQL container"}
+    for host in ("10.0.0.5", "db.example", "192.168.1.20"):
+        monkeypatch.setenv("ECOMGEN_BENCH_URL", f"postgresql://u:p@{host}:5432/ecommerce_homelab_test")
+        with pytest.raises(bench.Refused, match="only to a local PostgreSQL"):
+            bench.preflight()
+
+
+def test_publish_and_replay_crashes_only_target_their_databases(bench: ModuleType,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("ecommerce_homelab_test", "ecommerce_homelab_crash", "ecommerce_oltp"):
+        monkeypatch.setenv("ECOMMERCE_DATABASE_URL", UNREACHABLE.format(name))
+        with pytest.raises(bench.Refused, match="not an approved benchmark database"):
+            bench.publish_crash("config.yaml", "4")
+    for name in ("ecommerce_homelab_smoke", "ecommerce_homelab_crash", "ecommerce_oltp"):
+        monkeypatch.setenv("ECOMMERCE_DATABASE_URL", UNREACHABLE.format(name))
+        with pytest.raises(bench.Refused, match="not an approved benchmark database"):
+            bench.replay_crash("config.yaml", "6", "2026-01-05", "2026-01-10", "24", "6", "10")
+
+
+def test_pc_config_renames_only_the_schemas_and_never_overwrites(bench: ModuleType, tmp_path: Path) -> None:
+    from ecomgen import config
+    src = Path(__file__).parents[1] / "config" / "generator.example.yaml"
+    dst = tmp_path / "pc.yaml"
+    bench.pc_config(str(src), str(dst))
+    a, b = config.load(src), config.load(dst)
+    assert (b.postgres.application_schema, b.postgres.integration_schema, b.postgres.metadata_schema) == (
+        "commerce_pc", "integration_pc", "generator_meta_pc")
+    assert (a.generator, a.filesystem) == (b.generator, b.filesystem)
+    with pytest.raises(bench.Refused, match="already exists"):
+        bench.pc_config(str(src), str(dst))
+
+
+def test_feed_throughput_and_data_root_guards(bench: ModuleType, tmp_path: Path,
+                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(bench.Refused, match="unknown feed"):
+        bench.feed_throughput("config.yaml", str(tmp_path), "orders")
+    (tmp_path / "clickstream").mkdir()
+    with pytest.raises(bench.Refused, match="already exists"):
+        bench.feed_throughput("config.yaml", str(tmp_path), "clickstream")
+    for root in ("", "relative/dir", str(tmp_path / "missing")):
+        monkeypatch.setenv("ECOMGEN_DATA_ROOT", root)
+        with pytest.raises(bench.Refused, match="ECOMGEN_DATA_ROOT"):
+            bench.link_test()
+    monkeypatch.setenv("ECOMGEN_DATA_ROOT", str(tmp_path))
+    bench.link_test()
+    assert not any((tmp_path / "staging").iterdir())  # the probe is removed

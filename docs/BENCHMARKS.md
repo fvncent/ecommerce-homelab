@@ -81,6 +81,21 @@ read-only): only `ecomgen_app`, its three databases' ACLs and their sizes/counte
 no-op (0.15 s). A bounded entity cache took feed writing from 8.8 s to 2.6 s with byte-identical output (golden test);
 per-directory fsyncs added ~0.8 s.
 
+## Phase 2 benchmark rehearsals (macOS, 2026-10-18, `chore/benchmark-files`)
+
+`scripts/homelab_benchmark.sh` with files, least-privilege role, hand-created databases, laptop SSD (timings vary
+with laptop load; the Ubuntu run is the reference):
+
+| Server | Checks | MVP end-to-end (DB + files) | Feed-only CSV | Feed-only JSONL | sha256 verify | Cleanup |
+|---|---|---|---|---|---|---|
+| Docker PG 17.11 | 48/48 | 4.74 s, 65 MB RSS, server 358 MB | 8,295 rows in 0.91 s (9,157/s, 1.1 MB/s) | 110,000 events in 2.47 s (44,520/s, 11.8 MB/s) | 120 files, 31.6 MB, 1,460 MB/s (cached) | `CLEANUP_REPLAY=1`: 26 copies, 6.1 MB, audit written |
+| `postgres:18.6-trixie` | 44/44 | 1,852 orders/s end-to-end | 8,575/s | 46,621/s | 1,406 MB/s (cached) | dry run only |
+
+Both: smoke and publish-crash files identical to the uninterrupted reference; MVP rows and files identical to the
+references (`scripts/expected_{mvp,feed}_digest.txt`, recorded on PG 17); replay killed after delivery 6 → rerun =
+exactly the plan; replayed originals = `scripts/expected_replay_originals.txt`; no orphans or staging left.
+WAL 16.7 MB (10k). Data root after a full run ≈ 70 MB.
+
 ## Not yet measured
 
 - Larger profiles (practice 100k, advanced 1M) and `workers: 2`.

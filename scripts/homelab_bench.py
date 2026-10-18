@@ -16,15 +16,26 @@ import signal
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import replace
+from datetime import date
+from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
 import psycopg
 from psycopg import sql
 
+if TYPE_CHECKING:  # the package is imported lazily, inside the commands that need it
+    from ecomgen import config, replay
+
 TEST_DB, SMOKE_DB, CRASH_DB = "ecommerce_homelab_test", "ecommerce_homelab_smoke", "ecommerce_homelab_crash"
 DATABASES = (TEST_DB, SMOKE_DB, CRASH_DB)
 TABLES = ("sellers", "categories", "customers", "products", "orders", "order_items", "payment_attempts")
 PRIVILEGES = ("rolsuper", "rolcreatedb", "rolcreaterole", "rolreplication", "rolbypassrls")
+PC_SUFFIX = "_pc"  # schemas of the publish-crash run: an isolated, empty schema set in the smoke database
+FORBIDDEN_PORTS = {55432: "the VLSIM PostgreSQL container"}
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+FAKE_RUN = "run_20000101T000000Z_000000"  # file names of the feed-only throughput runs
 
 
 class Refused(SystemExit):
@@ -71,9 +82,12 @@ def _schemas() -> tuple[str, ...]:
 
 
 def preflight() -> None:
-    """Refuse unless the role is unprivileged and owns every approved database, each still empty."""
-    bench_url()
-    schemas = _schemas()
+    """Refuse unless the server is local and not a forbidden port, and the role is unprivileged and owns every
+    approved database, each still empty (also of the publish-crash schema set)."""
+    host = urlsplit(bench_url()).hostname
+    if host not in LOOPBACK:
+        raise Refused(f"the benchmark connects only to a local PostgreSQL, not {host!r}")
+    schemas = _schemas() + tuple(s + PC_SUFFIX for s in _schemas())
     for name in DATABASES:
         with psycopg.connect(db_url(name)) as c:
             row = c.execute(sql.SQL("SELECT current_user, {}, pg_get_userbyid(d.datdba)"
@@ -103,6 +117,11 @@ def preflight() -> None:
                               "never reuses a database: recreate it by hand (approved cleanup) first")
             version = c.execute("SHOW server_version").fetchone()[0]  # type: ignore[index]
             port = c.execute("SELECT inet_server_port()").fetchone()[0]  # type: ignore[index]
+            if port in FORBIDDEN_PORTS:
+                raise Refused(f"port {port} is {FORBIDDEN_PORTS[port]}; never benchmark against it")
+            expected = os.environ.get("EXPECTED_PG_PORT")
+            if expected and int(expected) != port:
+                raise Refused(f"server port is {port}, expected {expected}")
     print(f"role {user} (no privileges, no memberships) owns only {', '.join(DATABASES)}, all empty; "
           f"PostgreSQL {version}, port {port}")
 
@@ -240,11 +259,266 @@ def crash(config_path: str, entity: str, chunk_no: str) -> None:
         load.run(conn, config.load(config_path))
 
 
+# ---------- files (Phase 2) ----------
+
+def _cfg() -> "config.Config":
+    from ecomgen import config
+    return config.load(os.environ.get("CONFIG", "config/generator.example.yaml"))
+
+
+def pc_config(src: str, dst: str) -> None:
+    """Write a copy of config src whose three schemas carry PC_SUFFIX; refuses to overwrite dst."""
+    import yaml
+    doc = yaml.safe_load(Path(src).read_text())
+    for k in ("application_schema", "integration_schema", "metadata_schema"):
+        doc["postgres"][k] += PC_SUFFIX
+    out = Path(dst)
+    if out.exists():
+        raise Refused(f"{dst} already exists")
+    out.write_text(yaml.safe_dump(doc, sort_keys=False))
+    print(dst)
+
+
+def _latest(c: psycopg.Connection, cfg: "config.Config") -> str:
+    from ecomgen import db
+    return db.resolve_run(c, cfg, None)
+
+
+def run_id(name: str) -> None:
+    with psycopg.connect(db_url(name)) as c:
+        print(_latest(c, _cfg()))
+
+
+def feed_digest(name: str) -> None:
+    """One line per published feed file of the database's latest run: path (run id -> RUN), sha256, records;
+    sorted. Equal output = identical files, comparable across machines."""
+    from ecomgen import db
+    cfg = _cfg()
+    with psycopg.connect(db_url(name)) as c:
+        rid = _latest(c, cfg)
+        rows = c.execute(db.q(cfg, "SELECT rel_path, sha256, records FROM {meta}.published_files"
+                                   " WHERE run_id = %s AND feed <> 'manifest'"), (rid,)).fetchall()
+    for line in sorted(f"{p.replace(rid, 'RUN')} {s} {n}" for p, s, n in rows):
+        print(line)
+
+
+def feed_stats(name: str) -> None:
+    from ecomgen import db
+    cfg = _cfg()
+    with psycopg.connect(db_url(name)) as c:
+        rid = _latest(c, cfg)
+        for feed, files, records, size in c.execute(db.q(cfg, "SELECT feed, count(*), sum(records), sum(bytes)"
+                                                              " FROM {meta}.published_files WHERE run_id = %s"
+                                                              " GROUP BY 1 ORDER BY 1"), (rid,)):
+            print(f"{feed} files={files} records={records} bytes={size}")
+
+
+def verify_files(name: str) -> None:
+    """Re-hash every recorded file of the latest run; also count unrecorded files carrying its run id (orphans,
+    outside deliveries/ and audit/) and leftover staging. Exit 1 on any problem."""
+    from ecomgen import config, db, feeds
+    cfg = _cfg()
+    root = Path(config.data_root(cfg))
+    with psycopg.connect(db_url(name)) as c:
+        rid = _latest(c, cfg)
+        rows = c.execute(db.q(cfg, "SELECT rel_path, sha256, bytes FROM {meta}.published_files"
+                                   " WHERE run_id = %s"), (rid,)).fetchall()
+    started = time.perf_counter()
+    bad = [r for r, sha, _ in rows if not (root / r).is_file() or feeds.sha256_of(root / r) != sha]
+    seconds = time.perf_counter() - started
+    total = sum(int(b) for _, _, b in rows)
+    on_disk = {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() and rid in str(p.relative_to(root))
+               and p.relative_to(root).parts[0] not in ("deliveries", "audit", "staging")}
+    orphans = on_disk - {r for r, _, _ in rows}
+    staging_left = (root / "staging" / rid).exists()
+    print(f"files={len(rows)} bytes={total} seconds={seconds:.2f} mb_per_s={total / 1048576 / max(seconds, 1e-6):.0f}"
+          f" mismatches={len(bad)} orphans={len(orphans)} staging_left={int(staging_left)}")
+    for r in sorted(bad)[:5] + sorted(orphans)[:5]:
+        print(f"  problem: {r}")
+    sys.exit(1 if bad or orphans or staging_left else 0)
+
+
+def feed_throughput(config_path: str, outdir: str, feed: str) -> None:
+    """Write one feed alone (config counts, no database) into outdir/feed; print records, bytes and rates."""
+    from ecomgen import config, feeds, generate
+    if feed not in ("payment_settlement", "clickstream"):
+        raise Refused(f"unknown feed {feed!r}")
+    target = Path(outdir) / feed
+    if target.exists():
+        raise Refused(f"{target} already exists")
+    cfg = config.load(config_path)
+    one = replace(cfg, filesystem=replace(cfg.filesystem, csv=feed == "payment_settlement",
+                                          jsonl=feed == "clickstream"))
+    started = time.perf_counter()
+    stats = feeds.write_staged(generate.World.from_config(cfg), one, FAKE_RUN, target)
+    seconds = time.perf_counter() - started
+    records = sum(s.records for s in stats.values())
+    size = sum((target / rel).stat().st_size for rel in stats)
+    print(f"{feed} files={len(stats)} records={records} bytes={size} seconds={seconds:.2f}"
+          f" records_per_s={records / seconds:.0f} mb_per_s={size / 1048576 / seconds:.1f}")
+
+
+def _kill_after_placing(n: int) -> None:
+    """From now on, SIGKILL this process right after the nth file is placed (before its ledger row commits)."""
+    from ecomgen import feeds
+    real, placed = feeds.place_file, [0]
+
+    def killing(*args: object, **kwargs: object) -> bool:
+        result = real(*args, **kwargs)  # type: ignore[arg-type]
+        placed[0] += 1
+        if placed[0] == n:
+            os.kill(os.getpid(), signal.SIGKILL)
+        return result
+    feeds.place_file = killing
+
+
+def publish_crash(config_path: str, nth: str) -> None:
+    """generate --profile smoke against ECOMMERCE_DATABASE_URL (must be the smoke database), SIGKILLed right after
+    placing the nth file: a hard crash between the filesystem and the PostgreSQL commit."""
+    url = env_url("ECOMMERCE_DATABASE_URL")
+    check_name(dbname_of(url), (SMOKE_DB,))
+    from ecomgen import config, load
+    _kill_after_placing(int(nth))
+    with psycopg.connect(url, autocommit=True) as conn:
+        load.run(conn, config.load(config_path), "smoke")
+
+
+def _replay_params(start: str, end: str, delay: str, jitter: str, dup: str) -> "replay.Params":
+    from ecomgen import feeds, replay
+    return replay.Params(date.fromisoformat(start), date.fromisoformat(end), tuple(feeds.enabled(_cfg())),
+                         int(delay), int(jitter), int(dup))
+
+
+def replay_crash(config_path: str, nth: str, start: str, end: str, delay: str, jitter: str, dup: str) -> None:
+    """replay-files against ECOMMERCE_DATABASE_URL (must be the test database), SIGKILLed right after placing the
+    nth delivery."""
+    url = env_url("ECOMMERCE_DATABASE_URL")
+    check_name(dbname_of(url), (TEST_DB,))
+    from ecomgen import config, replay
+    params = _replay_params(start, end, delay, jitter, dup)
+    _kill_after_placing(int(nth))
+    with psycopg.connect(url, autocommit=True) as conn:
+        replay.replay(conn, config.load(config_path), params)
+
+
+def replay_id(name: str, start: str, end: str, delay: str, jitter: str, dup: str) -> None:
+    from ecomgen import replay
+    with psycopg.connect(db_url(name)) as c:
+        print(replay.replay_id(_latest(c, _cfg()), _replay_params(start, end, delay, jitter, dup)))
+
+
+def replay_digest(name: str, rid: str) -> None:
+    """One line per delivered file of the replay: path (replay id -> RPL, run id -> RUN), sha256, arrival,
+    duplicate; sorted. The delivery manifest is excluded (it names the ids)."""
+    from ecomgen import db, feeds
+    cfg = _cfg()
+    with psycopg.connect(db_url(name)) as c:
+        run = _latest(c, cfg)
+        rows = c.execute(db.q(cfg, "SELECT delivered_path, sha256, arrived_at, duplicate FROM {meta}.file_deliveries"
+                                   " WHERE replay_id = %s AND original_path IS NOT NULL"), (rid,)).fetchall()
+    for line in sorted(f"{p.replace(rid, 'RPL').replace(run, 'RUN')} {s} {feeds.ts(a)} {int(d)}"
+                       for p, s, a, d in rows):
+        print(line)
+
+
+def planned_replay_digest(name: str, start: str, end: str, delay: str, jitter: str, dup: str) -> None:
+    """What an uninterrupted replay with these parameters delivers, from the latest run's verified originals and
+    the pure schedule, in replay-digest's format (nothing is written)."""
+    from ecomgen import config, feeds, replay
+    cfg = _cfg()
+    params = _replay_params(start, end, delay, jitter, dup)
+    with psycopg.connect(db_url(name)) as c:
+        run = _latest(c, cfg)
+        _, originals = replay._originals(c, cfg, run, Path(config.data_root(cfg)), params)
+    rid = replay.replay_id(run, params)
+    for line in sorted(f"{d.path.replace(rid, 'RPL').replace(run, 'RUN')} {d.original.sha256} {feeds.ts(d.arrived_at)}"
+                       f" {int(d.duplicate)}" for d in replay.schedule(rid, originals, params)):
+        print(line)
+
+
+def replay_originals(name: str, start: str, end: str, delay: str, jitter: str, dup: str) -> None:
+    """The originals a replay with these parameters covers: path (run id -> RUN) and sha256, sorted. Machine- and
+    run-independent, unlike the schedule (seeded by the replay id, which includes the run id)."""
+    from ecomgen import config, replay
+    cfg = _cfg()
+    with psycopg.connect(db_url(name)) as c:
+        run = _latest(c, cfg)
+        _, originals = replay._originals(c, cfg, run, Path(config.data_root(cfg)),
+                                         _replay_params(start, end, delay, jitter, dup))
+    for line in sorted(f"{o.path.replace(run, 'RUN')} {o.sha256}" for o in originals):
+        print(line)
+
+
+def verify_replay(name: str, rid: str) -> None:
+    """Re-hash every recorded, not-deleted delivery; count unrecorded files in the replay's directory and leftover
+    staging. Exit 1 on any problem."""
+    from ecomgen import config, db, feeds
+    cfg = _cfg()
+    root = Path(config.data_root(cfg))
+    with psycopg.connect(db_url(name)) as c:
+        rows = c.execute(db.q(cfg, "SELECT delivered_path, sha256 FROM {meta}.file_deliveries"
+                                   " WHERE replay_id = %s AND deleted_at IS NULL"), (rid,)).fetchall()
+    bad = [p for p, sha in rows if not (root / p).is_file() or feeds.sha256_of(root / p) != sha]
+    base = root / "deliveries" / f"replay_id={rid}"
+    on_disk = {str(p.relative_to(root)) for p in base.rglob("*") if p.is_file()} if base.is_dir() else set()
+    orphans = on_disk - {p for p, _ in rows}
+    staging_left = (root / "staging" / rid).exists()
+    print(f"deliveries={len(rows)} mismatches={len(bad)} orphans={len(orphans)} staging_left={int(staging_left)}")
+    sys.exit(1 if bad or orphans or staging_left else 0)
+
+
+def owned_replay(name: str, rid: str, run: str, since_epoch: str) -> None:
+    """Exit 0 only if the replay is COMPLETED, replays this run, and started after since_epoch (i.e. this benchmark
+    created it): the guard before the benchmark deletes anything."""
+    from ecomgen import db
+    cfg = _cfg()
+    with psycopg.connect(db_url(name)) as c:
+        row = c.execute(db.q(cfg, "SELECT run_id, state, started_at >= to_timestamp(%s) FROM {meta}.replays"
+                                  " WHERE replay_id = %s"), (int(since_epoch), rid)).fetchone()
+    ok = row is not None and row[0] == run and row[1] == "COMPLETED" and row[2]
+    print(f"replay {rid}: {'created by this benchmark' if ok else 'NOT created by this benchmark'} ({row})")
+    sys.exit(0 if ok else 1)
+
+
+def link_test() -> None:
+    """The data root must support hard links (publishing places files with os.link)."""
+    root = Path(env_root())
+    probe = root / "staging" / f".linktest-{os.getpid()}"
+    probe.parent.mkdir(exist_ok=True)
+    probe.write_text("x\n")
+    try:
+        os.link(probe, probe.with_suffix(".link"))
+        probe.with_suffix(".link").unlink()
+    finally:
+        probe.unlink()
+    print(f"{root}: hard links work")
+
+
+def env_root() -> str:
+    root = os.environ.get("ECOMGEN_DATA_ROOT", "")
+    if not root or not os.path.isabs(root) or not os.path.isdir(root):
+        raise Refused(f"ECOMGEN_DATA_ROOT must be an existing absolute directory, got {root!r}")
+    return root
+
+
+def feeds_enabled() -> None:
+    from ecomgen import feeds
+    on = feeds.enabled(_cfg())
+    if set(on) != {"payment_settlement", "clickstream"}:
+        raise Refused(f"the config must enable both feeds (filesystem.csv and .jsonl), enables {on}")
+    print("feeds: " + " ".join(on))
+
+
 COMMANDS: dict[str, Callable[..., None]] = {
     "url": lambda name: print(db_url(name)), "preflight": preflight, "same-server": same_server,
     "server-major": server_major,
     "wal-lsn": wal_lsn, "wal-bytes-since": wal_bytes_since, "sizes": sizes, "digest": digest,
     "leftovers": leftovers, "pg-stats": pg_stats, "crash": crash,
+    "pc-config": pc_config, "run-id": run_id, "feed-digest": feed_digest, "feed-stats": feed_stats,
+    "verify-files": verify_files, "feed-throughput": feed_throughput, "publish-crash": publish_crash,
+    "replay-crash": replay_crash, "replay-id": replay_id, "replay-digest": replay_digest,
+    "planned-replay-digest": planned_replay_digest, "replay-originals": replay_originals, "verify-replay": verify_replay, "owned-replay": owned_replay, "link-test": link_test,
+    "feeds-enabled": feeds_enabled,
 }
 
 if __name__ == "__main__":
