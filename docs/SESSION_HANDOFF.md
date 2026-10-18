@@ -3,9 +3,9 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-18
-**Branch:** `feat/advance-clock` (from `main` `35e7278` = PR #20 user guide merged). Phase 3A of the approved
-Phase 3 plan (3A advance → 3B files per step → 3C outbox → 3D inventory → 3E catch-up/pacing; decision: as-of clock
-inside the config's clock_start..clock_end, so stepping to the end == generate and DATA_VERSION/goldens stay).
+**Branch:** `feat/step-files` (from `main` `3e1d5a0` = PR #21 Phase 3A `advance` merged, CI 276/0 on PG 17 + 18).
+Phase 3B (files per clock step) of the approved Phase 3 plan (3A done → 3B → 3C outbox → 3D inventory → 3E
+catch-up/pacing). Decision kept: as-of clock inside clock_start..clock_end. Ubuntu stays on `v0.2.0-homelab`.
 **Practice dataset (Ubuntu, user-created 2026-10-18):** role `ecomgen_practice` (no privileges) owns `ecommerce_oltp`
 (CONNECT revoked from PUBLIC); config/env in `/srv/homelab/ecommerce/practice/` (`practice-10k.yaml` = example
 config, `practice.env` mode 600); files in `/srv/homelab/ecommerce/data/practice`; run
@@ -192,7 +192,7 @@ SQL without `!` (e.g. `NOT LIKE 'pg\_%'`).
 - Replay timing/duplicates depend on the run id: compared with the local plan, not across machines.
 - Not yet: Parquet snapshots, supplier/courier feeds, age-based retention, profiles above 10k, `workers: 2`.
 
-## This task: 3A `advance` (`docs/GENERATOR_USER_GUIDE.md` "Clock steps")
+## Previous task: 3A `advance` (PR #21, merged) (`docs/GENERATOR_USER_GUIDE.md` "Clock steps")
 - `generate.py`: `World.order(n, as_of)` (state as of a time; same draws), `placed_at`, `orders_by(t)` (binary
   search; placed_at never decreases), `LIFECYCLE_MAX` (800,760 s: after placed + it an order is final),
   `check_step`, `step_orders` (orders placed after previous - LIFECYCLE_MAX .. by as_of), `step_chunk` (inserts for
@@ -225,4 +225,5 @@ SQL without `!` (e.g. `NOT LIKE 'pg\_%'`).
 Suite after fixes: 276 passed with DB, 141 passed / 135 skipped without; mypy clean.
 
 ## Next step
-Push `feat/advance-clock` + PR (ask) → CI → merge (ask) → 3B (files per step).
+3B: proposal → implement in increments → tests → independent review → ask to push. No merge/tag/deploy without
+approval.
