@@ -9,8 +9,10 @@
 # empty. This script never creates or drops a database (cleanup is a manual, approved step).
 #
 # Required env: ECOMGEN_BENCH_URL (or ECOMMERCE_DATABASE_URL) = URL of one of those databases as that role (local
-#   only; port 55432 is refused; EXPECTED_PG_PORT, if set, must match); ECOMGEN_DATA_ROOT = where files are
-#   published, an existing directory under DATA_ROOT on the same mount.
+#   only, explicit port, only sslmode/connect_timeout/application_name parameters, no PGHOST/PGHOSTADDR/PGSERVICE;
+#   port 55432 is refused; must equal EXPECTED_PG_PORT, required on Linux); ECOMGEN_DATA_ROOT = where files are
+#   published, an existing directory strictly inside DATA_ROOT (resolved, no symlink, not benchmarks/) on the mount.
+#   On Linux DATA_ROOT is fixed to /srv/homelab/ecommerce.
 # On Linux also: MOUNT_UUID = filesystem UUID that must be mounted (read-write) at MOUNT_TARGET (/srv/homelab) and
 #   hold OUT; PG_SERVICE = systemd unit of the server (e.g. postgresql@18-main), proven to be the server the URL reaches.
 # Optional env: DATA_ROOT (/srv/homelab/ecommerce), OUT (DATA_ROOT/benchmarks/<UTC>; must be under DATA_ROOT, its
@@ -46,7 +48,6 @@ ECOMGEN=.venv/bin/ecomgen
 FAILED=0
 MEMPID=""
 PG_CGROUP=""
-STARTED_EPOCH="$(date +%s)"
 
 bench() { "$PY" scripts/homelab_bench.py "$@"; }  # a function: under env/timed call "$PY" scripts/... directly
 early_die() { echo "ABORT: $*" >&2; exit 2; }  # before OUT exists
@@ -60,12 +61,19 @@ expect() {
   if [ "$got" = "$want" ]; then note "- PASS $label (exit $got)"; else note "- FAIL $label (exit $got, want $want)"; FAILED=1; fi
 }
 # same_as REF FILE LABEL: FILE must equal the macOS reference (or, when recording, becomes it); never empty
-# (recording: only the first, uninterrupted output of each reference is recorded; later ones are compared to it)
+# (recording: the first, uninterrupted output of each reference is kept in OUT/references/ and later outputs are
+# compared to it; the references are copied into scripts/ only at the end, and only if every check passed)
 RECORDED=""
 same_as() {
   if [ ! -s "$2" ]; then note "- FAIL $3 (no output)"; FAILED=1; return; fi
-  if [ "${RECORD_REFERENCES:-}" = 1 ] && ! echo "$RECORDED" | grep -qw "$1"; then
-    cp "$2" "$1"; RECORDED="$RECORDED $1"; note "- RECORDED $3 -> $1"; return
+  if [ "${RECORD_REFERENCES:-}" = 1 ]; then
+    local kept
+    kept="$OUT/references/$(basename "$1")"
+    if ! echo "$RECORDED" | grep -qw "$1"; then
+      mkdir -p "$OUT/references"; cp "$2" "$kept"; RECORDED="$RECORDED $1"; note "- RECORDING $3 (pending: $kept)"
+      return
+    fi
+    expect 0 "$3" diff "$kept" "$2"; return
   fi
   expect 0 "$3" diff "$1" "$2"
 }
@@ -118,9 +126,20 @@ if [ -n "${MOUNT_UUID:-}" ]; then
 elif [ "$(uname -s)" = Linux ]; then
   early_die "MOUNT_UUID not set (the filesystem UUID expected at $MOUNT_TARGET)"
 fi
+if [ "$(uname -s)" = Linux ]; then
+  [ "$DATA_ROOT" = /srv/homelab/ecommerce ] || early_die "DATA_ROOT is fixed to /srv/homelab/ecommerce on Linux"
+  [ -n "${EXPECTED_PG_PORT:-}" ] || early_die "EXPECTED_PG_PORT not set (5432 on the homelab)"
+fi
 [ -n "${ECOMGEN_DATA_ROOT:-}" ] || early_die "ECOMGEN_DATA_ROOT not set (e.g. $DATA_ROOT/data)"
-case "$ECOMGEN_DATA_ROOT" in "$DATA_ROOT"/*) ;; *) early_die "ECOMGEN_DATA_ROOT $ECOMGEN_DATA_ROOT is not under DATA_ROOT $DATA_ROOT";; esac
-[ -d "$ECOMGEN_DATA_ROOT" ] || early_die "$ECOMGEN_DATA_ROOT does not exist (create it first)"
+[ -d "$ECOMGEN_DATA_ROOT" ] && [ ! -L "$ECOMGEN_DATA_ROOT" ] || early_die "$ECOMGEN_DATA_ROOT must be an existing directory, not a symlink"
+REAL_PROJECT="$(realpath "$DATA_ROOT")" || early_die "cannot resolve $DATA_ROOT"
+REAL_DATA="$(realpath "$ECOMGEN_DATA_ROOT")" || early_die "cannot resolve $ECOMGEN_DATA_ROOT"
+case "$REAL_DATA" in "$REAL_PROJECT"/?*) ;; *) early_die "ECOMGEN_DATA_ROOT resolves to $REAL_DATA, not strictly inside $REAL_PROJECT";; esac
+case "$REAL_DATA/" in "$REAL_PROJECT/benchmarks/"*) early_die "ECOMGEN_DATA_ROOT must not be inside $REAL_PROJECT/benchmarks";; esac
+export ECOMGEN_DATA_ROOT="$REAL_DATA"  # resolved: no '..' or link anywhere in what the generator is given
+REAL_PARENT="$(realpath "$PARENT" 2>/dev/null)" || early_die "$PARENT does not exist (create the project directories first)"
+case "$REAL_PARENT/" in "$REAL_PROJECT"/?*) ;; *) early_die "OUT resolves outside $REAL_PROJECT";; esac
+case "$REAL_PARENT/" in "$REAL_DATA/"*) early_die "OUT must not be inside the data root";; esac
 if [ -n "${MOUNT_UUID:-}" ]; then
   [ "$(findmnt -no UUID -T "$ECOMGEN_DATA_ROOT" 2>/dev/null)" = "$MOUNT_UUID" ] || early_die "$ECOMGEN_DATA_ROOT is not on the $MOUNT_TARGET mount"
 fi
@@ -151,6 +170,7 @@ fi
 lt="$(bench link-test 2>&1)" || die "hard-link test failed in $ECOMGEN_DATA_ROOT: $lt"
 note "- data root: $lt"
 fe="$(bench feeds-enabled 2>&1)" || die "$fe"
+STARTED_EPOCH="$(bench server-epoch 2>> "$OUT/log.txt")" || die "cannot read the server clock"
 note "- $fe"
 if /usr/bin/time -v true >/dev/null 2>&1; then TIME_STYLE=gnu
 elif [ "$(uname -s)" = Darwin ] && /usr/bin/time -l true >/dev/null 2>&1; then TIME_STYLE=bsd
@@ -193,6 +213,7 @@ bench feed-digest "$SMOKE" > "$OUT/feeds_smoke.txt" 2>> "$OUT/log.txt"
 same_as "$REF_SMOKE_FEEDS" "$OUT/feeds_smoke.txt" "smoke files identical to the macOS reference"
 expect 0 "smoke files intact, no orphans or staging left" bench verify-files "$SMOKE"
 bench digest "$SMOKE" > "$OUT/digest_smoke.txt" 2>> "$OUT/log.txt"
+expect 0 "smoke digest complete (7 tables)" digest_ok "$OUT/digest_smoke.txt"
 
 note ""; note "## Publish crash (1,000 orders, schemas *_pc in $SMOKE): SIGKILL after placing file 4, then resume"
 PC_CONFIG="$OUT/generator_pc.yaml"
@@ -206,8 +227,9 @@ note "  - resume: $(time_summary pc_resume)"
 expect 0 "validate after resume (database + files)" "$ECOMGEN" validate "$PC_CONFIG"
 env CONFIG="$PC_CONFIG" "$PY" scripts/homelab_bench.py feed-digest "$SMOKE" > "$OUT/feeds_pc.txt" 2>> "$OUT/log.txt"
 same_as "$REF_SMOKE_FEEDS" "$OUT/feeds_pc.txt" "files after crash + resume identical to the uninterrupted macOS reference"
-expect 0 "ledger == disk: no orphans, no duplicates, no staging left" env CONFIG="$PC_CONFIG" "$PY" scripts/homelab_bench.py verify-files "$SMOKE"
+expect 0 "ledger == disk: every recorded file intact, no unrecorded files, no staging left" env CONFIG="$PC_CONFIG" "$PY" scripts/homelab_bench.py verify-files "$SMOKE"
 env CONFIG="$PC_CONFIG" "$PY" scripts/homelab_bench.py digest "$SMOKE" > "$OUT/digest_pc.txt" 2>> "$OUT/log.txt"
+expect 0 "publish-crash digest complete (7 tables)" digest_ok "$OUT/digest_pc.txt"
 expect 0 "database rows identical to the uninterrupted smoke run" diff "$OUT/digest_smoke.txt" "$OUT/digest_pc.txt"
 
 # ---------- 2. MVP benchmark (10,000 orders) ----------
@@ -281,23 +303,26 @@ expect 137 "replay killed right after a delivery is in place" bench replay-crash
 RID="$(bench replay-id "$TEST" "$@" 2>> "$OUT/log.txt")" || die "cannot compute the replay id"
 expect 0 "rerun finishes the replay" timed replay "$ECOMGEN" replay-files "$CONFIG" "${RPL_CLI[@]}"
 note "  - replay $RID:$(grep -h "^replay $RID" "$OUT/log.txt" | tail -1 | cut -d: -f2-); $(time_summary replay)"
-"$ECOMGEN" replay-files "$CONFIG" "${RPL_CLI[@]}" > "$OUT/replay_again.txt" 2>&1
+"$ECOMGEN" replay-files "$CONFIG" "${RPL_CLI[@]}" > "$OUT/replay_again.txt" 2>&1; again=$?
+expect 0 "second rerun succeeds" test "$again" = 0
 expect 0 "second rerun only verifies" grep -q "verified (already complete)" "$OUT/replay_again.txt"
 bench replay-originals "$TEST" "$@" > "$OUT/replay_originals.txt" 2>> "$OUT/log.txt"
 same_as "$REF_REPLAY" "$OUT/replay_originals.txt" "replayed originals (paths, sha256) identical to the macOS reference"
 # arrival times and duplicates are seeded by the replay id (includes the run id), so they are checked locally:
 bench planned-replay-digest "$TEST" "$@" > "$OUT/replay_planned.txt" 2>> "$OUT/log.txt"
 bench replay-digest "$TEST" "$RID" > "$OUT/replay_digest.txt" 2>> "$OUT/log.txt"
-expect 0 "deliveries after kill + rerun are exactly the plan" diff "$OUT/replay_planned.txt" "$OUT/replay_digest.txt"
-expect 0 "deliveries intact: no orphans, no duplicate deliveries, no staging left" bench verify-replay "$TEST" "$RID"
+expect 0 "deliveries after kill + rerun are exactly the plan (none missing, none extra)" diff "$OUT/replay_planned.txt" "$OUT/replay_digest.txt"
+expect 0 "deliveries intact, no unrecorded files in the replay directory, no staging left" bench verify-replay "$TEST" "$RID"
 
 # ---------- 5. cleanup of that replay (dry run unless CLEANUP_REPLAY=1) ----------
 note ""; note "## Cleanup of replay $RID"
 RUN_MVP="$(bench run-id "$TEST" 2>> "$OUT/log.txt")"
 expect 0 "the replay was created by this benchmark (run $RUN_MVP, after $STARTED_EPOCH)" bench owned-replay "$TEST" "$RID" "$RUN_MVP" "$STARTED_EPOCH"
-"$ECOMGEN" cleanup-files "$CONFIG" --replay-id "$RID" > "$OUT/cleanup_plan.txt" 2>&1
+"$ECOMGEN" cleanup-files "$CONFIG" --replay-id "$RID" > "$OUT/cleanup_plan.txt" 2>&1; dry=$?
+expect 0 "cleanup dry run succeeds" test "$dry" = 0
 note "  - $(head -1 "$OUT/cleanup_plan.txt") (full list: cleanup_plan.txt)"
-expect 0 "dry run lists only this replay's copies" sh -c "! grep '^  delete ' '$OUT/cleanup_plan.txt' | grep -v ' deliveries/replay_id=$RID/arrived='"
+expect 0 "dry run lists this replay's copies" grep -q "^  delete deliveries/replay_id=$RID/arrived=" "$OUT/cleanup_plan.txt"
+expect 0 "dry run lists nothing else" sh -c "! grep '^  delete ' '$OUT/cleanup_plan.txt' | grep -v '^  delete deliveries/replay_id=$RID/arrived='"
 TOKEN="$(sed -n 's/.*--delete --confirm \([0-9a-f]\{12\}\)$/\1/p' "$OUT/cleanup_plan.txt")"
 if [ "${CLEANUP_REPLAY:-}" = 1 ] && [ -n "$TOKEN" ] && [ "$FAILED" = 0 ]; then
   expect 0 "cleanup --delete --confirm (CLEANUP_REPLAY=1)" "$ECOMGEN" cleanup-files "$CONFIG" --replay-id "$RID" --delete --confirm "$TOKEN"
@@ -305,6 +330,8 @@ if [ "${CLEANUP_REPLAY:-}" = 1 ] && [ -n "$TOKEN" ] && [ "$FAILED" = 0 ]; then
   expect 0 "originals untouched (every file still matches its sha256)" bench verify-files "$TEST"
   expect 0 "MVP run still validates" "$ECOMGEN" validate "$CONFIG"
   expect 1 "the cleaned replay can no longer be verified (and says why)" "$ECOMGEN" replay-files "$CONFIG" "${RPL_CLI[@]}"
+elif [ "${CLEANUP_REPLAY:-}" = 1 ]; then
+  note "- FAIL CLEANUP_REPLAY=1 but nothing was deleted (earlier failures, or no token in the dry run)"; FAILED=1
 else
   note "  - not deleted (dry run only; set CLEANUP_REPLAY=1 to delete, only after all other checks pass)"
 fi
@@ -317,6 +344,10 @@ done
 note "- data root: $(du -sk "$ECOMGEN_DATA_ROOT" | awk '{printf "%.1f MB", $1 / 1024}') in $ECOMGEN_DATA_ROOT"
 note "- disk after: $(df -Ph "$OUT" | awk 'NR == 2 {print $3 " used, " $4 " free on " $6}')"
 note "- nothing dropped; all three databases kept (cleanup is a manual, approved step: docs/HOMELAB_DEPLOYMENT.md)"
-if [ "${RECORD_REFERENCES:-}" = 1 ]; then note "- RESULT: references recorded (not a verification run)"; exit 3; fi
+if [ "${RECORD_REFERENCES:-}" = 1 ]; then
+  if [ "$FAILED" != 0 ]; then note "- RESULT: FAILURES above; references NOT recorded"; exit 2; fi
+  for f in $RECORDED; do cp "$OUT/references/$(basename "$f")" "$f"; done
+  note "- RESULT: references recorded into scripts/ (not a verification run)"; exit 3
+fi
 if [ "$FAILED" = 0 ]; then note "- RESULT: all expectations passed"; else note "- RESULT: FAILURES above (details in log.txt)"; fi
 exit "$FAILED"

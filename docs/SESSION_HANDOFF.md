@@ -4,7 +4,8 @@ Update before compaction or ending a significant session. Overwrite; git history
 
 **Updated:** 2026-10-18
 **Branch:** `chore/benchmark-files` (from `main` `b619622` = PR #17 cleanup-files merged, CI green 235/0). PR C of
-3: implemented, Mac rehearsals green; independent review next. No reset or deployment without approval.
+3: implemented, reviewed (10 findings fixed), Mac rehearsals green again (PG 17 53/53 with cleanup, PG 18 49/49);
+awaiting push approval. No reset or deployment without approval.
 **Deployed on Ubuntu:** `v0.1.1-homelab` (`8c581ad`; no files). Keep it until `v0.2.0-homelab` passes there.
 **Approved (2026-10-18):** Part 2 plan (replay → cleanup → benchmark + release); user will recreate the three
 Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleaning a run's originals makes
@@ -33,6 +34,20 @@ Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleani
   (recorded on Docker PG 17; `expected_mvp_digest.txt` re-recorded identical).
 - Rehearsals: Docker PG 17.11 (48/48, `CLEANUP_REPLAY=1`) and `postgres:18.6-trixie` (44/44, dry run), exit 0;
   rehearsal role/DBs/container removed afterwards.
+
+## PR C review (`/code-review high`) — all 10 fixed
+| # | Finding | Fix |
+|---|---|---|
+| 1 | Port gate used the server's inner port (published container passes) | `check_server`: URL port explicit, not 55432, = EXPECTED_PG_PORT, before connecting; tests |
+| 2 | `?hostaddr=`/`?service=`/PGHOSTADDR could redirect | Only sslmode/connect_timeout/application_name; PGHOST/PGHOSTADDR/PGSERVICE refused; tests |
+| 3 | Cleanup dry-run failure passed silently | Exit code checked; must list this replay's copies; CLEANUP_REPLAY=1 without deletion = FAIL |
+| 4 | Record mode recorded after failures | Pending references in OUT/references, copied to scripts/ only if all checks passed (else exit 2) |
+| 5 | Data-root gate on path text | realpath; strictly inside the resolved project, no symlink, not benchmarks/; DATA_ROOT pinned on Linux; OUT not in data root; tested |
+| 6 | Smoke/pc digests without completeness check | digest_ok before the diff |
+| 7 | EXPECTED_PG_PORT optional on Linux | Required on Linux; checked pre-connection |
+| 8 | Second rerun exit code ignored; "duplicates" over-claimed | Exit code checked; labels state what is checked (plan diff = none missing/extra) |
+| 9 | Host clock vs server clock in owned-replay | STARTED_EPOCH from the server (`server-epoch`) |
+| 10 | Orphan scan walked the whole data root; private `_originals` | Scan only source_feeds/, clickstream/, the run's manifest dir; `replay.originals` public |
 
 ## Previous task: PR B, `cleanup-files` (PR #17, merged) (`docs/FEEDS.md` "Cleanup")
 - `cleanup.py`: `Target` (staging | replay | run), `plan` (read-only, hashes candidates: ledger-recorded,

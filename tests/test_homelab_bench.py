@@ -15,6 +15,8 @@ def bench(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     monkeypatch.setenv("ECOMGEN_BENCH_URL", UNREACHABLE.format("ecommerce_homelab_test"))
     monkeypatch.delenv("ECOMMERCE_DATABASE_URL", raising=False)
     monkeypatch.delenv("EXISTING_PG_URL", raising=False)
+    for var in ("PGHOST", "PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE", "EXPECTED_PG_PORT"):
+        monkeypatch.delenv(var, raising=False)
     spec = importlib.util.spec_from_file_location("homelab_bench", SCRIPT)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -87,12 +89,39 @@ def test_urls_come_from_env_not_argv(bench: ModuleType, monkeypatch: pytest.Monk
         bench.preflight()
 
 
-def test_only_local_servers(bench: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(("url", "match"), [
+    ("postgresql://u:p@10.0.0.5:5432/ecommerce_homelab_test", "only to a local PostgreSQL"),
+    ("postgresql://u:p@db.example:5432/ecommerce_homelab_test", "only to a local PostgreSQL"),
+    ("postgresql://u:p@127.0.0.1:5432/ecommerce_homelab_test?hostaddr=10.0.0.5", "hostaddr are not allowed"),
+    ("postgresql://u:p@127.0.0.1:5432/ecommerce_homelab_test?host=10.0.0.5", "host are not allowed"),
+    ("postgresql://u:p@127.0.0.1:5432/ecommerce_homelab_test?service=vlsim", "service are not allowed"),
+    ("postgresql://u:p@127.0.0.1:5432/ecommerce_homelab_test?port=55432", "port are not allowed"),
+    ("postgresql://u:p@127.0.0.1/ecommerce_homelab_test", "port explicitly"),
+    ("postgresql://u:p@127.0.0.1:55432/ecommerce_homelab_test", "VLSIM"),
+])
+def test_server_gate_refuses_before_connecting(bench: ModuleType, monkeypatch: pytest.MonkeyPatch, url: str,
+                                               match: str) -> None:
     assert bench.FORBIDDEN_PORTS == {55432: "the VLSIM PostgreSQL container"}
-    for host in ("10.0.0.5", "db.example", "192.168.1.20"):
-        monkeypatch.setenv("ECOMGEN_BENCH_URL", f"postgresql://u:p@{host}:5432/ecommerce_homelab_test")
-        with pytest.raises(bench.Refused, match="only to a local PostgreSQL"):
-            bench.preflight()
+    monkeypatch.setenv("ECOMGEN_BENCH_URL", url)
+    with pytest.raises(bench.Refused, match=match):
+        bench.preflight()
+    monkeypatch.setenv("ECOMMERCE_DATABASE_URL", url.replace("ecommerce_homelab_test", "ecommerce_homelab_smoke"))
+    with pytest.raises(bench.Refused, match=match):
+        bench.publish_crash("config.yaml", "4")
+
+
+def test_server_gate_expected_port_and_environment(bench: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    ok = "postgresql://u:p@127.0.0.1:5432/ecommerce_homelab_test?connect_timeout=1&sslmode=disable"
+    assert bench.check_server(ok) == ok
+    monkeypatch.setenv("EXPECTED_PG_PORT", "5433")
+    with pytest.raises(bench.Refused, match="URL port is 5432, expected 5433"):
+        bench.check_server(ok)
+    monkeypatch.delenv("EXPECTED_PG_PORT")
+    for var in ("PGHOST", "PGHOSTADDR", "PGSERVICE"):
+        monkeypatch.setenv(var, "10.0.0.5")
+        with pytest.raises(bench.Refused, match=f"unset {var}"):
+            bench.check_server(ok)
+        monkeypatch.delenv(var)
 
 
 def test_publish_and_replay_crashes_only_target_their_databases(bench: ModuleType,

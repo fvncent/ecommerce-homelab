@@ -141,7 +141,7 @@ def test_sigkill_mid_replay_then_rerun_finishes_it(run: tuple[psycopg.Connection
     # exactly the deterministic plan, and the manifest is what an uninterrupted replay writes
     rid = r.replay_id
     run_id = r.run_id
-    sha, origs = replay._originals(conn, small_cfg, run_id, data_root, PARAMS)
+    sha, origs = replay.originals(conn, small_cfg, run_id, data_root, PARAMS)
     plan = replay.schedule(rid, origs, PARAMS)
     expected = json.dumps(replay.delivery_manifest(rid, run_id, sha, PARAMS, plan), indent=2) + "\n"
     assert (data_root / replay.delivery_manifest_path(rid)).read_text() == expected
@@ -162,7 +162,7 @@ def test_never_overwrites_deliveries(run: tuple[psycopg.Connection, str], small_
     # an unknown file where a new replay would deliver
     params = replace(PARAMS, delay_hours=48, duplicate_pct=0)
     rid = replay.replay_id(r.run_id, params)
-    _, origs = replay._originals(conn, small_cfg, r.run_id, data_root, params)
+    _, origs = replay.originals(conn, small_cfg, r.run_id, data_root, params)
     target = data_root / replay.schedule(rid, origs, params)[0].path
     target.parent.mkdir(parents=True)
     target.write_bytes(b"someone else's\n")
@@ -255,7 +255,7 @@ def test_symlinks_are_refused(run: tuple[psycopg.Connection, str], small_cfg: co
     victim.write_bytes(copy.read_bytes())
     # a symlink planted at a delivery target, pointing at identical bytes, is not adopted
     rid = replay.replay_id(str(_manifest(conn, data_root)[0]), PARAMS)
-    _, origs = replay._originals(conn, small_cfg, _manifest(conn, data_root)[0], data_root, PARAMS)
+    _, origs = replay.originals(conn, small_cfg, _manifest(conn, data_root)[0], data_root, PARAMS)
     first = replay.schedule(rid, origs, PARAMS)[0]
     target = data_root / first.path
     target.parent.mkdir(parents=True)
@@ -265,7 +265,7 @@ def test_symlinks_are_refused(run: tuple[psycopg.Connection, str], small_cfg: co
     assert target.is_symlink()
 
 
-def test_verify_cleans_leftover_staging_and_survives_removed_originals(
+def test_verify_cleans_leftover_staging_and_survives_removedoriginals(
         run: tuple[psycopg.Connection, str], small_cfg: config.Config, data_root: Path) -> None:
     conn, _ = run
     r = replay.replay(conn, small_cfg, PARAMS)

@@ -88,8 +88,8 @@ with laptop load; the Ubuntu run is the reference):
 
 | Server | Checks | MVP end-to-end (DB + files) | Feed-only CSV | Feed-only JSONL | sha256 verify | Cleanup |
 |---|---|---|---|---|---|---|
-| Docker PG 17.11 | 48/48 | 4.74 s, 65 MB RSS, server 358 MB | 8,295 rows in 0.91 s (9,157/s, 1.1 MB/s) | 110,000 events in 2.47 s (44,520/s, 11.8 MB/s) | 120 files, 31.6 MB, 1,460 MB/s (cached) | `CLEANUP_REPLAY=1`: 26 copies, 6.1 MB, audit written |
-| `postgres:18.6-trixie` | 44/44 | 1,852 orders/s end-to-end | 8,575/s | 46,621/s | 1,406 MB/s (cached) | dry run only |
+| Docker PG 17.11 | 53/53 (after review fixes; first run 48/48) | 4.74 s, 65 MB RSS, server 358 MB | 8,295 rows in 0.91 s (9,157/s, 1.1 MB/s) | 110,000 events in 2.47 s (44,520/s, 11.8 MB/s) | 120 files, 31.6 MB, 1,460 MB/s (cached) | `CLEANUP_REPLAY=1`: all copies of the run's replay (25-26), audit written |
+| `postgres:18.6-trixie` | 49/49 (first run 44/44) | 1,852 orders/s end-to-end | 8,575/s | 46,621/s | 1,406 MB/s (cached) | dry run only |
 
 Both: smoke and publish-crash files identical to the uninterrupted reference; MVP rows and files identical to the
 references (`scripts/expected_{mvp,feed}_digest.txt`, recorded on PG 17); replay killed after delivery 6 → rerun =

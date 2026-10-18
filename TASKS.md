@@ -1,7 +1,7 @@
 # Tasks
 
 ## Active
-- [ ] PR C (branch `chore/benchmark-files`, implemented + Mac rehearsals PG 17/18 green, awaiting review; decisions 2026-10-18: publish crash in the smoke DB's own `_pc` schemas, replay cleanup dry run unless `CLEANUP_REPLAY=1`): benchmark with files (per-feed throughput, sha256 MB/s, feed digest vs macOS reference, publish-crash + replay-crash), then tag `v0.2.0-homelab`; Ubuntu: user recreates the 3 benchmark DBs by hand (approved 2026-10-18), `ECOMGEN_DATA_ROOT=/srv/homelab/ecommerce/data`; keep `v0.1.1-homelab` until it passes
+- [ ] PR C (branch `chore/benchmark-files`, reviewed (10 findings fixed), Mac rehearsals PG 17/18 green, awaiting push approval; decisions 2026-10-18: publish crash in the smoke DB's own `_pc` schemas, replay cleanup dry run unless `CLEANUP_REPLAY=1`): benchmark with files (per-feed throughput, sha256 MB/s, feed digest vs macOS reference, publish-crash + replay-crash), then tag `v0.2.0-homelab`; Ubuntu: user recreates the 3 benchmark DBs by hand (approved 2026-10-18), `ECOMGEN_DATA_ROOT=/srv/homelab/ecommerce/data`; keep `v0.1.1-homelab` until it passes
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 
 ## Next (Phase 1)

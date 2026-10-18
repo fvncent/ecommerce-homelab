@@ -101,12 +101,12 @@ def _rng(rid: str, path: str) -> random.Random:
     return random.Random(int.from_bytes(hashlib.sha256(f"{rid}:{path}".encode()).digest()[:16], "big"))
 
 
-def schedule(rid: str, originals: list[Original], params: Params) -> list[Delivery]:
+def schedule(rid: str, sources: list[Original], params: Params) -> list[Delivery]:
     """Pure: when each original arrives, and which also arrive a second time. A partition's file becomes available
     at the end of its day, plus delay_hours, plus up to jitter_hours (whole seconds); a duplicate arrives 1-24 h
     after its first delivery. Sorted by arrival, then path."""
     out = []
-    for o in originals:
+    for o in sources:
         rng = _rng(rid, o.path)
         day_end = datetime(o.partition.year, o.partition.month, o.partition.day, tzinfo=UTC) + timedelta(days=1)
         arrived = day_end + timedelta(hours=params.delay_hours,
@@ -142,7 +142,7 @@ def delivery_manifest(rid: str, run_id: str, source_manifest_sha: str, params: P
                             "duplicate": d.duplicate} for d in plan]}
 
 
-def _originals(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path,
+def originals(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path,
                params: Params) -> tuple[str, list[Original]]:
     """The run's manifest (checked against its ledger row) and its files in range, each checked against it.
     Raises with every problem before anything is written."""
@@ -236,11 +236,11 @@ def replay(conn: psycopg.Connection, cfg: Config, params: Params, run_id: str | 
                                              " FROM {meta}.file_deliveries WHERE replay_id = %s"
                                              " AND original_path IS NOT NULL"), (rid,)).fetchone()  # type: ignore[misc]
             return ReplayResult(rid, run_id, int(n), int(dups), 0, True)
-        source_sha, originals = _originals(conn, cfg, run_id, root, params)
+        source_sha, sources = originals(conn, cfg, run_id, root, params)
         conn.execute(db.q(cfg, "INSERT INTO {meta}.replays (replay_id, run_id, params, state)"
                                " VALUES (%s, %s, %s, 'RUNNING') ON CONFLICT (replay_id) DO NOTHING"),
                      (rid, run_id, Jsonb(params.as_json())))
-        plan = schedule(rid, originals, params)
+        plan = schedule(rid, sources, params)
         unexpected = set(done) - {d.path for d in plan}
         if unexpected:
             raise ReplayError(f"replay {rid} recorded deliveries its plan doesn't contain: {sorted(unexpected)[:3]}")

@@ -35,6 +35,9 @@ PRIVILEGES = ("rolsuper", "rolcreatedb", "rolcreaterole", "rolreplication", "rol
 PC_SUFFIX = "_pc"  # schemas of the publish-crash run: an isolated, empty schema set in the smoke database
 FORBIDDEN_PORTS = {55432: "the VLSIM PostgreSQL container"}
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
+SAFE_PARAMS = {"sslmode", "connect_timeout", "application_name"}  # anything else (host, hostaddr, service, port,
+# options, ...) could make libpq connect somewhere other than the URL's host and port
+REDIRECTING_ENV = ("PGHOST", "PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE")
 FAKE_RUN = "run_20000101T000000Z_000000"  # file names of the feed-only throughput runs
 
 
@@ -65,8 +68,31 @@ def check_name(name: str, allowed: tuple[str, ...] = DATABASES) -> str:
     return name
 
 
+def check_server(url: str) -> str:
+    """Refuse, before connecting, any URL that could reach a server other than the local one on the expected port:
+    host must be loopback, the port explicit, allowed and equal to EXPECTED_PG_PORT (if set), only SAFE_PARAMS in
+    the query, and no PGHOST/PGHOSTADDR/PGSERVICE in the environment."""
+    parts = urlsplit(url)
+    if parts.hostname not in LOOPBACK:
+        raise Refused(f"the benchmark connects only to a local PostgreSQL, not {parts.hostname!r}")
+    extra = set(parse_qs(parts.query, keep_blank_values=True)) - SAFE_PARAMS
+    if extra:
+        raise Refused(f"URL parameters {', '.join(sorted(extra))} are not allowed (only {', '.join(sorted(SAFE_PARAMS))})")
+    set_env = [v for v in REDIRECTING_ENV if os.environ.get(v)]
+    if set_env:
+        raise Refused(f"unset {', '.join(set_env)}: they can redirect the connection")
+    if parts.port is None:
+        raise Refused("the URL must name its port explicitly")
+    if parts.port in FORBIDDEN_PORTS:
+        raise Refused(f"port {parts.port} is {FORBIDDEN_PORTS[parts.port]}; never benchmark against it")
+    expected = os.environ.get("EXPECTED_PG_PORT")
+    if expected and int(expected) != parts.port:
+        raise Refused(f"URL port is {parts.port}, expected {expected}")
+    return url
+
+
 def bench_url() -> str:
-    url = env_url("ECOMGEN_BENCH_URL")
+    url = check_server(env_url("ECOMGEN_BENCH_URL"))
     check_name(dbname_of(url))
     return url
 
@@ -84,9 +110,7 @@ def _schemas() -> tuple[str, ...]:
 def preflight() -> None:
     """Refuse unless the server is local and not a forbidden port, and the role is unprivileged and owns every
     approved database, each still empty (also of the publish-crash schema set)."""
-    host = urlsplit(bench_url()).hostname
-    if host not in LOOPBACK:
-        raise Refused(f"the benchmark connects only to a local PostgreSQL, not {host!r}")
+    bench_url()  # host, port and parameters are checked before any connection
     schemas = _schemas() + tuple(s + PC_SUFFIX for s in _schemas())
     for name in DATABASES:
         with psycopg.connect(db_url(name)) as c:
@@ -117,11 +141,8 @@ def preflight() -> None:
                               "never reuses a database: recreate it by hand (approved cleanup) first")
             version = c.execute("SHOW server_version").fetchone()[0]  # type: ignore[index]
             port = c.execute("SELECT inet_server_port()").fetchone()[0]  # type: ignore[index]
-            if port in FORBIDDEN_PORTS:
-                raise Refused(f"port {port} is {FORBIDDEN_PORTS[port]}; never benchmark against it")
-            expected = os.environ.get("EXPECTED_PG_PORT")
-            if expected and int(expected) != port:
-                raise Refused(f"server port is {port}, expected {expected}")
+            if port in FORBIDDEN_PORTS:  # the server's own port (a published container reports its inner port)
+                raise Refused(f"server port {port} is {FORBIDDEN_PORTS[port]}; never benchmark against it")
     print(f"role {user} (no privileges, no memberships) owns only {', '.join(DATABASES)}, all empty; "
           f"PostgreSQL {version}, port {port}")
 
@@ -142,6 +163,12 @@ def same_server(kind: str, ref: str) -> None:
             raise Refused(f"unknown server kind {kind!r}")
     print(f"backend {pid} {'is' if ok else 'is NOT'} in {kind} {ref}")
     sys.exit(0 if ok else 1)
+
+
+def server_epoch() -> None:
+    """The server's clock (seconds), so 'created by this run' compares server time with server time."""
+    with psycopg.connect(bench_url()) as c:
+        print(int(c.execute("SELECT extract(epoch FROM now())").fetchone()[0]))  # type: ignore[index]
 
 
 def server_major() -> None:
@@ -242,7 +269,7 @@ def pg_stats() -> None:
 def crash(config_path: str, entity: str, chunk_no: str) -> None:
     """Run generate against ECOMMERCE_DATABASE_URL (must be the crash database) and SIGKILL this process just
     before writing (entity, chunk_no): a real hard crash."""
-    url = env_url("ECOMMERCE_DATABASE_URL")
+    url = check_server(env_url("ECOMMERCE_DATABASE_URL"))
     check_name(dbname_of(url), (CRASH_DB,))
     from ecomgen import config, generate, load
 
@@ -314,8 +341,8 @@ def feed_stats(name: str) -> None:
 
 
 def verify_files(name: str) -> None:
-    """Re-hash every recorded file of the latest run; also count unrecorded files carrying its run id (orphans,
-    outside deliveries/ and audit/) and leftover staging. Exit 1 on any problem."""
+    """Re-hash every recorded file of the latest run; also count unrecorded files carrying its run id where it
+    publishes (orphans) and leftover staging. Exit 1 on any problem."""
     from ecomgen import config, db, feeds
     cfg = _cfg()
     root = Path(config.data_root(cfg))
@@ -327,8 +354,10 @@ def verify_files(name: str) -> None:
     bad = [r for r, sha, _ in rows if not (root / r).is_file() or feeds.sha256_of(root / r) != sha]
     seconds = time.perf_counter() - started
     total = sum(int(b) for _, _, b in rows)
-    on_disk = {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() and rid in str(p.relative_to(root))
-               and p.relative_to(root).parts[0] not in ("deliveries", "audit", "staging")}
+    own = [root / "source_feeds", root / "clickstream", root / "manifests" / f"run_id={rid}"]  # only where it publishes
+    on_disk = {str(p.relative_to(root)) for d in own if d.is_dir() for p in d.rglob(f"*{rid}*") if p.is_file()}
+    if (root / feeds.manifest_path(rid)).is_file():
+        on_disk.add(feeds.manifest_path(rid))
     orphans = on_disk - {r for r, _, _ in rows}
     staging_left = (root / "staging" / rid).exists()
     print(f"files={len(rows)} bytes={total} seconds={seconds:.2f} mb_per_s={total / 1048576 / max(seconds, 1e-6):.0f}"
@@ -375,7 +404,7 @@ def _kill_after_placing(n: int) -> None:
 def publish_crash(config_path: str, nth: str) -> None:
     """generate --profile smoke against ECOMMERCE_DATABASE_URL (must be the smoke database), SIGKILLed right after
     placing the nth file: a hard crash between the filesystem and the PostgreSQL commit."""
-    url = env_url("ECOMMERCE_DATABASE_URL")
+    url = check_server(env_url("ECOMMERCE_DATABASE_URL"))
     check_name(dbname_of(url), (SMOKE_DB,))
     from ecomgen import config, load
     _kill_after_placing(int(nth))
@@ -392,7 +421,7 @@ def _replay_params(start: str, end: str, delay: str, jitter: str, dup: str) -> "
 def replay_crash(config_path: str, nth: str, start: str, end: str, delay: str, jitter: str, dup: str) -> None:
     """replay-files against ECOMMERCE_DATABASE_URL (must be the test database), SIGKILLed right after placing the
     nth delivery."""
-    url = env_url("ECOMMERCE_DATABASE_URL")
+    url = check_server(env_url("ECOMMERCE_DATABASE_URL"))
     check_name(dbname_of(url), (TEST_DB,))
     from ecomgen import config, replay
     params = _replay_params(start, end, delay, jitter, dup)
@@ -429,7 +458,7 @@ def planned_replay_digest(name: str, start: str, end: str, delay: str, jitter: s
     params = _replay_params(start, end, delay, jitter, dup)
     with psycopg.connect(db_url(name)) as c:
         run = _latest(c, cfg)
-        _, originals = replay._originals(c, cfg, run, Path(config.data_root(cfg)), params)
+        _, originals = replay.originals(c, cfg, run, Path(config.data_root(cfg)), params)
     rid = replay.replay_id(run, params)
     for line in sorted(f"{d.path.replace(rid, 'RPL').replace(run, 'RUN')} {d.original.sha256} {feeds.ts(d.arrived_at)}"
                        f" {int(d.duplicate)}" for d in replay.schedule(rid, originals, params)):
@@ -443,7 +472,7 @@ def replay_originals(name: str, start: str, end: str, delay: str, jitter: str, d
     cfg = _cfg()
     with psycopg.connect(db_url(name)) as c:
         run = _latest(c, cfg)
-        _, originals = replay._originals(c, cfg, run, Path(config.data_root(cfg)),
+        _, originals = replay.originals(c, cfg, run, Path(config.data_root(cfg)),
                                          _replay_params(start, end, delay, jitter, dup))
     for line in sorted(f"{o.path.replace(run, 'RUN')} {o.sha256}" for o in originals):
         print(line)
@@ -511,7 +540,7 @@ def feeds_enabled() -> None:
 
 COMMANDS: dict[str, Callable[..., None]] = {
     "url": lambda name: print(db_url(name)), "preflight": preflight, "same-server": same_server,
-    "server-major": server_major,
+    "server-major": server_major, "server-epoch": server_epoch,
     "wal-lsn": wal_lsn, "wal-bytes-since": wal_bytes_since, "sizes": sizes, "digest": digest,
     "leftovers": leftovers, "pg-stats": pg_stats, "crash": crash,
     "pc-config": pc_config, "run-id": run_id, "feed-digest": feed_digest, "feed-stats": feed_stats,

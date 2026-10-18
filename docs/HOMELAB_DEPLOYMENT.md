@@ -119,9 +119,13 @@ Phases (each check is a PASS/FAIL line in `summary.md`):
    deletion only with `CLEANUP_REPLAY=1` and only if every earlier check passed; then originals must still match
    and the run still validate.
 
-Pre-flight refuses a non-local server, port 55432 (the VLSIM container), another port than `EXPECTED_PG_PORT`,
-`ECOMGEN_DATA_ROOT` outside `/srv/homelab/ecommerce` or off the NVMe mount, a filesystem without hard links, a
-config without both feeds, missing references, and non-empty databases (both schema sets). It exits 0 only if
+Pre-flight refuses, before connecting: a non-local host, a URL without an explicit port, port 55432 (the VLSIM
+container) or a port other than `EXPECTED_PG_PORT` (required on Linux), URL parameters other than `sslmode`,
+`connect_timeout`, `application_name` (e.g. `?hostaddr=`, `?service=`), and `PGHOST`/`PGHOSTADDR`/`PGSERVICE` in
+the environment. Then: the server's own port 55432, `ECOMGEN_DATA_ROOT` not strictly inside
+`/srv/homelab/ecommerce` once resolved (no symlink, no `..`, not the project root, not `benchmarks/`) or off the
+NVMe mount, a filesystem without hard links, a config without both feeds, missing references, a server that isn't
+`PG_SERVICE`, and non-empty databases (both schema sets). It exits 0 only if
 every expectation holds; WAL growth is server-wide. Copy `summary.md` into `docs/BENCHMARKS.md` via a PR from the
 Mac. Everything it writes stays under `/srv/homelab/ecommerce` (`benchmarks/<UTC>/`, `data/`), which the snapshot
 excludes, so the before/after diff shows only changes outside the project scope.
