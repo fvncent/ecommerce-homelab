@@ -2,12 +2,14 @@
 events with a manifest; the chain's files together equal a one-shot run's, and agree with the database at every
 step; real SIGKILLs at each stage of the protocol resume cleanly. Fixtures in conftest.py."""
 
+import hashlib
 import json
 import os
 import signal
 import subprocess
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -176,7 +178,11 @@ def test_sigkill_at_each_stage_then_resume(migrated: Migrated, db_url: str, cfg_
     assert proc.returncode == -signal.SIGKILL, proc.stderr.decode()
     st = load.status(c, small_cfg)
     assert st.state == "RUNNING" and st.as_of == END  # never marked COMPLETED early
-    assert "run_completed: " + str([f"{st.run_id} is RUNNING"]) in failing(c, small_cfg)
+    bad = failing(c, small_cfg)
+    assert "run_completed: " + str([f"{st.run_id} is RUNNING"]) in bad
+    # one clear reason for the unfinished step's files, not every missing file and record
+    reason = f"{st.run_id} is RUNNING: a clock step's files are checked once it completes"
+    assert [b for b in bad if b.startswith("files_match_ledger")] == [f"files_match_ledger: {[reason]}"]
     with pytest.raises(load.LoadError, match="finish it with `ecomgen resume`"):
         load.advance(c, small_cfg, END)
     r = load.resume(c, small_cfg)
@@ -255,6 +261,46 @@ def test_database_error_while_publishing_fails_the_step_and_resume_finishes(
     assert_converged(c, small_cfg, data_root, digest, one_shot)
 
 
+def _move_last_event(conn: psycopg.Connection, root: Path, src: str, dst: str) -> None:
+    """Move the last line of src to the end of dst, keeping both ledger rows consistent with the new bytes."""
+    lines = (root / src).read_text().splitlines(keepends=True)
+    (root / src).write_text("".join(lines[:-1]))
+    (root / dst).write_text((root / dst).read_text() + lines[-1])
+    for rel in (src, dst):
+        data = (root / rel).read_bytes()
+        conn.execute("UPDATE generator_meta.published_files SET records = %s, bytes = %s, sha256 = %s"
+                     " WHERE rel_path = %s", (data.count(b"\n"), len(data), hashlib.sha256(data).hexdigest(), rel))
+
+
+def test_an_event_published_by_the_wrong_step_is_caught(migrated: Migrated, small_cfg: config.Config,
+                                                        data_root: Path) -> None:
+    """Counts and IDs still add up, but the event is outside the window of the step that published it."""
+    c = migrated(small_cfg)
+    steps = [load.advance(c, small_cfg, as_of) for as_of in (MID, END)]
+    src, dst = (sorted(r for r in ledger(c, s.run_id) if r.startswith("clickstream/")) for s in steps if s)
+    _move_last_event(c, data_root, src[-1], dst[0])
+    bad = {b.split(":")[0] for b in failing(c, small_cfg)}
+    assert "records_in_their_step_window" in bad
+    assert not bad & {"events_unique_and_complete", "orders_placed_once", "files_match_ledger"}
+
+
+def test_malformed_recorded_fields_are_a_validate_error(migrated: Migrated, small_cfg: config.Config) -> None:
+    c = migrated(small_cfg)
+    load.advance(c, small_cfg, MID)
+    c.execute("UPDATE generator_meta.generation_runs SET resume_fields = resume_fields - 'chunk_rows'")
+    with pytest.raises(validate.ValidateError, match="malformed"):
+        validate.validate(c, small_cfg)
+
+
+def test_file_size_may_change_between_steps(migrated: Migrated, small_cfg: config.Config, cfg_path: Path,
+                                            tmp_path: Path) -> None:
+    c = migrated(small_cfg)
+    load.advance(c, small_cfg, MID)
+    smaller = tmp_path / "smaller.yaml"
+    smaller.write_text(cfg_path.read_text().replace("max_file_size_mb: 128", "max_file_size_mb: 1"))
+    assert load.advance(c, config.load(smaller), END) is not None and failing(c, small_cfg) == []
+
+
 def test_chain_keeps_its_data_root_and_feeds(migrated: Migrated, small_cfg: config.Config, tmp_path: Path,
                                              monkeypatch: pytest.MonkeyPatch) -> None:
     c = migrated(small_cfg)
@@ -279,3 +325,16 @@ def test_replay_and_cleanup_of_a_step(migrated: Migrated, small_cfg: config.Conf
     assert plan.candidates and all(p.path.startswith(f"deliveries/replay_id={r.replay_id}/") for p in plan.candidates)
     files = cleanup.plan(c, small_cfg, cleanup.Target("run", first.run_id))
     assert {p.path for p in files.candidates} == set(ledger(c, first.run_id)) - {feeds.manifest_path(first.run_id)}
+
+
+def test_replay_refuses_a_day_split_across_steps(migrated: Migrated, small_cfg: config.Config) -> None:
+    c = migrated(small_cfg)
+    first = load.advance(c, small_cfg, START + timedelta(days=4, hours=12))  # ends mid-day: Jan 5 is split
+    load.advance(c, small_cfg, END)
+    assert first is not None
+    split = replay.Params(START.date() + timedelta(days=4), START.date() + timedelta(days=4),
+                          ("clickstream", "payment_settlement"), 24, 0, 0)
+    with pytest.raises(replay.ReplayError, match="part of a day"):
+        replay.replay(c, small_cfg, split, first.run_id)
+    whole = replace(split, start=START.date() + timedelta(days=1), end=START.date() + timedelta(days=3))
+    assert replay.replay(c, small_cfg, whole, first.run_id).deliveries > 0

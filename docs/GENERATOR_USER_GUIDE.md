@@ -153,7 +153,7 @@ uv run ecomgen validate /srv/homelab/ecommerce/practice/stepped-10k.yaml
 
 To simulate business days, step one day at a time (`--to 2026-01-02T00:00:00Z`, `--to 2026-01-03T00:00:00Z`, ...).
 Measured on the Mac (10k config, 4 steps): about 2.5 s per step, mostly reading through the browsing sessions to
-pick the window's events; validate 19/19, files identical to `generate`'s records.
+pick the window's events; validate 19/19 then (20 checks now), files identical to `generate`'s records.
 
 Each step prints `step run_… COMPLETED: clock <previous> -> <as_of>`, the rows inserted and updated, and its files.
 `--to` needs a time zone (`Z` for UTC; other offsets are converted) or `end`. Repeating a step that is already done,
@@ -187,8 +187,14 @@ find $D/source_feeds $D/clickstream -name '<step run id>*' | sort | head
 ```
 
 `validate CONFIG` checks the files of every step together against the current tables (each settled payment in
-exactly one settlement row, each order in exactly one `order_placed` event, no event ID in two steps); `--run-id`
-scopes the run/ledger checks to one step.
+exactly one settlement row, each order in exactly one `order_placed` event, no event ID in two steps, and every
+record inside the window of the step that published it: `records_in_their_step_window`); `--run-id` scopes the
+run/ledger checks to one step. While a step is unfinished, its files are reported once ("… is RUNNING: a clock
+step's files are checked once it completes") instead of as hundreds of missing records.
+
+**Replaying a step's files:** `replay-files CONFIG --run-id <step run id> --from D --to D` copies that step's files.
+A day whose files are split across two steps (a step that ended mid-day) is refused ("would deliver part of a
+day"); stepping on day boundaries (`--to …T00:00:00Z`) keeps every day in one step.
 
 **Time conventions (all UTC):** `event_time` / `settled_at` / `placed_at` = when it happened in the simulated
 business (a step's window is about these); `arrived_at` (clickstream) = when the web app received the event, 1-30 s

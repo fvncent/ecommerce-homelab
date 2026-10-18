@@ -83,8 +83,9 @@ def _write(cur: psycopg.Cursor[tuple[object, ...]], cfg: Config, table: str,
 # where and how its files are published (a different root or layout would publish a second, different set).
 RESUME_MUST_MATCH = ("data_version", "chunk_rows", "application_schema", "data_root", "feeds")
 # Every step of a chain must generate the same world into the same schema and publish the same feeds under the same
-# data root (validate checks the chain's files together); chunk_rows may differ per step.
-CHAIN_MUST_MATCH = ("data_version", "world", "application_schema", "data_root", "feeds")
+# data root (validate checks the chain's files together); chunk_rows and max_file_size_mb (how files are split) may
+# differ per step.
+CHAIN_MUST_MATCH = ("data_version", "world", "application_schema", "data_root", "feeds.enabled")
 
 
 def resume_fields(cfg: Config, world: generate.World) -> dict[str, object]:
@@ -396,8 +397,13 @@ def _resume_mismatch(recorded: dict[str, object] | None, cfg: Config) -> list[st
     return _mismatch(recorded, current, RESUME_MUST_MATCH)
 
 
-def _mismatch(recorded: dict[str, object], current: dict[str, object], keys: Sequence[str]) -> list[str]:
-    return [k for k in keys if recorded.get(k) != current[k]]
+def _mismatch(recorded: dict[str, Any], current: dict[str, Any], keys: Sequence[str]) -> list[str]:
+    """Keys whose values differ; "a.b" compares a nested field."""
+    def get(d: dict[str, Any], key: str) -> object:
+        for part in key.split("."):
+            d = d.get(part) if isinstance(d, dict) else None  # type: ignore[assignment]
+        return d
+    return [k for k in keys if get(recorded, k) != get(current, k)]
 
 
 def _lock_holder(conn: psycopg.Connection) -> int | None:

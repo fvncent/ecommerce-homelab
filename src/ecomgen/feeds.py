@@ -203,9 +203,14 @@ def enabled(cfg: Config) -> list[str]:
     return [f for f, on in (("payment_settlement", cfg.filesystem.csv), ("clickstream", cfg.filesystem.jsonl)) if on]
 
 
-def in_window(plan: generate.StepPlan | None, at: datetime) -> bool:
-    """True if a step's files hold an event at `at`: (previous_as_of, as_of], or everything for plan None."""
-    return plan is None or ((plan.previous is None or at > plan.previous) and at <= plan.as_of)
+def in_window(plan: generate.StepPlan, at: datetime) -> bool:
+    """True if a step's files hold an event at `at`: (previous_as_of, as_of] (first step: everything up to as_of)."""
+    return (plan.previous is None or at > plan.previous) and at <= plan.as_of
+
+
+def _in_window_text(plan: generate.StepPlan, at: str) -> bool:
+    """in_window for a ts() string: the fixed-width UTC format sorts like the time, so no parsing per event."""
+    return (plan.previous is None or at > ts(plan.previous)) and at <= ts(plan.as_of)
 
 
 def _sessions(world: generate.World, rows: int) -> Iterator[list[dict[str, object]]]:
@@ -223,14 +228,16 @@ def browsing_events_by(world: generate.World, as_of: datetime, rows: int) -> int
     """How many browsing events happened by as_of (all of them at clock_end)."""
     if as_of >= world.clock_end:
         return world.clickstream_events
-    return sum(1 for batch in _sessions(world, rows) for e in batch
-               if datetime.fromisoformat(str(e["event_time"])) <= as_of)
+    limit = ts(as_of)
+    return sum(1 for batch in _sessions(world, rows) for e in batch if str(e["event_time"]) <= limit)
 
 
 def write_staged(world: generate.World, cfg: Config, run_id: str, staging: Path,
                  plan: generate.StepPlan | None = None) -> dict[str, FileStat]:
     """Write every enabled feed of the run (or of the clock step `plan`: its window only) into staging; return
-    per-file stats keyed by relative path."""
+    per-file stats keyed by relative path. A whole run is the single step from nothing to clock_end, so both share
+    one code path (and all steps together give exactly the whole run's records)."""
+    plan = plan or generate.plan_step(world, None, world.clock_end)
     feeds = enabled(cfg)
     w = _Writer(staging, cfg.filesystem.max_file_size_mb * 1024 * 1024)
     rows = cfg.generator.chunk_rows
@@ -241,21 +248,14 @@ def write_staged(world: generate.World, cfg: Config, run_id: str, staging: Path,
             _add_events(w, run_id, [order_event(world, o) for o in orders])
     if "clickstream" in feeds:
         for batch in _sessions(world, rows):
-            _add_events(w, run_id, [e for e in batch
-                                    if in_window(plan, datetime.fromisoformat(str(e["event_time"])))])
+            _add_events(w, run_id, [e for e in batch if _in_window_text(plan, str(e["event_time"]))])
     return w.files
 
 
-def _order_batches(world: generate.World, rows: int, plan: generate.StepPlan | None
+def _order_batches(world: generate.World, rows: int, plan: generate.StepPlan
                    ) -> Iterator[tuple[list[generate.Order], list[generate.PaymentAttempt]]]:
-    """(orders placed, payment attempts settled) in the run or step window, one chunk of orders at a time. A step
-    looks at the orders it writes or revisits: every order that can settle in its window is among them."""
-    if plan is None:
-        for chunk_no in range(generate.chunk_count(world, "orders", rows)):
-            tables = generate.generate_chunk(world, "orders", chunk_no, rows).tables
-            yield (cast(list[generate.Order], tables["orders"]),
-                   cast(list[generate.PaymentAttempt], tables["payment_attempts"]))
-        return
+    """(orders placed, payment attempts settled) in the step window, one chunk of orders at a time. A step looks at
+    the orders it writes or revisits: every order that can settle in its window is among them."""
     for first in range(plan.orders.start, plan.orders.stop, rows):
         orders, payments = [], []
         for n in range(first, min(plan.orders.stop, first + rows)):
@@ -422,7 +422,7 @@ def manifest(conn: psycopg.Connection, cfg: Config, run_id: str) -> dict[str, ob
     step: dict[str, object] = {}
     if run[5] is not None:
         first = conn.execute(db.q(cfg, "SELECT run_id FROM {meta}.generation_runs WHERE previous_as_of IS NULL"
-                                       " AND as_of IS NOT NULL")).fetchone()
+                                       " AND as_of IS NOT NULL ORDER BY as_of, run_id LIMIT 1")).fetchone()
         step = {"clock_step": {
             "first_step_run_id": first[0] if first else None, "previous_as_of": ts(run[4]) if run[4] else None,
             "as_of": ts(run[5]), "window": "(previous_as_of, as_of]" if run[4] else "[clock_start, as_of]",

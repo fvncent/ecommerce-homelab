@@ -150,7 +150,7 @@ def test_refusals(migrated: Migrated, small_cfg: config.Config, tmp_path: Path,
         load.advance(c, config.load(other), END)
     with_files = tmp_path / "files.yaml"
     with_files.write_text(_small(EXAMPLE.read_text(), feeds=True))
-    with pytest.raises(load.LoadError, match="data_root, feeds differ"):
+    with pytest.raises(load.LoadError, match="data_root, feeds.enabled differ"):
         load.advance(c, config.load(with_files), END)
     monkeypatch.setattr(db, "has_column", lambda *a: False)
     with pytest.raises(load.LoadError, match="migration 0008"):

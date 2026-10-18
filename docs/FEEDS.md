@@ -172,7 +172,9 @@ settlements by `settled_at`, `order_placed` by `placed_at` (the orders the step 
 `event_time`. Same staging, never-overwrite placement, ledger and manifest-last protocol as `generate`, after the
 step's database chunks and before COMPLETED, so `resume` finishes any interrupted part. The step manifest adds
 `clock_step` (`first_step_run_id`, `previous_as_of`, `as_of`, `window`, `window_start`); a one-shot manifest is
-unchanged. All steps' records together = the one-shot run's records. `validate` checks every step's files together.
+unchanged. All steps' records together = the one-shot run's records. `validate` checks every step's files together,
+including `records_in_their_step_window`. `replay-files` of a step refuses dates whose partitions also hold files of
+another step (a mid-day step boundary), so a replayed day is never partial.
 `arrived_at` may be up to 30 s after the step's `as_of` (receive time, not the window). Cost: each step reads all
 browsing sessions to pick its window (~2.5 s per step at 100k events on the Mac).
 

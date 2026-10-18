@@ -198,7 +198,7 @@ def test_step_windows_are_half_open() -> None:
     first, later = g.plan_step(WORLD, None, t0), g.plan_step(WORLD, t0, t1)
     assert feeds.in_window(first, WORLD.clock_start) and feeds.in_window(first, t0)
     assert not feeds.in_window(later, t0) and feeds.in_window(later, t1)
-    assert not feeds.in_window(later, t1 + timedelta(seconds=1)) and feeds.in_window(None, t1 + timedelta(days=99))
+    assert not feeds.in_window(later, t1 + timedelta(seconds=1))
 
 
 def test_browsing_events_by_counts_events_up_to_a_time(tmp_path: Path) -> None:

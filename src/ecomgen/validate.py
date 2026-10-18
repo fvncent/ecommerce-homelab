@@ -139,9 +139,22 @@ MANIFEST_MATCHES = Check("manifest_matches_ledger", "the run manifest lists exac
 # the run published that feed. Comparisons are NULL-safe: a field missing from a row is a violation.
 TEMP_TABLES = {
     "feed_settlements": "settlement_id text, payment_id text, order_id text, currency text, gross numeric,"
-                        " fee numeric, net numeric, settled_at timestamptz",
-    "feed_events": "event_id text, event_type text, customer_id text, product_id text, order_id text",
+                        " fee numeric, net numeric, settled_at timestamptz, run_id text",
+    "feed_events": "event_id text, event_type text, customer_id text, product_id text, order_id text,"
+                   " event_time timestamptz, run_id text",
+    "feed_windows": "run_id text, clock_start timestamptz, window_start timestamptz, window_end timestamptz",
 }
+# Every record lies in the window of the run that published it: (previous_as_of, as_of] for a clock step (first step:
+# from clock_start), [clock_start, clock_end) for a generate run. With the per-feed "exactly once" checks this pins
+# each record to exactly one step.
+WINDOW_CHECK = Check("records_in_their_step_window", "every settlement / event lies in the time window of the run "
+                     "(clock step) that published it", """
+    SELECT f.id FROM (
+        SELECT settlement_id AS id, settled_at AS at, run_id FROM pg_temp.feed_settlements
+        UNION ALL SELECT event_id, event_time, run_id FROM pg_temp.feed_events) f
+    JOIN pg_temp.feed_windows w USING (run_id)
+    WHERE f.at IS NULL OR f.at < w.clock_start OR f.at > w.window_end
+       OR (w.window_start IS NOT NULL AND f.at <= w.window_start)""")
 SETTLEMENT_CHECKS = (
     Check("settlements_match_payments", "each settlement row is a SETTLED payment with the same order, amount, "
           "currency and time; fee >= 0 and fee + net = gross; no field missing", """
@@ -179,7 +192,7 @@ CLICKSTREAM_CHECKS = (
         UNION ALL SELECT 'browsing events: ' || count(*) || ', expected ' || %(browse)s
         FROM pg_temp.feed_events WHERE event_type <> 'order_placed' HAVING count(*) <> %(browse)s"""),
 )
-FEED_CHECKS = SETTLEMENT_CHECKS + CLICKSTREAM_CHECKS
+FEED_CHECKS = SETTLEMENT_CHECKS + CLICKSTREAM_CHECKS + (WINDOW_CHECK,)
 
 
 def _run_check(conn: psycopg.Connection, cfg: Config, check: Check, run_id: str,
@@ -215,11 +228,18 @@ def validate(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -
             recorded = runs[0][1] if runs else {}
             published = recorded.get("feeds", {}).get("enabled") or []
             if published:  # runs from before file feeds (or with feeds disabled) publish nothing to check
-                world = load.recorded_world(recorded)
-                browse = (world.clickstream_events if as_of is None else
-                          feeds.browsing_events_by(world, as_of, int(recorded["chunk_rows"])))
-                results += _file_results(conn, cfg, [r for r, _ in runs], Path(recorded["data_root"]), published,
-                                         browse)
+                unfinished = [f"{r} is {state}: a clock step's files are checked once it completes"
+                              for r, _, state in runs if state != "COMPLETED"] if as_of is not None else []
+                if unfinished:  # one clear reason instead of every missing file and record of that step
+                    return run_id, results + [Result(FILES_INTACT, len(unfinished), _sample(unfinished))]
+                try:
+                    world = load.recorded_world(recorded)
+                    browse = (world.clickstream_events if as_of is None else
+                              feeds.browsing_events_by(world, as_of, int(recorded["chunk_rows"])))
+                except (load.LoadError, KeyError, TypeError, ValueError) as e:
+                    raise ValidateError(f"run {run_id}'s recorded resume fields are malformed: {e}") from None
+                results += _file_results(conn, cfg, [r for r, _, _ in runs], Path(recorded["data_root"]),
+                                         published, browse)
             return run_id, results
     finally:
         if conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE:
@@ -229,19 +249,20 @@ def validate(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -
 
 
 def _file_runs(conn: psycopg.Connection, cfg: Config,
-               run_id: str) -> tuple[list[tuple[str, dict[str, Any]]], datetime | None]:
-    """The runs whose files are checked, with their resume_fields, and the latest clock time (None: a generate
-    run). A generate run alone; for a clock step, every step in the schema set (the chain shares root and feeds)."""
+               run_id: str) -> tuple[list[tuple[str, dict[str, Any], str]], datetime | None]:
+    """The runs whose files are checked, with their resume_fields and state, and the latest clock time (None: a
+    generate run). A generate run alone; for a clock step, every step in the schema set (the chain shares root and
+    feeds)."""
     clock = "as_of" if db.has_column(conn, cfg, "generation_runs", "as_of") else "NULL::timestamptz"
-    row = conn.execute(db.q(cfg, f"SELECT resume_fields, {clock} FROM {{meta}}.generation_runs WHERE run_id = %s"),
-                       (run_id,)).fetchone()
+    row = conn.execute(db.q(cfg, f"SELECT resume_fields, {clock}, state FROM {{meta}}.generation_runs"
+                                 " WHERE run_id = %s"), (run_id,)).fetchone()
     if row is None or not isinstance(row[0], dict):
         return [], None
     if row[1] is None:
-        return [(run_id, row[0])], None
-    steps = conn.execute(db.q(cfg, "SELECT run_id, resume_fields, as_of FROM {meta}.generation_runs"
+        return [(run_id, row[0], row[2])], None
+    steps = conn.execute(db.q(cfg, "SELECT run_id, resume_fields, state, as_of FROM {meta}.generation_runs"
                                    " ORDER BY as_of")).fetchall()
-    return [(r[0], r[1]) for r in steps], steps[-1][2]
+    return [(r[0], r[1], r[2]) for r in steps], steps[-1][3]
 
 
 def _sample(bad: list[str]) -> list[str]:
@@ -256,11 +277,22 @@ def _file_results(conn: psycopg.Connection, cfg: Config, run_ids: list[str], roo
     manifest_bad: list[str] = []
     for run_id in run_ids:
         _load_run_files(conn, cfg, run_id, root, broken, manifest_bad)
+    _load_windows(conn, cfg, run_ids)
     results = [Result(FILES_INTACT, len(broken), _sample(broken)),
                Result(MANIFEST_MATCHES, len(manifest_bad), _sample(manifest_bad))]
     checks = (SETTLEMENT_CHECKS if "payment_settlement" in published else ()) + (
-        CLICKSTREAM_CHECKS if "clickstream" in published else ())
+        CLICKSTREAM_CHECKS if "clickstream" in published else ()) + (WINDOW_CHECK,)
     return results + [_run_check(conn, cfg, c, run_ids[-1], {"browse": browse}) for c in checks]
+
+
+def _load_windows(conn: psycopg.Connection, cfg: Config, run_ids: list[str]) -> None:
+    """pg_temp.feed_windows: each run's time window, from its recorded world and clock columns."""
+    clock = "previous_as_of, as_of" if db.has_column(conn, cfg, "generation_runs", "as_of") else "NULL, NULL"
+    conn.execute(db.q(cfg, "INSERT INTO pg_temp.feed_windows (run_id, clock_start, window_start, window_end)"
+                           " SELECT run_id, (resume_fields->'world'->>'clock_start')::timestamptz, w.previous,"
+                           " coalesce(w.as_of, (resume_fields->'world'->>'clock_end')::timestamptz)"
+                           f" FROM {{meta}}.generation_runs, LATERAL (SELECT {clock}) AS w (previous, as_of)"
+                           " WHERE run_id = ANY(%s)"), (run_ids,))
 
 
 def _load_run_files(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path, broken: list[str],
@@ -310,12 +342,12 @@ def _load_run_files(conn: psycopg.Connection, cfg: Config, run_id: str, root: Pa
                     if feed == "payment_settlement":
                         copy.write_row(tuple(r[k] for k in ("settlement_id", "payment_id", "order_id", "currency",
                                                             "gross_amount", "fee_amount", "net_amount",
-                                                            "settled_at")))
+                                                            "settled_at")) + (run_id,))
                     else:
                         payload = r.get("payload")
                         order_id = payload.get("order_id") if isinstance(payload, dict) else None
                         copy.write_row((r["event_id"], r["event_type"], r["customer_id"], r["product_id"],
-                                        order_id))
+                                        order_id, r.get("event_time"), run_id))
         except (ValueError, KeyError, TypeError, AttributeError, csv.Error, psycopg.DataError) as e:
             broken.append(f"{rel}: unparseable record {n} ({type(e).__name__})")
             continue

@@ -1,7 +1,7 @@
 # Tasks
 
 ## Active
-- [ ] Phase 3B files per step (branch `feat/step-files`, approved 2026-10-18)
+- [ ] Phase 3B files per step (branch `feat/step-files`, approved 2026-10-18): reviewed (8 fixed, 2 deferred: per-step session scan → DATA_VERSION 3 decision), 301 passed with DB; awaiting push approval
 - [ ] Phase 3C outbox events · 3D warehouses + inventory · 3E catch-up / `--follow` pacing
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 
