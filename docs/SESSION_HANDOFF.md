@@ -3,7 +3,9 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-18
-**Branch:** `docs/generator-user-guide` (from `main` `fe6d478`): `docs/GENERATOR_USER_GUIDE.md` + README link.
+**Branch:** `feat/advance-clock` (from `main` `35e7278` = PR #20 user guide merged). Phase 3A of the approved
+Phase 3 plan (3A advance → 3B files per step → 3C outbox → 3D inventory → 3E catch-up/pacing; decision: as-of clock
+inside the config's clock_start..clock_end, so stepping to the end == generate and DATA_VERSION/goldens stay).
 **Practice dataset (Ubuntu, user-created 2026-10-18):** role `ecomgen_practice` (no privileges) owns `ecommerce_oltp`
 (CONNECT revoked from PUBLIC); config/env in `/srv/homelab/ecommerce/practice/` (`practice-10k.yaml` = example
 config, `practice.env` mode 600); files in `/srv/homelab/ecommerce/data/practice`; run
@@ -190,6 +192,37 @@ SQL without `!` (e.g. `NOT LIKE 'pg\_%'`).
 - Replay timing/duplicates depend on the run id: compared with the local plan, not across machines.
 - Not yet: Parquet snapshots, supplier/courier feeds, age-based retention, profiles above 10k, `workers: 2`.
 
+## This task: 3A `advance` (`docs/GENERATOR_USER_GUIDE.md` "Clock steps")
+- `generate.py`: `World.order(n, as_of)` (state as of a time; same draws), `placed_at`, `orders_by(t)` (binary
+  search; placed_at never decreases), `LIFECYCLE_MAX` (800,760 s: after placed + it an order is final),
+  `check_step`, `step_orders` (orders placed after previous - LIFECYCLE_MAX .. by as_of), `step_chunk` (inserts for
+  new orders/attempts, (before, after) pairs for changed orders/payments).
+- `load.py`: `advance` (run lock: refuses a schema set with a generate run, unrecorded rows, a non-COMPLETED last
+  step, another world/data_version/schema, backwards or out-of-window clock, feeds on; same as_of → None),
+  `write_step` (first step: master chunks; then step chunks: COPY inserts + `_update` via unnest with the
+  before-values in WHERE; rowcount mismatch → LoadError, chunk rolled back), ledger keys `<table>_updated`;
+  `resume` and `status` know steps (`_clock_columns`, NULL before 0008); `_complete` returns every ledger key.
+- Migration 0008: `as_of`, `previous_as_of`, UNIQUE both, FK previous → as_of, as_of > previous, one first step.
+- validate: ledger_matches_tables sums every run in the schema set. CLI `advance CONFIG --to ISO|end` (exit 0/1/2).
+- Tests: `tests/test_clock.py` (9: any steps == generate, state == world as of T, LIFECYCLE_MAX bound),
+  `tests/integration/test_advance.py` (9: steps == generate, refusals, tampered row, real SIGKILL mid-step →
+  resume, chain constraints, CLI). Suite 275 passed with DB, 140/135 without; mypy clean (31 files).
+- Mac 10k: 4 steps to the end = generate table-for-table, ~1 s per step, validate 12/12.
+
+## 3A review (`/code-review high`) — all 9 fixed
+| # | Finding | Fix |
+|---|---|---|
+| 1 | **Bug:** resume of a step failed under a non-UTC session TimeZone (as_of read back in that zone, check_step refused) | as_of/previous normalized to UTC where read (resume, status, chain); test with `SET TimeZone 'America/Chicago'` (fails without the fix) |
+| 2 | **Bug:** naive / non-UTC `to` compared before validation (TypeError, odd results) | advance refuses naive, converts any offset to UTC, checks the window first; tests |
+| 3 | Re-running an earlier step's `--to` failed (not idempotent) | as_of equal to any recorded step → no-op; test repeats the whole list |
+| 4 | "one generate run or one chain" only in Python | 0008: unique index on `previous_as_of IS NULL` (one origin run); tests |
+| 5 | Revisited orders generated twice | `World.order_at(n, ends)`: one generation, timeline cut at several times |
+| 6 | Step range recomputed per chunk | `StepPlan` from `plan_step`, computed once per step |
+| 7 | status label overstated "changed" | label says every order written or re-checked |
+| 8 | Duplicate must-match lists / regclass formatting | `CHAIN_MUST_MATCH` + `_mismatch`; `db._meta_regclass` |
+| 9 | `ENTITY_ORDER[:-1]` as "master data" | `generate.MASTER_ENTITIES` |
+
+Suite after fixes: 276 passed with DB, 141 passed / 135 skipped without; mypy clean.
+
 ## Next step
-Merge the guide PR (ask). Phase 3 (simulation clock: incremental orders + state changes, outbox, inventory, replay
-by date, catch-up) is planned in chat; implementation only after the user approves the plan.
+Push `feat/advance-clock` + PR (ask) → CI → merge (ask) → 3B (files per step).

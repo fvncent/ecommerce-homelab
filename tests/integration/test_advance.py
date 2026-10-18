@@ -6,7 +6,7 @@ import signal
 import subprocess
 import sys
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import psycopg
@@ -31,10 +31,10 @@ import os, signal, sys, psycopg
 from datetime import datetime
 from ecomgen import config, generate, load
 real = generate.step_chunk
-def crash(world, previous, as_of, chunk_no, chunk_rows):
+def crash(world, plan, chunk_no, chunk_rows):
     if chunk_no == 1:
         os.kill(os.getpid(), signal.SIGKILL)
-    return real(world, previous, as_of, chunk_no, chunk_rows)
+    return real(world, plan, chunk_no, chunk_rows)
 generate.step_chunk = crash
 with psycopg.connect(sys.argv[2], autocommit=True) as conn:
     load.advance(conn, config.load(sys.argv[1]), datetime.fromisoformat(sys.argv[3]))
@@ -94,6 +94,9 @@ def test_steps_to_the_end_equal_generate(migrated: Migrated, small_cfg: config.C
     assert digest(c) == expected
     assert updated > 0 or len(stops) == 1
     assert load.advance(c, small_cfg, END) is None  # already there: idempotent
+    for as_of in stops:  # repeating the whole list of steps is a no-op too
+        assert load.advance(c, small_cfg, as_of) is None
+    assert digest(c) == expected
 
 
 def test_each_step_holds_the_world_as_of_its_time_and_is_recorded(migrated: Migrated, small_cfg: config.Config) -> None:
@@ -131,6 +134,12 @@ def test_refusals(migrated: Migrated, small_cfg: config.Config, tmp_path: Path,
     assert load.advance(c, small_cfg, days(5)[0]) is not None
     with pytest.raises(load.LoadError, match="only moves forward"):
         load.advance(c, small_cfg, days(4)[0])
+    with pytest.raises(load.LoadError, match="no time zone"):
+        load.advance(c, small_cfg, datetime(2026, 1, 9))
+    tokyo = timezone(timedelta(hours=9))
+    assert load.advance(c, small_cfg, datetime(2026, 1, 6, 9, tzinfo=tokyo)) is None  # = day 5 00:00 UTC
+    r = load.advance(c, small_cfg, datetime(2026, 1, 7, 9, tzinfo=tokyo))  # any offset, stored as UTC
+    assert r is not None and r.as_of == days(6)[0] and r.as_of.utcoffset() == timedelta(0)
     with pytest.raises(load.LoadError, match="already holds run"):
         load.run(c, small_cfg)
     with pytest.raises(generate.GenerationError, match="outside"):
@@ -175,6 +184,7 @@ def test_a_row_changed_outside_the_generator_stops_the_step(migrated: Migrated, 
 def test_resume_after_sigkill_mid_step(migrated: Migrated, db_url: str, cfg_path: Path, small_cfg: config.Config,
                                        digest: Digest, expected: dict[str, str]) -> None:
     c = migrated(small_cfg, db_url)
+    c.execute("SET TimeZone = 'America/Chicago'")  # psycopg then returns timestamptz in Chicago time
     load.advance(c, small_cfg, days(8)[0])
     proc = subprocess.run([sys.executable, "-c", CRASH, str(cfg_path), db_url, END.isoformat()],
                           capture_output=True, timeout=120)
@@ -187,18 +197,28 @@ def test_resume_after_sigkill_mid_step(migrated: Migrated, db_url: str, cfg_path
         load.advance(c, small_cfg, END)
     r = load.resume(c, small_cfg)
     assert r is not None and r.chunks_skipped == 1 and r.as_of == END and r.previous_as_of == days(8)[0]
-    assert digest(c) == expected and ok(c, small_cfg) == []
+    assert ok(c, small_cfg) == []
+    c.execute("RESET TimeZone")  # the digest renders timestamps as text in the session time zone
+    assert digest(c) == expected
     assert load.resume(c, small_cfg) is None
 
 
 def test_chain_shape_is_enforced_by_the_schema(migrated: Migrated, small_cfg: config.Config) -> None:
     c = migrated(small_cfg)
+    one_shot = migrated(small_cfg)
+    load.run(one_shot, small_cfg)
+    with pytest.raises(psycopg.errors.UniqueViolation):  # a second generate run, or a first step next to one
+        with one_shot.transaction():
+            one_shot.execute("INSERT INTO generator_meta.generation_runs (run_id, generator_version, seed,"
+                             " config_sha256, profile, state, finished_at, as_of) VALUES ('run_x', 'x', 1,"
+                             " repeat('0', 64), 'mvp', 'COMPLETED', now(), %s)", (days(3)[0],))
     load.advance(c, small_cfg, days(2)[0])
     load.advance(c, small_cfg, days(4)[0])
     insert = ("INSERT INTO generator_meta.generation_runs (run_id, generator_version, seed, config_sha256, profile,"
               " state, finished_at, previous_as_of, as_of) VALUES (%s, 'x', 1, repeat('0', 64), 'mvp', 'COMPLETED',"
               " now(), %s, %s)")
     for previous, as_of in ((None, days(9)[0]),           # a second first step
+                            (None, None),                 # a generate run next to the chain
                             (days(2)[0], days(9)[0]),     # a fork from an earlier step
                             (days(7)[0], days(9)[0]),     # from a time no step reached
                             (days(4)[0], days(3)[0]),     # backwards

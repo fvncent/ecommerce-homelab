@@ -146,8 +146,9 @@ uv run ecomgen validate /srv/homelab/ecommerce/practice/stepped-10k.yaml
 ```
 
 Each step prints `step run_… COMPLETED: clock <previous> -> <as_of>`, the rows inserted and the rows updated.
-`--to` needs a time zone (`Z` for UTC) or `end`. Repeating a step that is already done prints "already at" and
-changes nothing. A step killed midway stays RUNNING; `advance` then refuses until `ecomgen resume CONFIG` finishes
+`--to` needs a time zone (`Z` for UTC; other offsets are converted) or `end`. Repeating a step that is already
+done, the latest or an earlier one, prints "a completed step already reached …" and changes nothing, so the whole
+list of commands can be re-run safely. A step killed midway stays RUNNING; `advance` then refuses until `ecomgen resume CONFIG` finishes
 it. If a row was changed by hand in between, the step stops ("not as the previous step left them") without
 writing that chunk. The steps of a chain:
 

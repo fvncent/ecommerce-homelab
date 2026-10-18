@@ -28,8 +28,9 @@ def apply_steps(world: g.World, stops: list[datetime], chunk_rows: int = 37,
     state = state if state is not None else {t: {} for t in KEYS}
     previous = None
     for as_of in stops:
-        for c in range(g.step_chunk_count(world, previous, as_of, chunk_rows)):
-            chunk = g.step_chunk(world, previous, as_of, c, chunk_rows)
+        plan = g.plan_step(world, previous, as_of)
+        for c in range(g.step_chunk_count(plan, chunk_rows)):
+            chunk = g.step_chunk(world, plan, c, chunk_rows)
             for table, rs in chunk.inserts.items():
                 for r in rs:
                     key = getattr(r, KEYS[table])
@@ -93,10 +94,11 @@ def test_order_as_of_clock_end_is_the_default_and_unplaced_orders_are_refused() 
 
 def test_a_step_revisits_only_orders_that_can_still_change() -> None:
     previous, as_of = START + timedelta(days=12), END
-    ns = g.step_orders(WORLD, previous, as_of)
-    assert ns.start == WORLD.orders_by(previous - g.LIFECYCLE_MAX) + 1 > 1
-    assert ns.stop - 1 == WORLD.orders == WORLD.orders_by(as_of)
-    assert g.step_orders(WORLD, None, as_of) == range(1, WORLD.orders + 1)
+    plan = g.plan_step(WORLD, previous, as_of)
+    assert plan.orders.start == WORLD.orders_by(previous - g.LIFECYCLE_MAX) + 1 > 1
+    assert plan.orders.stop - 1 == WORLD.orders == WORLD.orders_by(as_of)
+    assert plan.known == WORLD.orders_by(previous) < WORLD.orders
+    assert g.plan_step(WORLD, None, as_of).orders == range(1, WORLD.orders + 1)
 
 
 @pytest.mark.parametrize("previous, as_of, match", [
@@ -112,6 +114,13 @@ def test_step_bounds(previous: datetime | None, as_of: datetime, match: str) -> 
 
 
 def test_empty_step_has_no_chunks() -> None:
-    assert g.step_chunk_count(WORLD, None, START, 10) == 0
+    plan = g.plan_step(WORLD, None, START)
+    assert g.step_chunk_count(plan, 10) == 0
     with pytest.raises(g.GenerationError, match="out of range"):
-        g.step_chunk(WORLD, None, START, 0, 10)
+        g.step_chunk(WORLD, plan, 0, 10)
+
+
+def test_order_at_several_times_equals_each_alone() -> None:
+    times = (START + timedelta(days=4), START + timedelta(days=6), END)
+    for n in (1, 60, WORLD.orders_by(times[0])):
+        assert WORLD.order_at(n, times) == [WORLD.order(n, t) for t in times]

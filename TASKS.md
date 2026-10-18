@@ -1,7 +1,8 @@
 # Tasks
 
 ## Active
-- [ ] Phase 3 planning (simulation clock); awaiting plan approval before implementation
+- [ ] Phase 3A `advance` (branch `feat/advance-clock`): clock steps with inserts + guarded in-place updates, migration 0008, resume of a crashed step; reviewed (9 findings fixed), 276 passed with DB; awaiting push/PR approval
+- [ ] Phase 3B files per step · 3C outbox events · 3D warehouses + inventory · 3E catch-up / `--follow` pacing (plan approved 2026-10-18)
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 
 ## Next (Phase 1)
@@ -14,6 +15,7 @@
 - Clearer error when `metadata_schema` is renamed after apply (currently fails loudly with DuplicateTable)
 
 ## Done
+- [x] PR #20 (generator user guide) merged; `main` `35e7278` (2026-10-18)
 - [x] Operator walkthrough on Ubuntu (2026-10-18): `ecomgen_practice` + `ecommerce_oltp` created by the user; run `run_20261018T135727Z_72e31d` (10k) COMPLETED, validate 19/19; `docs/GENERATOR_USER_GUIDE.md`
 - [x] PR #19 (Ubuntu v0.2.0 results) merged; `main` `fe6d478` CI green (2026-10-18)
 - [x] Ubuntu Phase 2 release verification (2026-10-18): `v0.2.0-homelab` (`de90a6a`) on host PG 18.6; 3 DBs recreated by the user after inventory; benchmark 49/49 PASS, exit 0; files/rows identical to macOS references; snapshot diff = only the 3 DBs' sizes/counters; replay cleanup dry run (`docs/BENCHMARKS.md`)

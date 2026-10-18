@@ -95,17 +95,21 @@ def q(cfg: Config, query: str) -> sql.Composed:
                                  meta=sql.Identifier(cfg.postgres.metadata_schema))
 
 
+def _meta_regclass(conn: psycopg.Connection, cfg: Config, table: str) -> str:
+    """Quoted `<metadata schema>.<table>` for to_regclass (both quoted, so any configured schema name works)."""
+    return sql.SQL("{}.{}").format(sql.Identifier(cfg.postgres.metadata_schema), sql.Identifier(table)).as_string(conn)
+
+
 def has_table(conn: psycopg.Connection, cfg: Config, table: str) -> bool:
-    """True if the metadata schema has this table (both names quoted, so any configured schema name works)."""
-    name = sql.SQL("{}.{}").format(sql.Identifier(cfg.postgres.metadata_schema), sql.Identifier(table)).as_string(conn)
-    return conn.execute("SELECT to_regclass(%s) IS NOT NULL", (name,)).fetchone() == (True,)
+    """True if the metadata schema has this table."""
+    return conn.execute("SELECT to_regclass(%s) IS NOT NULL", (_meta_regclass(conn, cfg, table),)).fetchone() == (True,)
 
 
 def has_column(conn: psycopg.Connection, cfg: Config, table: str, column: str) -> bool:
     """True if the metadata schema's table has this column (e.g. one added by a later migration)."""
-    name = sql.SQL("{}.{}").format(sql.Identifier(cfg.postgres.metadata_schema), sql.Identifier(table)).as_string(conn)
     return conn.execute("SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass(%s)"
-                        " AND attname = %s AND NOT attisdropped)", (name, column)).fetchone() == (True,)
+                        " AND attname = %s AND NOT attisdropped)",
+                        (_meta_regclass(conn, cfg, table), column)).fetchone() == (True,)
 
 
 def has_ledger(conn: psycopg.Connection, cfg: Config) -> bool:

@@ -82,6 +82,8 @@ def _write(cur: psycopg.Cursor[tuple[object, ...]], cfg: Config, table: str,
 # run recorded (so config edits to seed/clock/counts can't change it) and requires the rest to match, including
 # where and how its files are published (a different root or layout would publish a second, different set).
 RESUME_MUST_MATCH = ("data_version", "chunk_rows", "application_schema", "data_root", "feeds")
+# Every step of a chain must generate the same world into the same schema (chunk_rows may differ per step).
+CHAIN_MUST_MATCH = ("data_version", "world", "application_schema")
 
 
 def resume_fields(cfg: Config, world: generate.World) -> dict[str, object]:
@@ -199,14 +201,15 @@ def write_step(conn: psycopg.Connection, cfg: Config, run_id: str, world: genera
     """Write a clock step's chunks not yet in the ledger: master data in the first step, then the orders placed or
     changed in (previous, as_of]. Return (written, skipped)."""
     written, skipped = (0, 0) if previous is not None else write_chunks(conn, cfg, run_id, world,
-                                                                        generate.ENTITY_ORDER[:-1])
+                                                                        generate.MASTER_ENTITIES)
     chunk_rows = cfg.generator.chunk_rows
+    plan = generate.plan_step(world, previous, as_of)
     done = _done(conn, cfg, run_id)
-    for chunk_no in range(generate.step_chunk_count(world, previous, as_of, chunk_rows)):
+    for chunk_no in range(generate.step_chunk_count(plan, chunk_rows)):
         if ("orders", chunk_no) in done:
             skipped += 1
             continue
-        chunk = generate.step_chunk(world, previous, as_of, chunk_no, chunk_rows)
+        chunk = generate.step_chunk(world, plan, chunk_no, chunk_rows)
         with conn.transaction(), conn.cursor() as cur:
             for table, rows in chunk.inserts.items():  # orders before their items and payments
                 if rows:
@@ -257,7 +260,10 @@ def advance(conn: psycopg.Connection, cfg: Config, to: datetime | None = None) -
         raise LoadError("advance writes database rows only (files per step are not implemented yet): use a config "
                         "with filesystem.csv and filesystem.jsonl set to false")
     world = generate.World.from_config(cfg)
-    as_of = world.clock_end if to is None else to
+    if to is not None and to.utcoffset() is None:
+        raise LoadError(f"as_of {to.isoformat()} has no time zone")
+    as_of = world.clock_end if to is None else to.astimezone(UTC)
+    generate.check_step(world, None, as_of)  # in the window; before any comparison with the chain
     with _run_lock(conn):
         started = _start_step(conn, cfg, world, as_of)
         if started is None:
@@ -268,7 +274,8 @@ def advance(conn: psycopg.Connection, cfg: Config, to: datetime | None = None) -
 
 def _start_step(conn: psycopg.Connection, cfg: Config, world: generate.World,
                 as_of: datetime) -> tuple[str, datetime | None] | None:
-    """Under the run lock: check the chain and record the new step. None if the clock is already at as_of."""
+    """Under the run lock: check the chain and record the new step. None if a COMPLETED step already reached as_of
+    (the latest or an earlier one: repeating a list of steps is a no-op)."""
     with conn.transaction():
         one_shot = conn.execute(db.q(cfg, "SELECT run_id FROM {meta}.generation_runs WHERE as_of IS NULL"
                                           " ORDER BY started_at LIMIT 1")).fetchone()
@@ -283,21 +290,23 @@ def _start_step(conn: psycopg.Connection, cfg: Config, world: generate.World,
                 raise LoadError("source tables already hold rows that no run recorded; clock steps need an empty "
                                 "schema set")
         else:
-            last_id, state, previous, recorded = last
+            last_id, state, last_as_of, recorded = last
+            previous = last_as_of.astimezone(UTC)  # psycopg returns the session's time zone
             if state != "COMPLETED":
                 raise LoadError(f"step {last_id} is {state}: finish it with `ecomgen resume` first")
-            current = resume_fields(cfg, world)
-            differs = [k for k in ("data_version", "world", "application_schema") if recorded.get(k) != current[k]]
+            differs = _mismatch(recorded, resume_fields(cfg, world), CHAIN_MUST_MATCH)
             if differs:
                 raise LoadError(f"{', '.join(differs)} differ from the chain's (step {last_id}): every step must use "
                                 "the chain's config; for another dataset use new schema names")
-            if as_of == previous:
-                return None
-            if as_of < previous:
-                raise LoadError(f"the clock is at {previous.isoformat()} (step {last_id}); it only moves forward")
-        generate.check_step(world, previous, as_of)
-        planned = {} if previous is not None else {e: world.count(e) for e in generate.ENTITY_ORDER[:-1]}
-        orders = len(generate.step_orders(world, previous, as_of))
+            if as_of <= previous:
+                reached = conn.execute(db.q(cfg, "SELECT 1 FROM {meta}.generation_runs WHERE as_of = %s"),
+                                       (as_of,)).fetchone()
+                if reached:
+                    return None
+                raise LoadError(f"the clock is at {previous.isoformat()} (step {last_id}); it only moves forward, "
+                                f"and no step stopped at {as_of.isoformat()}")
+        planned = {} if previous is not None else {e: world.count(e) for e in generate.MASTER_ENTITIES}
+        orders = len(generate.plan_step(world, previous, as_of).orders)
         if orders:
             planned["orders"] = orders
         return _insert_run(conn, cfg, cfg.generator.profile, world, planned, (previous, as_of)), previous
@@ -313,6 +322,7 @@ def resume(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -> 
                                      " FROM {meta}.generation_runs WHERE run_id = %s"), (run_id,)).fetchone()
         assert row is not None
         state, recorded, previous_as_of, as_of = row
+        previous_as_of, as_of = _utc(previous_as_of), _utc(as_of)  # psycopg returns the session's time zone
         if state == "COMPLETED":
             return None
         differs = _resume_mismatch(recorded, cfg)
@@ -326,6 +336,10 @@ def resume(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -> 
         conn.execute(db.q(cfg, "UPDATE {meta}.generation_runs SET state = 'RUNNING', finished_at = NULL"
                                " WHERE run_id = %s"), (run_id,))
         return _execute(conn, cfg, run_id, world, None if as_of is None else (previous_as_of, as_of))
+
+
+def _utc(t: datetime | None) -> datetime | None:
+    return None if t is None else t.astimezone(UTC)
 
 
 def _clock_columns(conn: psycopg.Connection, cfg: Config) -> str:
@@ -368,7 +382,7 @@ def status(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -> 
                 if as_of is None or e in planned or e in done}  # a step plans only what it writes
     holder = holder or _lock_holder(conn)
     return RunStatus(run_id, state, profile, version, mismatch, started_at, finished_at, error, progress, holder,
-                     previous_as_of, as_of)
+                     _utc(previous_as_of), _utc(as_of))
 
 
 def _resume_mismatch(recorded: dict[str, object] | None, cfg: Config) -> list[str]:
@@ -379,7 +393,11 @@ def _resume_mismatch(recorded: dict[str, object] | None, cfg: Config) -> list[st
         current = resume_fields(cfg, generate.World.from_config(cfg))
     except config.ConfigError as e:  # e.g. an invalid ECOMGEN_DATA_ROOT: report it, don't crash status
         return [f"data_root ({e})"]
-    return [k for k in RESUME_MUST_MATCH if recorded.get(k) != current[k]]
+    return _mismatch(recorded, current, RESUME_MUST_MATCH)
+
+
+def _mismatch(recorded: dict[str, object], current: dict[str, object], keys: Sequence[str]) -> list[str]:
+    return [k for k in keys if recorded.get(k) != current[k]]
 
 
 def _lock_holder(conn: psycopg.Connection) -> int | None:

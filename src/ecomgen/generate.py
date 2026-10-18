@@ -29,6 +29,7 @@ from typing import NamedTuple, TypeVar
 from ecomgen.config import Config
 
 ENTITY_ORDER = ("sellers", "categories", "customers", "products", "orders")
+MASTER_ENTITIES = tuple(e for e in ENTITY_ORDER if e != "orders")  # static: all created before clock_start
 MAX_LINES = 5
 MAX_ATTEMPTS = 3
 # Bump whenever generated rows or files change for the same inputs (the golden tests are keyed by it): resume
@@ -300,14 +301,18 @@ class World:
 
     def order(self, n: int, as_of: datetime | None = None) -> tuple[Order, list[OrderItem], list[PaymentAttempt]]:
         """Order N, its items and its payment attempts as of `as_of` (default clock_end)."""
+        return self.order_at(n, (self.clock_end if as_of is None else as_of,))[0]
+
+    def order_at(self, n: int, ends: tuple[datetime, ...]) -> list[tuple[Order, list[OrderItem], list[PaymentAttempt]]]:
+        """Order N as of each time in ends: generated once, its timeline cut at each end."""
         if not 1 <= n <= self.orders:
             raise GenerationError(f"order {n} out of range 1..{self.orders}")
         rng = _rng(self.seed, "orders", n)
         oid = f"ord_{n}"
         placed = self._placed(rng, n)
-        end = self.clock_end if as_of is None else as_of
-        if placed > end:
-            raise GenerationError(f"order {n} is placed at {placed.isoformat()}, after {end.isoformat()}")
+        for end in ends:
+            if placed > end:
+                raise GenerationError(f"order {n} is placed at {placed.isoformat()}, after {end.isoformat()}")
 
         found = _probe(rng, self.customers, self.customer, lambda c: c.status == "ACTIVE", set())
         if found is None:
@@ -339,16 +344,16 @@ class World:
         shipping = Decimal("0.00") if subtotal - discount >= FREE_SHIPPING_FROM else SHIPPING_FEE
         total = subtotal - discount + tax + shipping
 
-        status, updated, payments = self._lifecycle(rng, n, placed, total, end)
-        order = Order(oid, customer.customer_id, placed, status, CURRENCY, subtotal, discount, tax, shipping,
-                      total, updated)
-        return order, items, payments
+        timeline = self._lifecycle(rng, placed)
+        out = []
+        for end in ends:
+            status, updated, payments = timeline.state_at(end, n, total)
+            out.append((Order(oid, customer.customer_id, placed, status, CURRENCY, subtotal, discount, tax, shipping,
+                              total, updated), items, payments))
+        return out
 
-    def _lifecycle(
-        self, rng: random.Random, n: int, placed: datetime, total: Decimal, end: datetime
-    ) -> tuple[str, datetime, list[PaymentAttempt]]:
-        """Simulate the whole order + payment timeline (every draw, always) and report the state as of end."""
-        oid = f"ord_{n}"
+    def _lifecycle(self, rng: random.Random, placed: datetime) -> "_Timeline":
+        """Simulate the whole order + payment timeline (every draw, always); cut it at any time with state_at."""
         method = _pick(rng, (("CARD", 70), ("PAYPAL", 15), ("WALLET", 10), ("BANK_TRANSFER", 5)))
         provider = _choice(rng, PROVIDERS)
         path = _pick(rng, (("fulfil", 95), ("payment_failed", 2), ("customer_cancel", 3)))
@@ -383,14 +388,25 @@ class World:
                 attempts.append((t, [("INITIATED", t), ("AUTHORIZED", auth), ("CAPTURED", shipped),
                                      ("SETTLED", settled)]))
 
-        status, updated = [s for s in stages if s[1] <= end][-1]  # CREATED at placed <= end always holds
+        return _Timeline(method, provider, stages, attempts)
+
+
+@dataclass(frozen=True)
+class _Timeline:
+    method: str
+    provider: str
+    stages: list[tuple[str, datetime]]  # order status changes, in time order
+    attempts: list[tuple[datetime, list[tuple[str, datetime]]]]  # (created_at, [(state, at), ...]) in time order
+
+    def state_at(self, end: datetime, n: int, total: Decimal) -> tuple[str, datetime, list[PaymentAttempt]]:
+        status, updated = [s for s in self.stages if s[1] <= end][-1]  # CREATED at placed <= end always holds
         payments = []
-        for attempt_no, (created, states) in enumerate(attempts, 1):
+        for attempt_no, (created, states) in enumerate(self.attempts, 1):
             if created > end:
                 break
             state, at = [s for s in states if s[1] <= end][-1]
-            payments.append(PaymentAttempt(f"pay_{(n - 1) * MAX_ATTEMPTS + attempt_no}", oid, attempt_no, provider,
-                                           method, state, total, CURRENCY, created, at))
+            payments.append(PaymentAttempt(f"pay_{(n - 1) * MAX_ATTEMPTS + attempt_no}", f"ord_{n}", attempt_no,
+                                           self.provider, self.method, state, total, CURRENCY, created, at))
         return status, updated, payments
 
 
@@ -484,10 +500,21 @@ def check_step(world: World, previous: datetime | None, as_of: datetime) -> None
         raise GenerationError(f"as_of {as_of.isoformat()} is not after the previous step ({previous.isoformat()})")
 
 
-def step_orders(world: World, previous: datetime | None, as_of: datetime) -> range:
-    """Order numbers a step writes or revisits: the ones placed by as_of that may differ from `previous`."""
+@dataclass(frozen=True)
+class StepPlan:
+    """A step (previous, as_of] and the orders it writes or revisits: the ones placed by as_of that may differ from
+    previous (placed after previous - LIFECYCLE_MAX). Orders 1..known existed at previous."""
+    previous: datetime | None
+    as_of: datetime
+    orders: range
+    known: int
+
+
+def plan_step(world: World, previous: datetime | None, as_of: datetime) -> StepPlan:
+    check_step(world, previous, as_of)
     first = 1 if previous is None else world.orders_by(previous - LIFECYCLE_MAX) + 1
-    return range(first, world.orders_by(as_of) + 1)
+    known = 0 if previous is None else world.orders_by(previous)
+    return StepPlan(previous, as_of, range(first, world.orders_by(as_of) + 1), known)
 
 
 @dataclass(frozen=True)
@@ -500,34 +527,31 @@ class StepChunk:
     payment_updates: list[tuple[PaymentAttempt, PaymentAttempt]]  # likewise for state/updated_at
 
 
-def step_chunk_count(world: World, previous: datetime | None, as_of: datetime, chunk_rows: int) -> int:
+def step_chunk_count(plan: StepPlan, chunk_rows: int) -> int:
     if chunk_rows < 1:
         raise GenerationError(f"chunk_rows must be >= 1, got {chunk_rows}")
-    return -(-len(step_orders(world, previous, as_of)) // chunk_rows)
+    return -(-len(plan.orders) // chunk_rows)
 
 
-def step_chunk(world: World, previous: datetime | None, as_of: datetime, chunk_no: int,
-               chunk_rows: int) -> StepChunk:
-    """The changes from `previous` (None: nothing yet) to `as_of` for one chunk of step_orders. Orders placed after
-    previous are new; earlier ones are diffed against their state at previous. Items never change."""
-    check_step(world, previous, as_of)
-    ns = step_orders(world, previous, as_of)
-    if not 0 <= chunk_no < step_chunk_count(world, previous, as_of, chunk_rows):
-        raise GenerationError(f"step chunk {chunk_no} out of range for {len(ns)} orders / {chunk_rows} per chunk")
-    sub = ns[chunk_no * chunk_rows:(chunk_no + 1) * chunk_rows]
-    known = 0 if previous is None else world.orders_by(previous)
+def step_chunk(world: World, plan: StepPlan, chunk_no: int, chunk_rows: int) -> StepChunk:
+    """The changes from plan.previous (None: nothing yet) to plan.as_of for one chunk of plan.orders. Orders placed
+    after previous are new; earlier ones are diffed against their state at previous. Items never change."""
+    if not 0 <= chunk_no < step_chunk_count(plan, chunk_rows):
+        raise GenerationError(f"step chunk {chunk_no} out of range for {len(plan.orders)} orders / {chunk_rows} "
+                              "per chunk")
+    sub = plan.orders[chunk_no * chunk_rows:(chunk_no + 1) * chunk_rows]
     inserts: dict[str, list[tuple[object, ...]]] = {"orders": [], "order_items": [], "payment_attempts": []}
     order_updates: list[tuple[Order, Order]] = []
     payment_updates: list[tuple[PaymentAttempt, PaymentAttempt]] = []
     for n in sub:
-        order, items, payments = world.order(n, as_of)
-        if n > known:
+        if n > plan.known:
+            order, items, payments = world.order(n, plan.as_of)
             inserts["orders"].append(order)
             inserts["order_items"].extend(items)
             inserts["payment_attempts"].extend(payments)
             continue
-        assert previous is not None
-        before, _, earlier = world.order(n, previous)
+        assert plan.previous is not None
+        (before, _, earlier), (order, _, payments) = world.order_at(n, (plan.previous, plan.as_of))
         if (before.status, before.updated_at) != (order.status, order.updated_at):
             order_updates.append((before, order))
         old = {p.attempt_no: p for p in earlier}

@@ -119,7 +119,7 @@ def advance_cmd(path: str, to: str) -> int:
         print(f"database error: {type(e).__name__}: {e}".rstrip(), file=sys.stderr)
         return 1
     if result is None:
-        print(f"the clock is already at {to}; nothing to do")
+        print(f"a completed step already reached {to}; nothing to do")
         return 0
     _print_step(result, f"{result.chunks_written} chunks in {time.perf_counter() - started:.1f}s")
     return 0
@@ -185,7 +185,8 @@ def status_cmd(path: str, run_id: str | None) -> int:
     print(f"run {st.run_id}: {st.state} (profile {st.profile}, generator {st.generator_version})")
     if st.as_of is not None:
         start = st.previous_as_of.isoformat() if st.previous_as_of else "start"
-        print(f"  clock step: {start} -> {st.as_of.isoformat()} (orders = placed or changed in this step)")
+        print(f"  clock step: {start} -> {st.as_of.isoformat()} (orders = every order this step wrote or re-checked:"
+              " placed by then, or possibly still changing at the previous step)")
     print(f"  started {st.started_at.isoformat()}" + (f", finished {st.finished_at.isoformat()}" if st.finished_at else ""))
     print("  progress: " + ", ".join(f"{e} {d}/{p}" for e, (d, p) in st.progress.items()))
     if st.error:
