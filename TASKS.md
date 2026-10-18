@@ -1,7 +1,7 @@
 # Tasks
 
 ## Active
-- [ ] Phase 3: not started; waits for the user's go-ahead (Phase 2 Ubuntu release benchmark passed 2026-10-18)
+- [ ] Phase 3 planning (simulation clock); awaiting plan approval before implementation
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 
 ## Next (Phase 1)
@@ -14,6 +14,8 @@
 - Clearer error when `metadata_schema` is renamed after apply (currently fails loudly with DuplicateTable)
 
 ## Done
+- [x] Operator walkthrough on Ubuntu (2026-10-18): `ecomgen_practice` + `ecommerce_oltp` created by the user; run `run_20261018T135727Z_72e31d` (10k) COMPLETED, validate 19/19; `docs/GENERATOR_USER_GUIDE.md`
+- [x] PR #19 (Ubuntu v0.2.0 results) merged; `main` `fe6d478` CI green (2026-10-18)
 - [x] Ubuntu Phase 2 release verification (2026-10-18): `v0.2.0-homelab` (`de90a6a`) on host PG 18.6; 3 DBs recreated by the user after inventory; benchmark 49/49 PASS, exit 0; files/rows identical to macOS references; snapshot diff = only the 3 DBs' sizes/counters; replay cleanup dry run (`docs/BENCHMARKS.md`)
 - [x] Tag `v0.2.0-homelab` -> `de90a6a` (user-approved); `v0.1.1-homelab` kept at `8c581ad` (2026-10-18)
 - [x] PR #18 Phase 2 part 2 C (benchmark with files) merged at reviewed head `959fce9`; `main` `de90a6a` CI green, 251 tests / 0 skipped on PG 17 + 18 (2026-10-18)

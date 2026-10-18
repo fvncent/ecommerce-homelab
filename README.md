@@ -5,6 +5,11 @@
 **Hardware baseline:** Ubuntu Server; AMD Ryzen 5 5600; 16 GB RAM; 1 TB NVMe for project data (`/srv/homelab`); host PostgreSQL 18.  
 **Goal:** Build a reproducible, realistic e-commerce **source-system simulator**, independently build reliable data engineering pipelines, and **later** use their curated outputs for AI engineering (RAG, recommendations, forecasting and model evaluation).
 
+## Using the generator
+
+Step-by-step operator guide (generate a practice dataset on the homelab, open it in psql or DBeaver over an SSH
+tunnel, inspect files, validate, monitor): [docs/GENERATOR_USER_GUIDE.md](docs/GENERATOR_USER_GUIDE.md).
+
 ## Development
 
 Requires [uv](https://docs.astral.sh/uv/) (installs Python 3.12 if missing) and Docker.

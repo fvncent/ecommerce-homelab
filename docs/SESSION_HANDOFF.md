@@ -3,7 +3,11 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-18
-**Branch:** `docs/ubuntu-v0.2.0-benchmark` (from `main` `de90a6a`): records the Ubuntu Phase 2 release run.
+**Branch:** `docs/generator-user-guide` (from `main` `fe6d478`): `docs/GENERATOR_USER_GUIDE.md` + README link.
+**Practice dataset (Ubuntu, user-created 2026-10-18):** role `ecomgen_practice` (no privileges) owns `ecommerce_oltp`
+(CONNECT revoked from PUBLIC); config/env in `/srv/homelab/ecommerce/practice/` (`practice-10k.yaml` = example
+config, `practice.env` mode 600); files in `/srv/homelab/ecommerce/data/practice`; run
+`run_20261018T135727Z_72e31d` COMPLETED, validate 19/19. Read-only `ecomgen_reader` documented, not created.
 **Released:** PR #18 merged at reviewed head `959fce9` → `main` `de90a6a` (CI 251/0 on PG 17 + 18); tag
 `v0.2.0-homelab` → `de90a6a` (user-approved); `v0.1.1-homelab` kept at `8c581ad`.
 **Deployed on Ubuntu:** `v0.2.0-homelab`, verified 2026-10-18: the user dropped/recreated the 3 DBs by hand after a
@@ -187,5 +191,5 @@ SQL without `!` (e.g. `NOT LIKE 'pg\_%'`).
 - Not yet: Parquet snapshots, supplier/courier feeds, age-based retention, profiles above 10k, `workers: 2`.
 
 ## Next step
-Push `docs/ubuntu-v0.2.0-benchmark` and open the results PR (ask first) → merge (ask). Then Phase 3 planning only
-after the user's go-ahead.
+Merge the guide PR (ask). Phase 3 (simulation clock: incremental orders + state changes, outbox, inventory, replay
+by date, catch-up) is planned in chat; implementation only after the user approves the plan.
