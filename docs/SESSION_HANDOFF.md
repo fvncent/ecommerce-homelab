@@ -3,46 +3,43 @@
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
 **Updated:** 2026-10-18
-**Branch:** `feat/file-feeds` (from `main` `d3ff25a`), **PR #15**: CI green (184 passed, 0 skipped on PG 17.11 and 18.6;
-the feed golden test passes on Linux too, so files are byte-identical across platforms).
-**Deployed on Ubuntu:** `v0.1.1-homelab` (`8c581ad`), verified 2026-10-18 (`docs/BENCHMARKS.md`). The new code needs
-`ECOMGEN_DATA_ROOT` there (part 2 updates the benchmark).
+**Branch:** `feat/replay-files` (from `main` `5cf4280` = PR #15 merged, CI green). Phase 2 part 2, PR A of 3.
+**Deployed on Ubuntu:** `v0.1.1-homelab` (`8c581ad`; no files). Keep it until `v0.2.0-homelab` passes there.
+**Approved (2026-10-18):** Part 2 plan (replay → cleanup → benchmark + release); user will recreate the three
+Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleaning a run's originals makes
+`validate` fail with "deleted by cleanup" (plan defaults, accepted with the plan).
 
-## This task: Phase 2 part 1, file feeds (`docs/FEEDS.md`)
-- `feeds.py`: payment_settlement CSV (SETTLED payments; fee = round_half_up(gross*pct/100 + fixed), capped; net =
-  gross - fee) and clickstream JSONL (`clickstream_events` browsing events in sessions of 5 + one `order_placed` per
-  order), from the same World as the DB rows; date partitions; rollover at max_file_size_mb; bounded entity cache.
-- Publish: staging/<run> → fsync → mkdirs with parent fsyncs → `os.link` (no replace) → dir fsync → ledger row
-  (`published_files`, migration 0005); manifest last (built from DB only: deterministic); run COMPLETED after.
-  Repeat/resume: recorded files must match; unrecorded identical file adopted (after fsync); else FeedError; once
-  the manifest is recorded, verify-only (checksums + manifest lists exactly the ledger files).
-- `load`: `_execute` = chunks → publish → complete; `resume_fields` records `data_root` (only if a feed is on) and
-  `feeds` (enabled + max_file_size_mb), both in RESUME_MUST_MATCH; smoke preset has 10,000 browsing events.
-- `config`: `ECOMGEN_DATA_ROOT` override (`config.data_root`); parquet=true and publish_via_staging=false refused.
-- `generate.DATA_VERSION = 2`, `World.clickstream_events` (default 0); GOLDEN[2] = GOLDEN[1] (DB rows unchanged);
-  `FEED_GOLDEN[2]` in tests/test_feeds.py.
-- `validate`: temp tables created before the RR READ ONLY snapshot (CREATE is refused inside it, COPY into temp
-  tables works), file + feed checks inside it, dropped after; per-feed gating; NULL-safe; unreadable → violation.
-  19 checks for a run with both feeds. DB-corruption tests run with feeds off (one check each); feed corruptions in
-  `tests/integration/test_publish.py` (caught by their check, others may also fire).
-- CLI: files summary; config error (exit 2) for a bad `ECOMGEN_DATA_ROOT` only in generate/resume; OSError → exit 1
-  with a status hint (validate: exit 3). Removed a duplicated `elif` in status.
-- Tests: 184 passed with DB, 89 passed / 95 skipped without; mypy clean (23 files). Includes a real SIGKILL during
-  publishing (4th file) → resume → identical to a clean run.
+## This task: PR A, `replay-files` (`docs/FEEDS.md` "Replay")
+- `replay.py`: `Params` (from/to/feeds/delay/jitter/dup pct, validated), `replay_id` (hash of run + params +
+  REPLAY_VERSION), pure `schedule` (arrival = end of partition day + delay + jitter; dup 1-24 h later; both rng draws
+  always made), `delivery_manifest` (plan only, reproducible), `_originals` (manifest vs ledger sha, each original vs
+  manifest; all problems before any write), `replay` (run lock; COMPLETED run; same data root; copy → verify sha →
+  `feeds.place_file` → `file_deliveries` row; manifest row + COMPLETED in one transaction; verify-only once done).
+- `feeds.place_file` extracted from `_place` (publish uses it; messages now "recorded file", "while placing it").
+- Migration 0006: `replays`, `file_deliveries`. CLI `replay-files` (exit 0/1/2/3).
+- Tests: 12 unit (`tests/test_replay.py`), 16 integration (`tests/integration/test_replay_files.py`, incl. real
+  SIGKILL before the 6th placement → rerun → exact plan + reproducible manifest). Suite: 216 passed with DB,
+  101 passed / 115 skipped without; mypy clean (26 files).
 
-## Review (`/code-review high`) — all 10 fixed
+- Crash between a file landing in place and its PostgreSQL commit (user requirement before merging PR A): real
+  SIGKILL right after `place_file` returns, for the 6th delivery and for the delivery manifest (row + COMPLETED not
+  committed), and the same for publishing (4th file, run manifest). The rerun/resume adopts the placed file
+  (identical bytes, fsynced, no rewrite); afterwards ledger == disk exactly (no orphans, no duplicates), staging
+  empty, state COMPLETED / validate clean. Also a kill just before placing (existing tests).
+
+## PR A review (`/code-review high`) — all 10 fixed
 | # | Finding | Fix |
 |---|---|---|
-| 1 | All feed checks ran when only one feed was published | Checks gated per published feed; single-feed integration tests |
-| 2 | New directories / adopted files not fsynced | `_mkdirs` fsyncs parents; adoption fsyncs file + dir chain |
-| 3 | NULL fields passed settlement checks | IS DISTINCT FROM + explicit NULL checks; malformed-event check; test |
-| 4 | File checks outside the DB snapshot | Temp tables pre-created; everything in one RR READ ONLY snapshot |
-| 5 | OSError/csv.Error crashed validate | Reported as files_match_ledger violations; CLI exit 3 for others; test |
-| 6 | exists() + os.replace could overwrite | `os.link` (EEXIST → FeedError); race test |
-| 7 | Misleading "run is FAILED" for pre-run OSError | Message conditional, points to status |
-| 8 | Resume restaged everything after full publish | Verify-only fast path once the manifest is recorded |
-| 9 | data_root recorded/validated with feeds off | Recorded only with feeds; only generate/resume validate it; status reports instead of crashing |
-| 10 | Unused field, mixed timestamp formats | `_Writer.run_id` removed; `published_at` via `ts()`; FEEDS.md documents it |
+| 1 | Staging left forever after a crash post-COMPLETED | Staging cleared before every path, verify-only included; test |
+| 2 | Manifest paths unchecked (`..`, absolute) | `feeds.safe_rel` + feed-directory/partition pattern; refused before any write; tests |
+| 3 | Symlinks followed (originals, targets, staging) | `feeds.no_links`; `place_file` refuses links (publish too); tests |
+| 4 | Huge hours → OverflowError traceback | 0..87,600 h bounds in Params (exit 2); test |
+| 5 | feeds not normalized/validated | Sorted + deduplicated; non-empty known subset; tests |
+| 6 | Verify re-read originals, failed after cleanup | Verify-only before reading originals; test with a removed original |
+| 7 | Unquoted to_regclass; unmigrated DB exit 1 | `db.has_table` (quoted); no ledger → RunLookupError (exit 3); test |
+| 8 | `.dupN` inserted into directories | Only the file name changes; tests |
+| 9 | Docs exit code for empty range; manifest counted as delivery | Docs fixed (exit 1); newly_delivered counts files only |
+| 10 | Invariants only in Python | 0006: component-wise path CHECKs, replay-dir prefix, manifest-row shape, FK to published_files and to (replay, run); test. Residual: "COMPLETED has a manifest row" stays in code (one transaction) |
 
 ## Ubuntu facts (from the user, 2026-10-18)
 - Ubuntu Server, Ryzen 5 5600, ~14 GiB usable RAM, user `serveradmin`. Root fs ~73 GB free.
@@ -102,6 +99,4 @@ the feed golden test passes on Linux too, so files are byte-identical across pla
 - Phase 2 file feeds not implemented: `data/` stays empty; `filesystem.root` default still `/srv/ecommerce-data`.
 
 ## Next step
-User merges PR #15 → Phase 2 part 2 (replay-files, retention,
-benchmark + Ubuntu re-run with `ECOMGEN_DATA_ROOT=/srv/homelab/ecommerce/data`, new tag). Mac dev `.env` needs
-`ECOMGEN_DATA_ROOT` pointing at an existing directory before `generate` against `ecommerce_oltp`-style DBs.
+Push + PR of PR A (ask) → CI → merge → PR B cleanup-files → PR C benchmark + `v0.2.0-homelab`.

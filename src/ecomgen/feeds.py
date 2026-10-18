@@ -299,16 +299,37 @@ def _ledger(conn: psycopg.Connection, cfg: Config, run_id: str) -> dict[str, tup
     return {r[0]: (r[1], int(r[2]), r[3]) for r in rows}
 
 
-def _place(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path, rel: str, staged: Path, stat: FileStat,
-           ledger: dict[str, tuple[str, int, str]]) -> bool:
-    """Publish one staged file; True if it was newly published (False: already there and identical)."""
-    final = root / rel
-    sha, size = sha256_of(staged), staged.stat().st_size
-    if rel in ledger:
-        if not final.is_file() or sha256_of(final) != ledger[rel][0]:
-            raise FeedError(f"published file {final} is missing or changed since it was recorded; reconcile by hand")
-        if ledger[rel][0] != sha:
-            raise FeedError(f"regenerated {rel} differs from the published file; the generator changed under the run")
+def safe_rel(rel: object) -> str:
+    """rel if it is a plain relative POSIX path (no '', '.', '..' components, no backslash, not absolute)."""
+    if not isinstance(rel, str) or not rel or rel.startswith("/") or "\\" in rel or "\0" in rel or any(
+            part in ("", ".", "..") for part in rel.split("/")):
+        raise FeedError(f"unsafe relative path {rel!r}")
+    return rel
+
+
+def no_links(root: Path, path: Path) -> None:
+    """Refuse if path, or any existing directory between root and it, is a symlink (root itself may be one)."""
+    rel = path.relative_to(root)
+    p = root
+    for part in rel.parts:
+        p = p / part
+        if p.is_symlink():
+            raise FeedError(f"{p} is a symlink; refusing to follow it under the data root")
+        if not p.exists():
+            return
+
+
+def place_file(root: Path, rel: str, staged: Path, sha: str, recorded_sha: str | None) -> bool:
+    """Put staged (whose sha256 is sha) at root/rel without ever overwriting; True if newly placed. recorded_sha:
+    what a ledger already records for rel (then only verify), or None. Raises FeedError when a human must look.
+    Never follows a symlink below root, at the target or in staging."""
+    final = root / safe_rel(rel)
+    no_links(root, final)
+    if recorded_sha is not None:
+        if not final.is_file() or sha256_of(final) != recorded_sha:
+            raise FeedError(f"recorded file {final} is missing or changed since it was recorded; reconcile by hand")
+        if recorded_sha != sha:
+            raise FeedError(f"regenerated {rel} differs from the recorded file; the generator changed under the run")
         return False
     if final.exists():
         if not final.is_file() or sha256_of(final) != sha:
@@ -316,21 +337,30 @@ def _place(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path, rel: 
         # crash between placing and recording it: same bytes, adopt it, after making sure it is durable
         _durable(final)
         _sync_up(root, final.parent)
-        newly = False
-    else:
-        _durable(staged)
-        _mkdirs(root, final.parent)
-        try:
-            os.link(staged, final)  # unlike rename, fails if a file appeared at final meanwhile
-        except FileExistsError:
-            raise FeedError(f"{final} appeared while publishing; refusing to overwrite it") from None
-        _fsync_dir(final.parent)
-        staged.unlink()
-        newly = True
-    conn.execute(db.q(cfg, "INSERT INTO {meta}.published_files (run_id, rel_path, feed, format, schema_version,"
-                           " records, bytes, sha256, start_event_time, end_event_time)"
-                           " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"),
-                 (run_id, rel, stat.feed, stat.fmt, SCHEMA_VERSION, stat.records, size, sha, stat.start, stat.end))
+        return False
+    no_links(root, staged)
+    _durable(staged)
+    _mkdirs(root, final.parent)
+    try:
+        os.link(staged, final)  # unlike rename, fails if a file appeared at final meanwhile
+    except FileExistsError:
+        raise FeedError(f"{final} appeared while placing it; refusing to overwrite it") from None
+    _fsync_dir(final.parent)
+    staged.unlink()
+    return True
+
+
+def _place(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path, rel: str, staged: Path, stat: FileStat,
+           ledger: dict[str, tuple[str, int, str]]) -> bool:
+    """Publish one staged file and record it; True if it was newly published."""
+    sha, size = sha256_of(staged), staged.stat().st_size
+    recorded = ledger[rel][0] if rel in ledger else None
+    newly = place_file(root, rel, staged, sha, recorded)
+    if recorded is None:
+        conn.execute(db.q(cfg, "INSERT INTO {meta}.published_files (run_id, rel_path, feed, format, schema_version,"
+                               " records, bytes, sha256, start_event_time, end_event_time)"
+                               " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"),
+                     (run_id, rel, stat.feed, stat.fmt, SCHEMA_VERSION, stat.records, size, sha, stat.start, stat.end))
     return newly
 
 
@@ -396,7 +426,7 @@ def _verified(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path,
     published manifest lists exactly the recorded feed files."""
     for rel, (sha, _, _) in sorted(ledger.items()):
         if check and (not (root / rel).is_file() or sha256_of(root / rel) != sha):
-            raise FeedError(f"published file {root / rel} is missing or changed since it was recorded; reconcile "
+            raise FeedError(f"recorded file {root / rel} is missing or changed since it was recorded; reconcile "
                             "by hand")
     if check:
         doc = json.loads((root / manifest_path(run_id)).read_text(encoding="utf-8"))
