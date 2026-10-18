@@ -229,13 +229,16 @@ def _file_results(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path
                   browse: int) -> list[Result]:
     """Check the run's files against the ledger and manifest, load the intact ones into the temp tables, and
     check the published feeds against PostgreSQL. Memory: one record at a time."""
-    ledger = conn.execute(db.q(cfg, "SELECT rel_path, feed, format, records, bytes, sha256"
+    ledger = conn.execute(db.q(cfg, "SELECT rel_path, feed, format, records, bytes, sha256, deleted_by"
                                     " FROM {meta}.published_files WHERE run_id = %s ORDER BY rel_path"),
                           (run_id,)).fetchall()
     broken: list[str] = []
     intact = []
-    for rel, feed, fmt, records, size, sha in ledger:
+    for rel, feed, fmt, records, size, sha, deleted_by in ledger:
         path = root / rel
+        if deleted_by:  # removed on purpose: the run's files can no longer be checked against the database
+            broken.append(f"{rel}: deleted by cleanup {deleted_by}")
+            continue
         try:
             if not path.is_file():
                 broken.append(f"{rel}: missing")

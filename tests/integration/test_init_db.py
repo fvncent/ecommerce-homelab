@@ -26,13 +26,13 @@ def test_migrate_creates_schema_and_is_idempotent(db_url: str, cfg: config.Confi
     with psycopg.connect(db_url) as c:
         assert db.migrate(c, cfg) == ["0001_core_schema.sql", "0002_chunk_table_rows.sql", "0003_run_resume_fields.sql",
                                          "0004_resume_fields_shape.sql", "0005_published_files.sql",
-                                         "0006_replays.sql"]
+                                         "0006_replays.sql", "0007_cleanup.sql"]
         assert db.migrate(c, cfg) == []
         assert tables(c, "commerce") == {
             "sellers", "categories", "customers", "products", "orders", "order_items", "payment_attempts"
         }
         assert tables(c, "generator_meta") == {"schema_migrations", "generation_runs", "generation_chunks",
-                                                "published_files", "replays", "file_deliveries"}
+                                                "published_files", "replays", "file_deliveries", "cleanups"}
         assert c.execute("SELECT 1 FROM pg_namespace WHERE nspname = 'integration'").fetchone()
 
 

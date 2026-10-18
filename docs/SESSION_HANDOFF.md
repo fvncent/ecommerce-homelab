@@ -4,11 +4,25 @@ Update before compaction or ending a significant session. Overwrite; git history
 
 **Updated:** 2026-10-18
 **Branch:** `feat/cleanup-files` (from `main` `1e8be96` = PR #16 replay-files merged, CI green 216/0). PR B of 3:
-plan presented, awaiting approval before implementation.
+plan approved (no `--older-than`), implemented, independent review next.
 **Deployed on Ubuntu:** `v0.1.1-homelab` (`8c581ad`; no files). Keep it until `v0.2.0-homelab` passes there.
 **Approved (2026-10-18):** Part 2 plan (replay → cleanup → benchmark + release); user will recreate the three
 Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleaning a run's originals makes
 `validate` fail with "deleted by cleanup" (plan defaults, accepted with the plan).
+
+## This task: PR B, `cleanup-files` (`docs/FEEDS.md` "Cleanup")
+- `cleanup.py`: `Target` (staging | replay | run), `plan` (read-only: ledger-recorded, not-deleted files of a
+  COMPLETED run/replay, or known `staging/<id>` dirs; manifests kept; root guards `check_root`), `token` (hash of
+  target + candidates), `run` (run lock; finishes RUNNING cleanups' audits; token must match; cleanups row → per
+  file `_safe_file` (safe_rel, no_links, resolved inside root) + checksum unchanged → unlink → fsync dir → mark
+  `deleted_at/by` → details → `_finish_audit` (DB-only JSON, place_file) → COMPLETED).
+- Migration 0007: `cleanups` (target, token, details, state), `deleted_at/deleted_by` on both ledgers with CHECKs
+  (both or neither; manifests never deleted).
+- `validate`: deleted files → files_match_ledger "deleted by cleanup <id>". `replay`: cleaned originals refused,
+  cleaned replay verify refused (named). CLI `cleanup-files` (exit 0/1/2/3; --delete needs --confirm).
+- Tests: 6 unit (`tests/test_cleanup.py`), 10 integration (`tests/integration/test_cleanup_files.py`, incl. a
+  real SIGKILL after the 3rd unlink before its mark → rerun: 1 already gone, first audit finished, ledger == disk).
+  Suite: 232 passed with DB, 107 passed / 125 skipped without; mypy clean (29 files).
 
 ## Previous task: PR A, `replay-files` (PR #16, merged) (`docs/FEEDS.md` "Replay")
 - `replay.py`: `Params` (from/to/feeds/delay/jitter/dup pct, validated), `replay_id` (hash of run + params +

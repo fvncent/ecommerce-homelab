@@ -1,7 +1,7 @@
 # Tasks
 
 ## Active
-- [ ] PR B `cleanup-files` (branch `feat/cleanup-files`, plan awaiting approval): dry-run default, confirm token, ledger-known files only, root containment + no symlinks, manifests/audit kept, `deleted_at` (migration 0007), validate reports deleted files
+- [ ] PR B `cleanup-files` (branch `feat/cleanup-files`, implemented, awaiting review; no `--older-than` by decision): dry-run default, confirm token, ledger-known files only, root containment + no symlinks, manifests/audit kept, `deleted_at` (migration 0007), validate reports deleted files
 - [ ] PR C: benchmark with files (per-feed throughput, sha256 MB/s, feed digest vs macOS reference, publish-crash + replay-crash), then tag `v0.2.0-homelab`; Ubuntu: user recreates the 3 benchmark DBs by hand (approved 2026-10-18), `ECOMGEN_DATA_ROOT=/srv/homelab/ecommerce/data`; keep `v0.1.1-homelab` until it passes
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 

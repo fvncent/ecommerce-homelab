@@ -6,7 +6,7 @@ import time
 
 import psycopg
 
-from ecomgen import __version__, config, db, feeds, generate, load, replay, validate
+from ecomgen import __version__, cleanup, config, db, feeds, generate, load, replay, validate
 
 
 def _connect_cfg(path: str) -> tuple[config.Config, str] | int:
@@ -228,6 +228,56 @@ def replay_cmd(path: str, run_id: str | None, start: str, end: str, feed: list[s
     return 0
 
 
+def cleanup_cmd(path: str, target: cleanup.Target, delete: bool, confirm: str | None) -> int:
+    """Exit 0: dry run shown, or deleted. 1: refused or failed. 2: config/argument error. 3: run/replay not found."""
+    if delete != (confirm is not None):
+        print("cleanup error: --delete and --confirm TOKEN go together (run without them first for the token)",
+              file=sys.stderr)
+        return 2
+    loaded = _connect_cfg(path)
+    if isinstance(loaded, int):
+        return loaded
+    cfg, url = loaded
+    try:
+        with psycopg.connect(url, autocommit=True) as conn:
+            plan, result = cleanup.run(conn, cfg, target, confirm)
+    except config.ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 2
+    except db.RunLookupError as e:
+        print(f"cleanup error: {e}", file=sys.stderr)
+        return 3
+    except (cleanup.CleanupError, feeds.FeedError, load.LoadError) as e:
+        print(f"cleanup error: {e}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"file error: {e}; repeat the dry run to see what is left", file=sys.stderr)
+        return 1
+    except psycopg.Error as e:
+        print(f"database error: {type(e).__name__}: {e}".rstrip(), file=sys.stderr)
+        return 1
+    if result is None:
+        what = f"{target.kind} {target.ident}" if target.ident else "orphan staging directories"
+        total = sum(c.bytes for c in plan.candidates)
+        print(f"dry run: cleanup of {what} under {plan.root} would delete {len(plan.candidates)} item(s),"
+              f" {total} bytes:")
+        for c in plan.candidates:
+            print(f"  delete {c.path} ({c.bytes} bytes)")
+        for k in plan.kept:
+            print(f"  keep   {k}")
+        if plan.candidates:
+            print(f"to delete exactly these, add: --delete --confirm {plan.token}")
+        return 0
+    if result.cleanup_id is None:
+        print("nothing to delete")
+        return 0
+    print(f"cleanup {result.cleanup_id}: deleted {result.deleted} file(s), {result.bytes} bytes;"
+          f" {result.already_gone} already gone; audit {plan.root}/{result.audit_path}")
+    for rel in result.kept_changed:
+        print(f"  kept {rel}: changed since it was recorded (not ours to delete)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ecomgen", description="Synthetic e-commerce source-data generator")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -268,6 +318,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--jitter-hours", type=int, default=0, help="up to this many extra hours per file (default 0)")
     p.add_argument("--duplicate-pct", type=int, default=0,
                    help="percent of files delivered a second time, 1-24 h later (default 0)")
+    p = sub.add_parser("cleanup-files", help="delete generated files (dry run unless --delete --confirm TOKEN)",
+                       description="Deletes only files the database recorded as produced by the generator: a "
+                                   "COMPLETED run's feed files, a COMPLETED replay's delivered copies, or staging "
+                                   "directories of known runs/replays. Manifests and audit reports are kept. The "
+                                   "dry run (default) prints a token for exactly its candidate list. Exit codes: 0 "
+                                   "dry run or deleted, 1 refused/failed, 2 config/argument error, 3 not found.")
+    p.add_argument("config", help="path to generator YAML")
+    which = p.add_mutually_exclusive_group(required=True)
+    which.add_argument("--staging", action="store_true", help="orphan staging directories of known runs/replays")
+    which.add_argument("--replay-id", help="a COMPLETED replay's delivered copies")
+    which.add_argument("--run-id", help="a COMPLETED run's published feed files (validate then reports them)")
+    p.add_argument("--delete", action="store_true", help="actually delete (needs --confirm)")
+    p.add_argument("--confirm", metavar="TOKEN", help="token printed by the dry run")
     args = parser.parse_args(argv)
     if args.command == "check-config":
         return check_config(args.config)
@@ -281,6 +344,10 @@ def main(argv: list[str] | None = None) -> int:
         return status_cmd(args.config, args.run_id)
     if args.command == "resume":
         return resume_cmd(args.config, args.run_id)
+    if args.command == "cleanup-files":
+        target = (cleanup.Target("staging") if args.staging else
+                  cleanup.Target("replay", args.replay_id) if args.replay_id else cleanup.Target("run", args.run_id))
+        return cleanup_cmd(args.config, target, args.delete, args.confirm)
     if args.command == "replay-files":
         return replay_cmd(args.config, args.run_id, args.start, args.end, args.feed, args.delay_hours,
                           args.jitter_hours, args.duplicate_pct)

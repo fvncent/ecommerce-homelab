@@ -121,7 +121,39 @@ ecomgen replay-files CONFIG --from 2026-01-05 --to 2026-01-08 [--run-id R] [--fe
   exit 3. A verify of a finished replay checks only the deliveries (originals may have been cleaned up since).
   The CLI's "newly delivered" counts files, not the delivery manifest.
 
+## Cleanup (`ecomgen cleanup-files`)
+
+Explicit, reviewed deletion of files the generator produced (code: `src/ecomgen/cleanup.py`):
+
+```bash
+ecomgen cleanup-files CONFIG --replay-id rpl_...          # dry run: candidates, kept files, a token
+ecomgen cleanup-files CONFIG --replay-id rpl_... --delete --confirm <token>
+# targets: --replay-id (a COMPLETED replay's copies) | --run-id (a COMPLETED run's feed files) | --staging
+```
+
+- **Candidates come only from the database**: the target's recorded, not-yet-deleted files (`published_files` /
+  `file_deliveries`), or `staging/<id>` directories of runs/replays this database knows. Nothing is found by
+  scanning: unrecorded files (and unknown staging entries) are never deleted. Run manifests, delivery manifests and
+  audit reports are never candidates (the schema also refuses marking a manifest deleted).
+- **Dry run by default.** The token is a hash of the target and the exact candidate list (path, checksum, size);
+  `--delete --confirm TOKEN` rebuilds the list and refuses unless it matches, so only what was reviewed is deleted.
+- **Per file, just before deleting:** plain relative path, inside the data root (resolved), no symlink on the way,
+  a regular file, recorded checksum unchanged. A changed file is kept and reported (`kept_changed`).
+- **Root guards:** refuses a missing root, `/`, your home directory, a root containing `.git` or `PG_VERSION`, and
+  a run/replay published under another root. Holds the run lock (never overlaps generate/resume/replay).
+- **Ledger rows are never removed**: marked `deleted_at` / `deleted_by` (migration 0007). `validate` reports a
+  cleaned run's files as "deleted by cleanup <id>" (and fails); replay refuses cleaned originals, and a cleaned
+  replay can't be verified (both say so). Copies made by earlier replays are independent of their originals.
+- **Audit:** `audit/cleanup_id=cln_<UTC>_<token>.json`: target, token, deleted files (path, sha256, bytes, ledger,
+  deleted_at), staging dirs, files already gone, files kept because they changed. Built only from the database
+  and placed without overwriting.
+- **Crash-safe:** cleanups row (RUNNING) first; per file unlink → fsync dir → mark; then details, audit, COMPLETED.
+  After an interruption the next `--delete` first finishes earlier cleanups' audits; a new dry run lists what is
+  left, and files unlinked but not yet marked show as "already gone" and are marked (tested with a real SIGKILL).
+- Exit codes: 0 dry run or deleted, 1 refused/failed, 2 config/argument error, 3 run/replay not found or not
+  migrated. No age-based selection (`--older-than`): left out on purpose (2026-10-18).
+
 ## Not yet
 
-Cleanup/retention command (Phase 2 part 2, next PR), Parquet snapshots, supplier/courier feeds (need warehouses,
+Age-based retention, Parquet snapshots, supplier/courier feeds (need warehouses,
 inventory, shipments), anomaly injection (Phase 4).
