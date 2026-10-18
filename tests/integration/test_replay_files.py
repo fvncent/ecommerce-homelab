@@ -25,17 +25,22 @@ pytestmark = pytest.mark.skipif(not ADMIN_URL, reason="ECOMGEN_TEST_DATABASE_URL
 Migrated = Callable[..., psycopg.Connection]
 PARAMS = replay.Params(date(2026, 1, 5), date(2026, 1, 8), ("clickstream", "payment_settlement"), 24, 6, 20)
 
-# replay in a child process that SIGKILLs itself just before placing delivery number N (argv[3])
+# replay in a child process that SIGKILLs itself around placing a file: argv[3] = N (the Nth placement) or
+# "manifest"; argv[4] = "before" (nothing of it on disk) or "after" (in place, its ledger row not yet committed)
 CRASH_IN_REPLAY = """
 import os, signal, sys, psycopg
 from datetime import date
 from ecomgen import config, feeds, replay
 real, placed = feeds.place_file, [0]
-def crash(*args, **kwargs):
+def crash(root, rel, *args, **kwargs):
     placed[0] += 1
-    if placed[0] == int(sys.argv[3]):
+    hit = rel.endswith("delivery_manifest.json") if sys.argv[3] == "manifest" else placed[0] == int(sys.argv[3])
+    if hit and sys.argv[4] == "before":
         os.kill(os.getpid(), signal.SIGKILL)
-    return real(*args, **kwargs)
+    result = real(root, rel, *args, **kwargs)
+    if hit:
+        os.kill(os.getpid(), signal.SIGKILL)
+    return result
 feeds.place_file = crash
 params = replay.Params(date(2026, 1, 5), date(2026, 1, 8), ("clickstream", "payment_settlement"), 24, 6, 20)
 with psycopg.connect(sys.argv[2], autocommit=True) as conn:
@@ -126,8 +131,8 @@ def test_bad_originals_are_refused_before_any_write(run: tuple[psycopg.Connectio
 def test_sigkill_mid_replay_then_rerun_finishes_it(run: tuple[psycopg.Connection, str], cfg_path: Path,
                                                    small_cfg: config.Config, data_root: Path) -> None:
     conn, url = run
-    proc = subprocess.run([sys.executable, "-c", CRASH_IN_REPLAY, str(cfg_path), url, "6"], capture_output=True,
-                          timeout=120)
+    proc = subprocess.run([sys.executable, "-c", CRASH_IN_REPLAY, str(cfg_path), url, "6", "before"],
+                          capture_output=True, timeout=120)
     assert proc.returncode == -signal.SIGKILL, proc.stderr.decode()
     assert conn.execute("SELECT state FROM generator_meta.replays").fetchone() == ("RUNNING",)
     assert conn.execute("SELECT count(*) FROM generator_meta.file_deliveries").fetchone() == (5,)
@@ -307,3 +312,32 @@ def test_cli_replay_argument_errors_and_unmigrated_db(db_url: str, monkeypatch: 
     assert main(base) == 3 and "init-db" in capsys.readouterr().err  # not migrated: like other commands
     assert main(base + ["--delay-hours", "100000000"]) == 2
     assert main(base + ["--duplicate-pct", "101"]) == 2
+
+
+@pytest.mark.parametrize("at", ["6", "manifest"])
+def test_sigkill_between_placing_a_file_and_committing_its_row(run: tuple[psycopg.Connection, str], cfg_path: Path,
+                                                               small_cfg: config.Config, data_root: Path,
+                                                               at: str) -> None:
+    """The file is in place, its ledger row (for the manifest: the row + COMPLETED) never committed. The rerun must
+    adopt it: no orphan files, no duplicate deliveries, ledger exactly equal to what is on disk."""
+    conn, url = run
+    proc = subprocess.run([sys.executable, "-c", CRASH_IN_REPLAY, str(cfg_path), url, at, "after"],
+                          capture_output=True, timeout=120)
+    assert proc.returncode == -signal.SIGKILL, proc.stderr.decode()
+    rid = conn.execute("SELECT replay_id FROM generator_meta.replays").fetchone()[0]  # type: ignore[index]
+    recorded = conn.execute("SELECT count(*) FROM generator_meta.file_deliveries").fetchone()[0]  # type: ignore[index]
+    on_disk = tree(data_root, f"deliveries/replay_id={rid}/")
+    assert len(on_disk) == recorded + 1  # exactly one placed file is not (yet) recorded
+    assert conn.execute("SELECT state FROM generator_meta.replays").fetchone() == ("RUNNING",)
+
+    r = replay.replay(conn, small_cfg, PARAMS)
+    assert not r.verified_only
+    assert r.newly_delivered == (r.deliveries - recorded - 1 if at == "6" else 0)  # the placed file was adopted
+    rows: dict[str, str] = {r[0]: r[1] for r in conn.execute(
+        "SELECT delivered_path, sha256 FROM generator_meta.file_deliveries WHERE replay_id = %s", (rid,))}
+    assert tree(data_root, f"deliveries/replay_id={rid}/") == rows  # ledger == disk: no orphans, nothing missing
+    assert len(rows) == r.deliveries + 1  # each planned delivery once, plus the manifest
+    assert on_disk == {p: rows[p] for p in on_disk}  # nothing rewritten
+    assert conn.execute("SELECT state FROM generator_meta.replays").fetchone() == ("COMPLETED",)
+    assert not any((data_root / "staging").iterdir())
+    assert replay.replay(conn, small_cfg, PARAMS).verified_only

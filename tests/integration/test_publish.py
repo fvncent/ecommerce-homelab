@@ -23,18 +23,23 @@ pytestmark = pytest.mark.skipif(not ADMIN_URL, reason="ECOMGEN_TEST_DATABASE_URL
 
 Migrated = Callable[..., psycopg.Connection]
 
-# generate in a child process that SIGKILLs itself while publishing: just before placing staged file number N
-# (argv[3]); the database chunks are all committed by then, so the run is RUNNING with some files published.
+# generate in a child process that SIGKILLs itself while publishing; the database chunks are all committed by then,
+# so the run is RUNNING. argv[3] = N (Nth file) or "manifest"; argv[4] = "before" placing it, or "after" it is in
+# place but before its ledger row is inserted.
 CRASH_IN_PUBLISH = """
 import os, signal, sys, psycopg
 from ecomgen import config, feeds, load
-real, placed = feeds._place, [0]
-def crash(*args, **kwargs):
+real, placed = feeds.place_file, [0]
+def crash(root, rel, *args, **kwargs):
     placed[0] += 1
-    if placed[0] == int(sys.argv[3]):
+    hit = rel.startswith("manifests/") if sys.argv[3] == "manifest" else placed[0] == int(sys.argv[3])
+    if hit and sys.argv[4] == "before":
         os.kill(os.getpid(), signal.SIGKILL)
-    return real(*args, **kwargs)
-feeds._place = crash
+    result = real(root, rel, *args, **kwargs)
+    if hit:
+        os.kill(os.getpid(), signal.SIGKILL)
+    return result
+feeds.place_file = crash
 with psycopg.connect(sys.argv[2], autocommit=True) as conn:
     load.run(conn, config.load(sys.argv[1]), "smoke")
 """
@@ -149,8 +154,8 @@ def test_sigkill_while_publishing_then_resume(migrated: Migrated, new_db: Callab
                                               monkeypatch: pytest.MonkeyPatch) -> None:
     url = new_db()
     conn = migrated(small_cfg, url)
-    proc = subprocess.run([sys.executable, "-c", CRASH_IN_PUBLISH, str(cfg_path), url, "4"], capture_output=True,
-                          timeout=120)
+    proc = subprocess.run([sys.executable, "-c", CRASH_IN_PUBLISH, str(cfg_path), url, "4", "before"],
+                          capture_output=True, timeout=120)
     assert proc.returncode == -signal.SIGKILL, proc.stderr.decode()
     assert conn.execute("SELECT state FROM generator_meta.generation_runs").fetchone() == ("RUNNING",)
     assert len(ledger(conn)) == 3  # files 1-3 published, the 4th never placed
@@ -176,6 +181,28 @@ def test_sigkill_while_publishing_then_resume(migrated: Migrated, new_db: Callab
     def by_content(root: Path, run_id: str) -> dict[str, str]:
         return {p.replace(run_id, "RUN"): h for p, h in tree(root).items() if not p.startswith("manifests/")}
     assert by_content(data_root, run_ids[0]) == by_content(clean_root, run_ids[1])
+
+
+@pytest.mark.parametrize("at", ["4", "manifest"])
+def test_sigkill_between_placing_a_file_and_recording_it(migrated: Migrated, new_db: Callable[[], str],
+                                                         cfg_path: Path, small_cfg: config.Config,
+                                                         data_root: Path, at: str) -> None:
+    """The file is in place but has no ledger row; resume adopts it: no orphan, no rewrite, ledger == disk."""
+    url = new_db()
+    conn = migrated(small_cfg, url)
+    proc = subprocess.run([sys.executable, "-c", CRASH_IN_PUBLISH, str(cfg_path), url, at, "after"],
+                          capture_output=True, timeout=120)
+    assert proc.returncode == -signal.SIGKILL, proc.stderr.decode()
+    placed = tree(data_root)
+    assert len(placed) == len(ledger(conn)) + 1  # exactly one placed file is not recorded
+    result = load.resume(conn, small_cfg)
+    assert result is not None and result.chunks_written == 0
+    assert result.files.newly_published == (result.files.files - len(placed) if at == "4" else 0)
+    after = tree(data_root)
+    assert after == {p: h for p, (h, _) in ledger(conn).items()}  # ledger == disk: no orphans, nothing missing
+    assert {p: after[p] for p in placed} == placed  # nothing rewritten
+    assert failing(conn, small_cfg) == set()
+    assert not any((data_root / "staging").iterdir())
 
 
 def test_resume_refuses_another_data_root(migrated: Migrated, small_cfg: config.Config, tmp_path: Path,

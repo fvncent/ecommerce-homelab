@@ -109,6 +109,8 @@ ecomgen replay-files CONFIG --from 2026-01-05 --to 2026-01-08 [--run-id R] [--fe
 - **Crash-safe like publishing:** copy into `staging/<replay_id>/`, check the copy's sha256, place with the same
   never-overwriting `place_file`, then a `file_deliveries` row (migration 0006); the manifest's row and
   `replays.state = COMPLETED` commit together. Holds the run lock (never overlaps generate/resume/cleanup).
+  Tested with real SIGKILLs before placing a file, after placing it but before its row commits, and after placing
+  the manifest but before COMPLETED: the rerun adopts the placed file, and the ledger equals what is on disk.
 - **Path safety:** manifest paths must be plain relative paths under their feed's directory (no `..`, `.`, empty
   components, backslashes or absolute paths), and no symlink is followed below the data root (originals, staging,
   delivery targets; publishing too). The schema repeats the path rules and ties every delivery to its replay's

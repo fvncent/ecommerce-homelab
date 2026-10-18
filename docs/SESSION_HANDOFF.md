@@ -18,8 +18,14 @@ Ubuntu benchmark DBs by hand; deliveries under `<data root>/deliveries/`; cleani
 - `feeds.place_file` extracted from `_place` (publish uses it; messages now "recorded file", "while placing it").
 - Migration 0006: `replays`, `file_deliveries`. CLI `replay-files` (exit 0/1/2/3).
 - Tests: 12 unit (`tests/test_replay.py`), 16 integration (`tests/integration/test_replay_files.py`, incl. real
-  SIGKILL before the 6th placement → rerun → exact plan + reproducible manifest). Suite: 212 passed with DB,
-  101 passed / 111 skipped without; mypy clean (26 files).
+  SIGKILL before the 6th placement → rerun → exact plan + reproducible manifest). Suite: 216 passed with DB,
+  101 passed / 115 skipped without; mypy clean (26 files).
+
+- Crash between a file landing in place and its PostgreSQL commit (user requirement before merging PR A): real
+  SIGKILL right after `place_file` returns, for the 6th delivery and for the delivery manifest (row + COMPLETED not
+  committed), and the same for publishing (4th file, run manifest). The rerun/resume adopts the placed file
+  (identical bytes, fsynced, no rewrite); afterwards ledger == disk exactly (no orphans, no duplicates), staging
+  empty, state COMPLETED / validate clean. Also a kill just before placing (existing tests).
 
 ## PR A review (`/code-review high`) — all 10 fixed
 | # | Finding | Fix |
