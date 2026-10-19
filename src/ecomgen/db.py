@@ -133,6 +133,14 @@ def has_outbox(conn: psycopg.Connection, cfg: Config) -> bool:
     return has_table(conn, cfg, "outbox_events", cfg.postgres.integration_schema)
 
 
+def clock_columns(conn: psycopg.Connection, cfg: Config) -> str:
+    """SQL select list `previous_as_of, as_of` of generation_runs; typed NULLs before migration 0008 (an untyped NULL
+    in a subquery becomes text, which can't be compared or coalesced with a timestamp)."""
+    if has_column(conn, cfg, "generation_runs", "as_of"):
+        return "previous_as_of, as_of"
+    return "NULL::timestamptz, NULL::timestamptz"
+
+
 def has_ledger(conn: psycopg.Connection, cfg: Config) -> bool:
     """True once init-db has created the run ledger."""
     return has_table(conn, cfg, "generation_runs")

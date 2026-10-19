@@ -365,3 +365,14 @@ def test_cli_generate_reports_files(db_url: str, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("ECOMGEN_DATA_ROOT", "relative/path")
     assert main(["generate", str(EXAMPLE)]) == 2  # config error, before any run or file
     assert main(["status", str(EXAMPLE)]) == 0  # commands that write nothing don't care
+
+
+def test_a_schema_from_before_clock_steps_still_validates(published: psycopg.Connection, small_cfg: config.Config,
+                                                         data_root: Path) -> None:
+    """A schema set from v0.2.0 (no migration 0008: no as_of / previous_as_of) that published files: validate's file
+    windows must use typed NULLs (an untyped NULL is text, and coalescing it with a timestamp failed)."""
+    published.execute("DROP TABLE integration.outbox_events")  # 0009 needs 0008: neither exists there
+    published.execute("ALTER TABLE generator_meta.generation_runs DROP COLUMN previous_as_of CASCADE,"
+                      " DROP COLUMN as_of CASCADE")
+    _, results = validate.validate(published, small_cfg)
+    assert [r.check.name for r in results if not r.ok] == [] and len(results) > len(validate.CHECKS)

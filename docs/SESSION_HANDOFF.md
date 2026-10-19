@@ -4,7 +4,7 @@ Update before compaction or ending a significant session. Overwrite it: git hist
 per-PR review tables up to PR #23 are in commit `03ee496`). Task list: `TASKS.md`.
 
 **Updated:** 2026-10-19
-**Branch:** `feat/outbox` (from `main` `4632562` = PR #26 half-open windows merged, CI 387/0).
+**Branch:** `fix/validate-pre-0008` (from `main` `877c216`). Released: `v0.4.0-homelab` → `877c216`, `v0.3.1-homelab` → `4632562`. Ubuntu now on `v0.4.0-homelab` (checked out by the user; VLSIM containers are stopped/removed by the user).
 **Released:** `v0.3.0-homelab` → `0301e1f` (Phase 3A, 3B, session ordering, harness; tag pushed 2026-10-19).
 `v0.2.0-homelab` (`de90a6a`) unchanged, kept for rollback.
 **Deployed on Ubuntu:** `v0.3.0-homelab`, verified 2026-10-19 (`docs/BENCHMARKS.md`). Disposable DB
@@ -113,6 +113,12 @@ schemas `practice_commerce` / `practice_integration` / `practice_meta`, folder `
 day, one-day-at-a-time (next day computed in SQL), read-only `ecomgen_reader` grants, watermark + outbox queries,
 replay, troubleshooting. Rehearsed on the Mac in a throwaway PG 18.6 (Ubuntu layout); older `commerce` dataset
 unchanged; watermark count = step inserted + updated.
+
+## Fix: validate on pre-0008 schema sets
+Found on Ubuntu (v0.4.0 step 4): `validate` of `ecommerce_oltp`'s v0.2.0 `commerce` set (no migration 0008, files
+published) failed: `LATERAL (SELECT NULL, NULL)` makes text columns, `coalesce(text, timestamptz)` errors (since
+v0.3.0). `db.clock_columns` (shared by load/feeds/validate) returns typed NULLs; regression test in
+`test_publish.py` (drops 0008 columns + the outbox) reproduces the exact error on the old code.
 
 ## Next step
 User approved (2026-10-19): push `feat/outbox`, open + merge the PR after CI, push `v0.3.1-homelab`. Then propose `v0.4.0-homelab`. Separately: the user's OK to push the

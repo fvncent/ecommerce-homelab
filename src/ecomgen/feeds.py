@@ -462,7 +462,7 @@ def _place(conn: psycopg.Connection, cfg: Config, run_id: str, root: Path, rel: 
 def manifest(conn: psycopg.Connection, cfg: Config, run_id: str) -> dict[str, object]:
     """The run manifest, built only from the database (ledger + run), so rebuilding it yields the same bytes. A clock
     step's manifest also names the step: its window, and the chain's first step."""
-    clock = "previous_as_of, as_of" if db.has_column(conn, cfg, "generation_runs", "as_of") else "NULL, NULL"
+    clock = db.clock_columns(conn, cfg)
     run = conn.execute(db.q(cfg, "SELECT generator_version, config_sha256, seed, resume_fields->'data_version',"
                                  f" {clock}, resume_fields->'world'->>'clock_start'"
                                  " FROM {meta}.generation_runs WHERE run_id = %s"), (run_id,)).fetchone()
