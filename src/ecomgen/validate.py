@@ -22,7 +22,7 @@ from typing import Any
 import psycopg
 from psycopg import sql
 
-from ecomgen import db, feeds, load
+from ecomgen import db, feeds, generate, load
 from ecomgen.config import Config
 
 SAMPLE = 5
@@ -228,6 +228,11 @@ def validate(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -
             recorded = runs[0][1] if runs else {}
             published = recorded.get("feeds", {}).get("enabled") or []
             if published:  # runs from before file feeds (or with feeds disabled) publish nothing to check
+                if as_of is not None and recorded.get("data_version") != generate.DATA_VERSION:
+                    # a chain's browse count depends on the session times of its data version; the row checks don't
+                    reason = (f"the chain was written under data_version {recorded.get('data_version')}, not "
+                              f"{generate.DATA_VERSION}: check its files with the release that wrote it")
+                    return run_id, results + [Result(FILES_INTACT, 1, [reason])]
                 unfinished = [f"{r} is {state}: a clock step's files are checked once it completes"
                               for r, _, state in runs if state != "COMPLETED"] if as_of is not None else []
                 if unfinished:  # one clear reason instead of every missing file and record of that step

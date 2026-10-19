@@ -152,8 +152,9 @@ uv run ecomgen validate /srv/homelab/ecommerce/practice/stepped-10k.yaml
 ```
 
 To simulate business days, step one day at a time (`--to 2026-01-02T00:00:00Z`, `--to 2026-01-03T00:00:00Z`, ...).
-Measured on the Mac (10k config, 4 steps): about 2.5 s per step, mostly reading through the browsing sessions to
-pick the window's events; validate 19/19 then (20 checks now), files identical to `generate`'s records.
+Measured on the Mac (10k config, 31 daily steps, data version 3): about 1.2 s per step including the database
+writes and the CLI start; the step only generates the browsing sessions near its window. Validate 20/20; rows and
+file records identical to `generate`'s.
 
 Each step prints `step run_… COMPLETED: clock <previous> -> <as_of>`, the rows inserted and updated, and its files.
 `--to` needs a time zone (`Z` for UTC; other offsets are converted) or `end`. Repeating a step that is already done,

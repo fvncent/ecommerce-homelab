@@ -35,7 +35,8 @@ MAX_ATTEMPTS = 3
 # Bump whenever generated rows or files change for the same inputs (the golden tests are keyed by it): resume
 # refuses runs written under another data version, since regenerated chunks would no longer match committed ones.
 # 2: file feeds (feeds.py) and World.clickstream_events; database rows are unchanged from 1.
-DATA_VERSION = 2
+# 3: browsing sessions start in time slots (feeds._session_start), so clickstream files differ; rows unchanged.
+DATA_VERSION = 3
 PROBE_TRIES = 32
 CURRENCY = "USD"  # MVP: single-currency marketplace; per-market currencies come later
 MASTER_DATA_HISTORY = timedelta(days=730)  # master data is created in [clock_start - 730d, clock_start)

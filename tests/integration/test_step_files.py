@@ -292,6 +292,22 @@ def test_malformed_recorded_fields_are_a_validate_error(migrated: Migrated, smal
         validate.validate(c, small_cfg)
 
 
+@pytest.mark.parametrize("state", ["COMPLETED", "RUNNING"])
+def test_a_chain_of_another_data_version_gets_its_row_checks_only(migrated: Migrated, small_cfg: config.Config,
+                                                                 state: str) -> None:
+    """Its browsing sessions were placed differently, so this release can't check its files; the version is the
+    reason given, even before an unfinished step."""
+    c = migrated(small_cfg)
+    load.advance(c, small_cfg, MID)
+    c.execute("UPDATE generator_meta.generation_runs SET resume_fields = resume_fields || '{\"data_version\": 2}',"
+              " state = %s, finished_at = CASE WHEN %s = 'RUNNING' THEN NULL ELSE finished_at END", (state, state))
+    _, results = validate.validate(c, small_cfg)
+    bad = [r for r in results if r.violations]
+    assert [r.check.name for r in bad] == (["run_completed", "files_match_ledger"] if state == "RUNNING"
+                                           else ["files_match_ledger"])
+    assert "data_version 2" in bad[-1].samples[0] and len(results) == len(validate.CHECKS) + 1
+
+
 def test_file_size_may_change_between_steps(migrated: Migrated, small_cfg: config.Config, cfg_path: Path,
                                             tmp_path: Path) -> None:
     c = migrated(small_cfg)

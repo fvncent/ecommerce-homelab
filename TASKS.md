@@ -1,8 +1,9 @@
 # Tasks
 
 ## Active
-- [ ] Phase 3B files per step (branch `feat/step-files`, approved 2026-10-18): reviewed (8 fixed, 2 deferred: per-step session scan → DATA_VERSION 3 decision), 301 passed with DB; awaiting push approval
-- [ ] Phase 3C outbox events · 3D warehouses + inventory · 3E catch-up / `--follow` pacing
+- [ ] Browsing-session ordering fix (branch `fix/session-ordering`, approved 2026-10-19): sessions in time slots like orders, a step generates only the sessions that can touch its window; DATA_VERSION 3, new file goldens + references
+- [ ] Then: Phase 3 Ubuntu release (new tag; `v0.2.0-homelab` unchanged), Ubuntu smoke + multi-day `advance` walkthrough (user-run)
+- [ ] Phase 3C outbox events (not before the Phase 3 release passes on Ubuntu and the walkthrough is done) · 3D warehouses + inventory · 3E catch-up / `--follow` pacing
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 
 ## Next (Phase 1)
@@ -15,6 +16,7 @@
 - Clearer error when `metadata_schema` is renamed after apply (currently fails loudly with DuplicateTable)
 
 ## Done
+- [x] PR #22 Phase 3B (files per clock step) merged at reviewed head `f06e130`; `main` `a01689d` CI green, 301 tests / 0 skipped on PG 17 + 18 (2026-10-18)
 - [x] PR #21 Phase 3A (`advance`: clock steps, migration 0008) merged at reviewed head `ba939e2`; `main` `3e1d5a0` CI green, 276 tests / 0 skipped on PG 17 + 18 (2026-10-18)
 - [x] PR #20 (generator user guide) merged; `main` `35e7278` (2026-10-18)
 - [x] Operator walkthrough on Ubuntu (2026-10-18): `ecomgen_practice` + `ecommerce_oltp` created by the user; run `run_20261018T135727Z_72e31d` (10k) COMPLETED, validate 19/19; `docs/GENERATOR_USER_GUIDE.md`
