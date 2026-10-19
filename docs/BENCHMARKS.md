@@ -14,6 +14,19 @@ Add a row per run; note the environment. The target is the Ubuntu server; macOS 
 Measured with `/usr/bin/time -l` (macOS) around `ecomgen generate`; WAL = `pg_wal_lsn_diff` across the run (server-wide;
 no other activity on the server at the time). Largest tables: order_items 3.9 MB, orders 3.2 MB, payment_attempts 2.7 MB.
 
+## Ubuntu v0.4.0 verification and practice runbook (`v0.4.0-homelab`, 2026-10-19)
+
+Run by the user, one step at a time (VLSIM containers stopped/removed by the user beforehand; both snapshots taken in
+that state, the "before" one with the database section). Checkout `877c216`, dependencies unchanged. Older datasets
+read with v0.4.0: the v0.3.0 smoke run 20/20, the v3 `walk` chain 12/13 with the expected data-version reason; the
+v0.2.0 `commerce` set in `ecommerce_oltp` hit a validate bug (pre-0008 schema + files: DatatypeMismatch, read-only;
+fixed in PR #28). `docs/PRACTICE_RUNBOOK.md` steps 1-5 on the server: `practice_*` schemas (0001-0009, into the new
+schemas only), day 1 and day 2 identical to the Mac rehearsal (323 / 636 / 404 / 1,756 events; 322 / 584 / 400 / 1,972
+events, updated 128 / 101), validate 24/24, watermark query 450 = 322 new + 128 changed, read-only `ecomgen_reader`
+(SELECT ok, UPDATE refused). Snapshot diff: only `ecomgen_reader` + its CONNECT on `ecommerce_oltp`, `ecommerce_oltp`
++13,559 inserted / +231 updated (the practice dataset and its ledger), `ecomgen_v030_smoke` +16 kB with identical write
+counters (validate's temporary tables); benchmark databases, other roles, settings and the PostgreSQL service unchanged.
+
 ## Ubuntu Phase 3 release verification (`v0.3.0-homelab`, 2026-10-19)
 
 `v0.3.0-homelab` → `0301e1f` (PRs #21-#24; CI 378 tests / 0 skipped on PG 17.11 and 18.6). Run by the user on the

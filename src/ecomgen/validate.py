@@ -341,7 +341,7 @@ def _file_results(conn: psycopg.Connection, cfg: Config, run_ids: list[str], roo
 
 def _load_windows(conn: psycopg.Connection, cfg: Config, run_ids: list[str]) -> None:
     """pg_temp.feed_windows: each run's time window, from its recorded world and clock columns."""
-    clock = "previous_as_of, as_of" if db.has_column(conn, cfg, "generation_runs", "as_of") else "NULL, NULL"
+    clock = db.clock_columns(conn, cfg)
     conn.execute(db.q(cfg, "INSERT INTO pg_temp.feed_windows (run_id, clock_start, window_start, window_end)"
                            " SELECT run_id, (resume_fields->'world'->>'clock_start')::timestamptz, w.previous,"
                            " coalesce(w.as_of, (resume_fields->'world'->>'clock_end')::timestamptz"

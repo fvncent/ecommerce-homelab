@@ -331,7 +331,7 @@ def resume(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -> 
     _require_loadable(conn, cfg)
     with _run_lock(conn):
         run_id = db.resolve_run(conn, cfg, run_id)
-        row = conn.execute(db.q(cfg, f"SELECT state, resume_fields, {_clock_columns(conn, cfg)}"
+        row = conn.execute(db.q(cfg, f"SELECT state, resume_fields, {db.clock_columns(conn, cfg)}"
                                      " FROM {meta}.generation_runs WHERE run_id = %s"), (run_id,)).fetchone()
         assert row is not None
         state, recorded, previous_as_of, as_of = row
@@ -353,11 +353,6 @@ def resume(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -> 
 
 def _utc(t: datetime | None) -> datetime | None:
     return None if t is None else t.astimezone(UTC)
-
-
-def _clock_columns(conn: psycopg.Connection, cfg: Config) -> str:
-    """previous_as_of, as_of (NULL, NULL before migration 0008)."""
-    return "previous_as_of, as_of" if db.has_column(conn, cfg, "generation_runs", "as_of") else "NULL, NULL"
 
 
 @dataclass(frozen=True)
@@ -382,7 +377,7 @@ def status(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -> 
     holder = _lock_holder(conn)
     run_id = db.resolve_run(conn, cfg, run_id)
     row = conn.execute(db.q(cfg, "SELECT state, profile, generator_version, started_at, finished_at, error,"
-                                 f" counts->'planned', resume_fields, {_clock_columns(conn, cfg)}"
+                                 f" counts->'planned', resume_fields, {db.clock_columns(conn, cfg)}"
                                  " FROM {meta}.generation_runs WHERE run_id = %s"), (run_id,)).fetchone()
     assert row is not None
     state, profile, version, started_at, finished_at, error, planned, recorded, previous_as_of, as_of = row
