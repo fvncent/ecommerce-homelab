@@ -9,6 +9,8 @@
 
 Step-by-step operator guide (generate a practice dataset on the homelab, open it in psql or DBeaver over an SSH
 tunnel, inspect files, validate, monitor): [docs/GENERATOR_USER_GUIDE.md](docs/GENERATOR_USER_GUIDE.md).
+Setting up a dataset to build a pipeline on (own schemas, daily clock steps, read-only role, incremental and outbox
+queries): [docs/PRACTICE_RUNBOOK.md](docs/PRACTICE_RUNBOOK.md).
 
 ## Development
 

@@ -2,6 +2,7 @@
 
 How to generate a practice dataset and look at it, as an operator. For the release benchmark (which needs empty
 databases and is not a way to make datasets) see `docs/HOMELAB_DEPLOYMENT.md`; for file contracts `docs/FEEDS.md`.
+**To set up a dataset for your pipeline, follow `docs/PRACTICE_RUNBOOK.md`** (own `practice_*` schemas, step by step).
 
 Commands marked **verified** were run on the homelab: setup and `generate` on 2026-10-18 with `v0.2.0-homelab`;
 upgrade, smoke and clock steps (`advance`) on 2026-10-19 with `v0.3.0-homelab`. Everything is typed by hand in an

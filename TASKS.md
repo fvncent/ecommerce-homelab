@@ -4,6 +4,8 @@
 - [ ] Optional, user-approved only: `init-db` (migration 0008) on `ecommerce_oltp` / benchmark DBs; dropping the disposable `ecomgen_v030_smoke` + `data/v030-*` when no longer wanted
 - [ ] Push tag `v0.3.1-homelab` (created locally on `4632562` after checks; push awaits the user's OK; tags are immutable on GitHub)
 - [ ] Phase 3C outbox (branch `feat/outbox`, design approved 2026-10-19): `{integration}.outbox_events`, one event per order / payment transition, same transaction as the rows, deterministic IDs + per-aggregate sequence, run lineage, append-only, DATA_VERSION 5, migration 0009; implemented (generation, migration 0009, loader, validate, tests, docs; 412/0 on PG 17 + 18, benchmark 49/49); review next; release as `v0.4.0-homelab` after review
+- [ ] Practice runbook `docs/PRACTICE_RUNBOOK.md` + `config/practice.example.yaml` (own `practice_*` schemas and folder; rehearsed on the Mac): user's first Ubuntu run after `v0.4.0-homelab`
+- [ ] Release proposal `v0.4.0-homelab` (migration 0009 adds outbox + a UNIQUE (payment_id, order_id) index on payment_attempts of the schema set init-db runs on)
 - [ ] 3D warehouses + inventory · 3E catch-up / `--follow` pacing
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 

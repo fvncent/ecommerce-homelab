@@ -106,6 +106,14 @@ the window check; v3 chains refused by advance/resume. Review table in git histo
 After fixes: 417 tests / 0 skipped on PG 17 and 18.6; mypy clean; benchmark 49/49 (references unchanged since part 3).
 Note for release: 0009 also adds a UNIQUE (payment_id, order_id) index to `payment_attempts` of existing schemas.
 
+## Practice runbook (same branch, user request 2026-10-19)
+`docs/PRACTICE_RUNBOOK.md` + `config/practice.example.yaml`: practice dataset in `ecommerce_oltp` with its own
+schemas `practice_commerce` / `practice_integration` / `practice_meta`, folder `data/practice-pipeline`, env
+`practice/pipeline.env`; benchmark stays in its own `ecommerce_homelab_*` databases. Steps: config, init-db, first
+day, one-day-at-a-time (next day computed in SQL), read-only `ecomgen_reader` grants, watermark + outbox queries,
+replay, troubleshooting. Rehearsed on the Mac in a throwaway PG 18.6 (Ubuntu layout); older `commerce` dataset
+unchanged; watermark count = step inserted + updated.
+
 ## Next step
-Ask to push `feat/outbox` + open a PR (review done, 9 fixed). Separately: the user's OK to push the
+User approved (2026-10-19): push `feat/outbox`, open + merge the PR after CI, push `v0.3.1-homelab`. Then propose `v0.4.0-homelab`. Separately: the user's OK to push the
 local `v0.3.1-homelab` tag. Ponytail `lite`. Ubuntu: give the host-snapshot command on its own line.
