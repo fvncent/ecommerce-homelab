@@ -80,7 +80,19 @@ edit such files with Edit, not Bash); GitHub rulesets on `main` (PR + 3 checks) 
 - Compatibility: no migration (0008 unchanged). v3 one-shot runs unaffected; v3 chains (Ubuntu's disposable
   `stepped`, `walk`) can't be continued (`data_version differ`), validate keeps their row checks.
 
+## Half-open windows review (`/code-review high` + `/ponytail-review`) — 6 fixed
+| # | Finding | Fix |
+|---|---|---|
+| 1 | **Bug:** `--to` with a fraction of a second: text vs datetime window tests disagree (events in another step than rows) | `check_step` refuses non-whole-second as_of; CLI exit 2; tests |
+| 2 | v2/v3 one-shot run with a settlement at exactly clock_end fails the v4 window check | `feed_windows`: window_end + 1 µs for data_version < 4; test (v3 passes, v4 flags; fails without the fix) |
+| 3 | `data-change` skill described the old windows | updated |
+| 4 | `step_chunk` docstring said "placed after previous" | "at or after" |
+| 5 | feeds module docstring garbled / overlong | rewrapped |
+| 6 | per-event strftime in the window filter | bounds computed once per step; `_in_window_text` deleted |
+
+After fixes: 387 tests / 0 skipped on PG 17 and 18.6; mypy clean; benchmark 49/49 on unchanged references.
+
 ## Next step
-Independent review of `fix/half-open-windows`, fix findings, then ask to push. After merge + green main: patch
+Ask to push `fix/half-open-windows` and open a PR (review done, 6 fixed). After merge + green main: patch
 release proposal `v0.3.1-homelab`, then the Phase 3C plan. Ponytail level `lite`.
 Ubuntu step notes: give the host-snapshot command on its own line (the v0.3.0 "before" paste got garbled).

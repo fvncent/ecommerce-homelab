@@ -295,7 +295,11 @@ def _load_windows(conn: psycopg.Connection, cfg: Config, run_ids: list[str]) -> 
     clock = "previous_as_of, as_of" if db.has_column(conn, cfg, "generation_runs", "as_of") else "NULL, NULL"
     conn.execute(db.q(cfg, "INSERT INTO pg_temp.feed_windows (run_id, clock_start, window_start, window_end)"
                            " SELECT run_id, (resume_fields->'world'->>'clock_start')::timestamptz, w.previous,"
-                           " coalesce(w.as_of, (resume_fields->'world'->>'clock_end')::timestamptz)"
+                           " coalesce(w.as_of, (resume_fields->'world'->>'clock_end')::timestamptz"
+                           # data version < 4 cut time inclusively ((previous, as_of]): a one-shot run of it may hold
+                           # a settlement at exactly clock_end (chains of another version are not file-checked)
+                           " + CASE WHEN (resume_fields->>'data_version')::int < 4"
+                           " THEN interval '1 microsecond' ELSE interval '0' END)"
                            f" FROM {{meta}}.generation_runs, LATERAL (SELECT {clock}) AS w (previous, as_of)"
                            " WHERE run_id = ANY(%s)"), (run_ids,))
 

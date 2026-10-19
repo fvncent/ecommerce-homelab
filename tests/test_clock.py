@@ -110,6 +110,7 @@ def test_a_step_revisits_only_orders_that_can_still_change() -> None:
     (START + timedelta(days=2), START + timedelta(days=2), "not after"),
     (START + timedelta(days=2), START + timedelta(days=1), "not after"),
     (None, datetime(2026, 1, 2), "UTC"),
+    (None, START + timedelta(days=1, microseconds=500_000), "whole second"),  # text and time windows would disagree
 ])
 def test_step_bounds(previous: datetime | None, as_of: datetime, match: str) -> None:
     with pytest.raises(g.GenerationError, match=match):

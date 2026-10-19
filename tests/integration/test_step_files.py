@@ -343,6 +343,22 @@ def test_a_midnight_event_in_the_step_ending_at_it_is_caught(migrated: Migrated,
     assert not bad & {"events_unique_and_complete", "orders_placed_once", "files_match_ledger"}
 
 
+@pytest.mark.parametrize("version, fails", [(4, True), (3, False)])
+def test_a_record_at_clock_end_is_outside_a_v4_run_only(migrated: Migrated, small_cfg: config.Config,
+                                                       data_root: Path, version: int, fails: bool) -> None:
+    """Data version < 4 cut time inclusively, so a v2/v3 one-shot run may hold a record at exactly clock_end; it must
+    still validate. Simulated by recording clock_end = the run's latest record time."""
+    c = migrated(small_cfg)
+    load.run(c, small_cfg)
+    last = max(max(json.loads(line)["event_time"] for line in records(data_root)["clickstream"]),
+               max(line.split(",")[10] for line in records(data_root)["source_feeds"]))
+    c.execute("UPDATE generator_meta.generation_runs SET resume_fields = jsonb_set(jsonb_set(resume_fields,"
+              " '{world,clock_end}', to_jsonb(%s::text)), '{data_version}', to_jsonb(%s::int))", (last, version))
+    bad = {b.split(":")[0] for b in failing(c, small_cfg)}
+    assert ("records_in_their_step_window" in bad) == fails
+    assert not bad - {"records_in_their_step_window"}
+
+
 def test_a_v3_chain_is_neither_advanced_nor_resumed(migrated: Migrated, small_cfg: config.Config,
                                                    data_root: Path) -> None:
     """Data version 3 cut windows as (previous, as_of]: continuing such a chain would mix the two rules at its

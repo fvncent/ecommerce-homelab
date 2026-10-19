@@ -499,6 +499,8 @@ def check_step(world: World, previous: datetime | None, as_of: datetime) -> None
     """A step moves the clock forward within [clock_start, clock_end]."""
     if as_of.utcoffset() != timedelta(0):
         raise GenerationError(f"as_of must be a UTC timestamp, got {as_of!r}")
+    if as_of.microsecond:  # every generated time is a whole second; feeds compare second-resolution text
+        raise GenerationError(f"as_of must be a whole second, got {as_of.isoformat()}")
     if not world.clock_start <= as_of <= world.clock_end:
         raise GenerationError(f"as_of {as_of.isoformat()} is outside the simulation window "
                               f"{world.clock_start.isoformat()} .. {world.clock_end.isoformat()}")
@@ -541,7 +543,7 @@ def step_chunk_count(plan: StepPlan, chunk_rows: int) -> int:
 
 def step_chunk(world: World, plan: StepPlan, chunk_no: int, chunk_rows: int) -> StepChunk:
     """The changes from plan.previous (None: nothing yet) to plan.as_of for one chunk of plan.orders. Orders placed
-    after previous are new; earlier ones are diffed against their state at previous. Items never change."""
+    at or after previous are new; earlier ones are diffed against their state at previous. Items never change."""
     if not 0 <= chunk_no < step_chunk_count(plan, chunk_rows):
         raise GenerationError(f"step chunk {chunk_no} out of range for {len(plan.orders)} orders / {chunk_rows} "
                               "per chunk")

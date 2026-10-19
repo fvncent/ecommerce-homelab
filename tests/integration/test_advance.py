@@ -239,6 +239,7 @@ def test_cli(cfg_path: Path, db_url: str, small_cfg: config.Config, migrated: Mi
     assert "already" in capsys.readouterr().out
     assert main(["advance", str(cfg_path), "--to", "2026-01-12T00:00:00"]) == 2  # no time zone
     assert main(["advance", str(cfg_path), "--to", "next week"]) == 2
+    assert main(["advance", str(cfg_path), "--to", "2026-01-12T00:00:00.5Z"]) == 2  # whole seconds only
     assert main(["advance", str(cfg_path), "--to", "2026-01-05T00:00:00Z"]) == 1
     assert "only moves forward" in capsys.readouterr().err
     assert main(["advance", str(cfg_path), "--to", "end"]) == 0

@@ -104,6 +104,9 @@ def advance_cmd(path: str, to: str) -> int:
         if as_of.utcoffset() is None:
             print(f"argument error: --to {to!r} has no time zone; add Z for UTC", file=sys.stderr)
             return 2
+        if as_of.microsecond:
+            print(f"argument error: --to {to!r} has a fraction of a second; steps end on whole seconds", file=sys.stderr)
+            return 2
         as_of = as_of.astimezone(dt.UTC)
     started = time.perf_counter()
     try:

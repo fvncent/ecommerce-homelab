@@ -202,9 +202,6 @@ def test_step_windows_are_half_open() -> None:
     assert feeds.in_window(first, WORLD.clock_start) and not feeds.in_window(first, t0)
     assert feeds.in_window(later, t0) and not feeds.in_window(later, t1)
     assert feeds.in_window(later, t1 - timedelta(seconds=1)) and not feeds.in_window(later, t0 - timedelta(seconds=1))
-    for t in (t0, t0 + timedelta(seconds=1), t1 - timedelta(seconds=1)):  # text form agrees at and next to the bounds
-        for plan in (first, later):
-            assert feeds._in_window_text(plan, feeds.ts(t)) == feeds.in_window(plan, t)
 
 
 def test_browsing_events_by_counts_events_up_to_a_time(tmp_path: Path) -> None:
@@ -301,7 +298,7 @@ def test_a_step_generates_every_session_it_needs_and_no_older_ones() -> None:
     for as_of in stops:
         plan = g.plan_step(WORLD, previous, as_of)
         sessions = feeds.step_sessions(WORLD, plan)
-        needed = {int(str(e["session_id"])[4:]) for e in events if feeds._in_window_text(plan, str(e["event_time"]))}
+        needed = {int(str(e["session_id"])[4:]) for e in events if feeds.in_window(plan, datetime.fromisoformat(str(e["event_time"])))}
         assert needed <= set(sessions)
         if previous is not None:  # nothing that ended before the window is regenerated
             assert feeds.session_start(WORLD, sessions.start) >= previous - feeds.SESSION_SPAN
@@ -309,7 +306,7 @@ def test_a_step_generates_every_session_it_needs_and_no_older_ones() -> None:
             assert feeds.session_start(WORLD, sessions.stop - 1) < as_of
         got = [e for b in feeds._step_sessions(WORLD, 37, plan) for e in b]
         assert sorted(str(e["event_id"]) for e in got) == sorted(
-            str(e["event_id"]) for e in events if feeds._in_window_text(plan, str(e["event_time"])))
+            str(e["event_id"]) for e in events if feeds.in_window(plan, datetime.fromisoformat(str(e["event_time"]))))
         previous = as_of
 
 
@@ -336,7 +333,7 @@ def test_a_late_step_over_a_large_history_generates_only_recent_sessions(monkeyp
     previous = big.clock_end - timedelta(hours=2)
     plan = g.plan_step(big, previous, previous + timedelta(hours=1))
     got = [e for b in feeds._step_sessions(big, 5000, plan) for e in b]
-    assert got and all(feeds._in_window_text(plan, str(e["event_time"])) for e in got)
+    assert got and all(feeds.in_window(plan, datetime.fromisoformat(str(e["event_time"]))) for e in got)
     assert 0 < len(calls) < feeds.session_count(big) // 200
     assert min(calls) > feeds.sessions_by(big, previous - feeds.SESSION_SPAN)
     calls.clear()

@@ -10,9 +10,9 @@ Feeds (schema_version 1), partitioned by event date (UTC) under the data root:
   flat (equal sessions per equal time, +-1), as order volume already is.
 Rows within a file follow generation order, not event time. Files roll over at filesystem.max_file_size_mb.
 A clock step (`advance`) publishes the events of its window [previous_as_of, as_of) only (the first step:
-[clock_start, as_of)), so a step ending at midnight never writes into the next day's partition: settlements whose settled_at is in it, order_placed events of the orders placed in it, and
+[clock_start, as_of)): settlements whose settled_at is in it, order_placed events of the orders placed in it, and
 browsing events whose event_time is in it, generating only the sessions that can have one (step_sessions), not the
-whole history. All steps of a chain together hold exactly the one-shot run's records.
+whole history. A step ending at midnight therefore never writes into the next day's partition. All steps of a chain together hold exactly the one-shot run's records.
 
 Publishing (DB and filesystem writes are not atomic together, so this converges instead):
 1. Every file of the run is regenerated into `staging/{run}/` (our own incomplete output, cleared first).
@@ -254,11 +254,6 @@ def in_window(plan: generate.StepPlan, at: datetime) -> bool:
     return (plan.previous is None or at >= plan.previous) and at < plan.as_of
 
 
-def _in_window_text(plan: generate.StepPlan, at: str) -> bool:
-    """in_window for a ts() string: the fixed-width UTC format sorts like the time, so no parsing per event."""
-    return (plan.previous is None or at >= ts(plan.previous)) and at < ts(plan.as_of)
-
-
 def _sessions(world: generate.World, rows: int, sessions: range) -> Iterator[list[dict[str, object]]]:
     """The browsing events of `sessions`, a bounded batch of sessions at a time. Entities are pure functions of their
     number, so a bounded cache can't change output; it saves regenerating the same products (and their sellers)."""
@@ -301,9 +296,11 @@ def write_staged(world: generate.World, cfg: Config, run_id: str, staging: Path,
 
 
 def _step_sessions(world: generate.World, rows: int, plan: generate.StepPlan) -> Iterator[list[dict[str, object]]]:
-    """The browsing events in the step window, a bounded batch of sessions at a time."""
+    """The browsing events in the step window, a bounded batch of sessions at a time. The fixed-width ts() strings
+    sort like the times (whole seconds, see generate.check_step), so events are compared without parsing."""
+    start, end = ("" if plan.previous is None else ts(plan.previous)), ts(plan.as_of)
     for batch in _sessions(world, rows, step_sessions(world, plan)):
-        yield [e for e in batch if _in_window_text(plan, str(e["event_time"]))]
+        yield [e for e in batch if start <= str(e["event_time"]) < end]
 
 
 def _order_batches(world: generate.World, rows: int, plan: generate.StepPlan

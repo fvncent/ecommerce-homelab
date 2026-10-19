@@ -2,7 +2,7 @@
 
 ## Active
 - [ ] Optional, user-approved only: `init-db` (migration 0008) on `ecommerce_oltp` / benchmark DBs; dropping the disposable `ecomgen_v030_smoke` + `data/v030-*` when no longer wanted
-- [ ] Fix half-open step windows (branch `fix/half-open-windows`, Option 1 approved 2026-10-19): windows `[previous, as_of)`, DATA_VERSION 4; tests + review done, 384 tests / 0 skipped on PG 17 + 18; push awaiting approval; then patch release proposal `v0.3.1-homelab`
+- [ ] Fix half-open step windows (branch `fix/half-open-windows`, Option 1 approved 2026-10-19): windows `[previous, as_of)`, DATA_VERSION 4; reviewed (6 fixed), 387 tests / 0 skipped on PG 17 + 18, benchmark 49/49 on unchanged references, no migration; push awaiting approval; then patch release proposal `v0.3.1-homelab`
 - [ ] Phase 3C outbox events: plan only after the window fix is merged; implement after the user approves the plan · 3D warehouses + inventory · 3E catch-up / `--follow` pacing
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 
