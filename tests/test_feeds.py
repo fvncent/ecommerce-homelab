@@ -21,7 +21,8 @@ RUN = "run_20260101T000000Z_abcdef"
 # sha256 over (relative path, file bytes) of every staged file of WORLD, per generate.DATA_VERSION. Same rules as
 # GOLDEN in test_generate.py: never edit an entry for a data change; bump DATA_VERSION and add one.
 FEED_GOLDEN = {2: "bfb7276d62db9a2f1487ea597baf383fe245c44457ad8d2d43ff1b0d39caf385",
-               3: "af1de3311df79b3ccdbe07b8c24814df86ce2c5a3de8453c63a69527f733efc0"}  # sessions in time slots
+               3: "af1de3311df79b3ccdbe07b8c24814df86ce2c5a3de8453c63a69527f733efc0",  # sessions in time slots
+               4: "af1de3311df79b3ccdbe07b8c24814df86ce2c5a3de8453c63a69527f733efc0"}  # windows [previous, as_of)
 
 
 def cfg(chunk_rows: int = 250, max_mb: int = 128, csv: bool = True, jsonl: bool = True) -> config.Config:
@@ -198,9 +199,9 @@ def test_step_files_together_equal_the_one_shot_files(tmp_path: Path, days: list
 def test_step_windows_are_half_open() -> None:
     t0, t1 = WORLD.clock_start + timedelta(days=1), WORLD.clock_start + timedelta(days=2)
     first, later = g.plan_step(WORLD, None, t0), g.plan_step(WORLD, t0, t1)
-    assert feeds.in_window(first, WORLD.clock_start) and feeds.in_window(first, t0)
-    assert not feeds.in_window(later, t0) and feeds.in_window(later, t1)
-    assert not feeds.in_window(later, t1 + timedelta(seconds=1))
+    assert feeds.in_window(first, WORLD.clock_start) and not feeds.in_window(first, t0)
+    assert feeds.in_window(later, t0) and not feeds.in_window(later, t1)
+    assert feeds.in_window(later, t1 - timedelta(seconds=1)) and not feeds.in_window(later, t0 - timedelta(seconds=1))
 
 
 def test_browsing_events_by_counts_events_up_to_a_time(tmp_path: Path) -> None:
@@ -209,7 +210,63 @@ def test_browsing_events_by_counts_events_up_to_a_time(tmp_path: Path) -> None:
                    for line in data.splitlines() if b'"order_placed"' not in line)
     assert len(times) == WORLD.clickstream_events == feeds.browsing_events_by(WORLD, WORLD.clock_end, 250)
     t = WORLD.clock_start + timedelta(days=5)
-    assert feeds.browsing_events_by(WORLD, t, 250) == sum(x <= feeds.ts(t) for x in times) > 0
+    assert feeds.browsing_events_by(WORLD, t, 250) == sum(x < feeds.ts(t) for x in times) > 0
+
+
+def _step_records(world: g.World, c: config.Config, tmp: Path,
+                  stops: list[datetime]) -> list[tuple[datetime | None, datetime, str, str, dict[str, object]]]:
+    """(previous, as_of, date partition, run, record) of every record each step publishes."""
+    out: list[tuple[datetime | None, datetime, str, str, dict[str, object]]] = []
+    previous: datetime | None = None
+    for k, as_of in enumerate(stops):
+        run = f"run_2026010{k}T000000Z_abcdef"
+        for rel, st in feeds.write_staged(world, c, run, tmp / run, g.plan_step(world, previous, as_of)).items():
+            date = rel.split("date=")[1].split("/")[0]
+            out += [(previous, as_of, date, run, r) for r in feeds.iter_records(tmp / run / rel, st.fmt)]
+        previous = as_of
+    return out
+
+
+def _at(record: dict[str, object]) -> str:
+    return str(record.get("event_time") or record["settled_at"])
+
+
+def test_records_at_exactly_a_step_end_belong_to_the_next_step(tmp_path: Path) -> None:
+    """A browsing event, an order_placed event and a settlement stamped exactly at a step's as_of are published by
+    the next step (whose window starts there), once; all steps together still equal the one-shot files."""
+    settled = sorted(p.updated_at for p in payments() if p.state == "SETTLED")
+    stops = sorted({datetime.fromisoformat(str(_browse(WORLD)[700]["event_time"])), WORLD.placed_at(300),
+                    settled[len(settled) // 2]}) + [WORLD.clock_end]
+    assert len(stops) == 4
+    recs = _step_records(WORLD, cfg(), tmp_path, stops)
+    for b in stops[:-1]:
+        at_b = [(prev, run) for prev, _, _, run, r in recs if _at(r) == feeds.ts(b)]
+        assert at_b and all(prev == b for prev, _ in at_b), b  # only in the step that starts at b
+    for prev, as_of, _, _, r in recs:
+        assert (prev is None or _at(r) >= feeds.ts(prev)) and _at(r) < feeds.ts(as_of)
+    ids = [str(r.get("event_id") or r["settlement_id"]) for *_, r in recs]
+    _, whole = staged(tmp_path / "whole", cfg())
+    assert len(ids) == len(set(ids)) == sum(len(_records(whole)[k]) for k in ("clickstream", "source_feeds"))
+
+
+# Seed 11 (3 days, 6,000 browsing events): evt_4010 is at exactly an interior midnight (found by search).
+MIDNIGHT = g.World(seed=11, clock_start=datetime(2026, 1, 1, tzinfo=UTC), clock_end=datetime(2026, 1, 4, tzinfo=UTC),
+                   sellers=10, customers=200, products=100, orders=300, clickstream_events=6000)
+
+
+def test_day_aligned_steps_write_each_day_partition_from_one_step(tmp_path: Path) -> None:
+    """Steps ending at midnight cover [D 00:00, D+1 00:00), exactly the date=D partition: the midnight event lands in
+    its own day, in the step that starts at it, and no partition holds files of two steps (so replay keeps days
+    whole). Under the old (previous, as_of] windows evt_4010 went to the previous day's step."""
+    stops = [MIDNIGHT.clock_start + timedelta(days=d) for d in (1, 2, 3)]
+    recs = _step_records(MIDNIGHT, cfg(), tmp_path, stops)
+    owner: dict[str, set[str]] = {}
+    for prev, _, date, run, r in recs:
+        owner.setdefault(date, set()).add(run)
+        assert date == _at(r)[:10] == (prev or MIDNIGHT.clock_start).date().isoformat()
+    assert all(len(runs) == 1 for runs in owner.values()) and len(owner) == 3
+    (hit,) = [(prev, date) for prev, _, date, _, r in recs if r.get("event_id") == "evt_4010"]
+    assert hit[0] is not None and feeds.ts(hit[0]).endswith("T00:00:00Z") and hit[1] == hit[0].date().isoformat()
 
 
 def _browse(world: g.World) -> list[dict[str, object]]:
@@ -226,7 +283,7 @@ def test_session_starts_never_decrease_and_bound_their_events(world: g.World) ->
         assert feeds.ts(start) <= str(e["event_time"]) <= feeds.ts(start + feeds.SESSION_SPAN)
         assert str(e["event_time"]) < feeds.ts(world.clock_end)
     for t in [world.clock_start - timedelta(seconds=1), world.clock_start, world.clock_end, *starts[:50:7]]:
-        assert feeds.sessions_by(world, t) == sum(s <= t for s in starts)
+        assert feeds.sessions_by(world, t) == sum(s < t for s in starts)
     with pytest.raises(feeds.FeedError, match="out of range"):
         feeds.session_start(world, feeds.session_count(world) + 1)
 
@@ -241,15 +298,15 @@ def test_a_step_generates_every_session_it_needs_and_no_older_ones() -> None:
     for as_of in stops:
         plan = g.plan_step(WORLD, previous, as_of)
         sessions = feeds.step_sessions(WORLD, plan)
-        needed = {int(str(e["session_id"])[4:]) for e in events if feeds._in_window_text(plan, str(e["event_time"]))}
+        needed = {int(str(e["session_id"])[4:]) for e in events if feeds.in_window(plan, datetime.fromisoformat(str(e["event_time"])))}
         assert needed <= set(sessions)
         if previous is not None:  # nothing that ended before the window is regenerated
-            assert feeds.session_start(WORLD, sessions.start) > previous - feeds.SESSION_SPAN
+            assert feeds.session_start(WORLD, sessions.start) >= previous - feeds.SESSION_SPAN
         if sessions:
-            assert feeds.session_start(WORLD, sessions.stop - 1) <= as_of
+            assert feeds.session_start(WORLD, sessions.stop - 1) < as_of
         got = [e for b in feeds._step_sessions(WORLD, 37, plan) for e in b]
         assert sorted(str(e["event_id"]) for e in got) == sorted(
-            str(e["event_id"]) for e in events if feeds._in_window_text(plan, str(e["event_time"])))
+            str(e["event_id"]) for e in events if feeds.in_window(plan, datetime.fromisoformat(str(e["event_time"]))))
         previous = as_of
 
 
@@ -276,7 +333,7 @@ def test_a_late_step_over_a_large_history_generates_only_recent_sessions(monkeyp
     previous = big.clock_end - timedelta(hours=2)
     plan = g.plan_step(big, previous, previous + timedelta(hours=1))
     got = [e for b in feeds._step_sessions(big, 5000, plan) for e in b]
-    assert got and all(feeds._in_window_text(plan, str(e["event_time"])) for e in got)
+    assert got and all(feeds.in_window(plan, datetime.fromisoformat(str(e["event_time"]))) for e in got)
     assert 0 < len(calls) < feeds.session_count(big) // 200
     assert min(calls) > feeds.sessions_by(big, previous - feeds.SESSION_SPAN)
     calls.clear()

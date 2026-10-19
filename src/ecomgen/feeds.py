@@ -9,10 +9,10 @@ Feeds (schema_version 1), partitioned by event date (UTC) under the data root:
   range of sessions: every event of a session is in [start, start + SESSION_SPAN]. Slots make browse volume nearly
   flat (equal sessions per equal time, +-1), as order volume already is.
 Rows within a file follow generation order, not event time. Files roll over at filesystem.max_file_size_mb.
-A clock step (`advance`) publishes the events of its window (previous_as_of, as_of] only (the first step:
-[clock_start, as_of]): settlements whose settled_at is in it, order_placed events of the orders placed in it, and
+A clock step (`advance`) publishes the events of its window [previous_as_of, as_of) only (the first step:
+[clock_start, as_of)): settlements whose settled_at is in it, order_placed events of the orders placed in it, and
 browsing events whose event_time is in it, generating only the sessions that can have one (step_sessions), not the
-whole history. All steps of a chain together hold exactly the one-shot run's records.
+whole history. A step ending at midnight therefore never writes into the next day's partition. All steps of a chain together hold exactly the one-shot run's records.
 
 Publishing (DB and filesystem writes are not atomic together, so this converges instead):
 1. Every file of the run is regenerated into `staging/{run}/` (our own incomplete output, cleared first).
@@ -122,18 +122,19 @@ def session_start(world: generate.World, s: int) -> datetime:
 
 
 def sessions_by(world: generate.World, t: datetime) -> int:
-    """Number of sessions started at or before t (session_start never decreases, so a binary search)."""
-    return bisect.bisect_right(range(1, session_count(world) + 1), t, key=lambda s: session_start(world, s))
+    """Number of sessions started before t (session_start never decreases, so a binary search)."""
+    return bisect.bisect_left(range(1, session_count(world) + 1), t, key=lambda s: session_start(world, s))
 
 
 def _sessions_after(world: generate.World, t: datetime, until: datetime) -> range:
-    """The sessions started by `until` that can have an event after t: started after t - SESSION_SPAN (an older
-    session's events are all at or before t)."""
+    """The sessions started before `until` that can have an event at or after t: started at or after
+    t - SESSION_SPAN (an older session's events are all before t)."""
     return range(sessions_by(world, t - SESSION_SPAN) + 1, sessions_by(world, until) + 1)
 
 
 def step_sessions(world: generate.World, plan: generate.StepPlan) -> range:
-    """The sessions that can have an event in the step window (previous, as_of] (first step: all started by as_of)."""
+    """The sessions that can have an event in the step window [previous, as_of) (first step: all started before
+    as_of)."""
     if plan.previous is None:
         return range(1, sessions_by(world, plan.as_of) + 1)
     return _sessions_after(world, plan.previous, plan.as_of)
@@ -249,13 +250,8 @@ def enabled(cfg: Config) -> list[str]:
 
 
 def in_window(plan: generate.StepPlan, at: datetime) -> bool:
-    """True if a step's files hold an event at `at`: (previous_as_of, as_of] (first step: everything up to as_of)."""
-    return (plan.previous is None or at > plan.previous) and at <= plan.as_of
-
-
-def _in_window_text(plan: generate.StepPlan, at: str) -> bool:
-    """in_window for a ts() string: the fixed-width UTC format sorts like the time, so no parsing per event."""
-    return (plan.previous is None or at > ts(plan.previous)) and at <= ts(plan.as_of)
+    """True if a step's files hold an event at `at`: [previous_as_of, as_of) (first step: everything before as_of)."""
+    return (plan.previous is None or at >= plan.previous) and at < plan.as_of
 
 
 def _sessions(world: generate.World, rows: int, sessions: range) -> Iterator[list[dict[str, object]]]:
@@ -270,13 +266,13 @@ def _sessions(world: generate.World, rows: int, sessions: range) -> Iterator[lis
 
 
 def browsing_events_by(world: generate.World, as_of: datetime, rows: int) -> int:
-    """How many browsing events happened by as_of (all of them at clock_end). Only the sessions that can have an
-    event after as_of are generated; the ones before them have every event by as_of."""
+    """How many browsing events happened before as_of (all of them at clock_end). Only the sessions that can have an
+    event at or after as_of are generated; the ones before them have every event before as_of."""
     if as_of >= world.clock_end:
         return world.clickstream_events
     partial, limit = _sessions_after(world, as_of, as_of), ts(as_of)
     return (min(world.clickstream_events, (partial.start - 1) * SESSION_EVENTS)
-            + sum(1 for batch in _sessions(world, rows, partial) for e in batch if str(e["event_time"]) <= limit))
+            + sum(1 for batch in _sessions(world, rows, partial) for e in batch if str(e["event_time"]) < limit))
 
 
 def write_staged(world: generate.World, cfg: Config, run_id: str, staging: Path,
@@ -300,9 +296,11 @@ def write_staged(world: generate.World, cfg: Config, run_id: str, staging: Path,
 
 
 def _step_sessions(world: generate.World, rows: int, plan: generate.StepPlan) -> Iterator[list[dict[str, object]]]:
-    """The browsing events in the step window, a bounded batch of sessions at a time."""
+    """The browsing events in the step window, a bounded batch of sessions at a time. The fixed-width ts() strings
+    sort like the times (whole seconds, see generate.check_step), so events are compared without parsing."""
+    start, end = ("" if plan.previous is None else ts(plan.previous)), ts(plan.as_of)
     for batch in _sessions(world, rows, step_sessions(world, plan)):
-        yield [e for e in batch if _in_window_text(plan, str(e["event_time"]))]
+        yield [e for e in batch if start <= str(e["event_time"]) < end]
 
 
 def _order_batches(world: generate.World, rows: int, plan: generate.StepPlan
@@ -478,7 +476,7 @@ def manifest(conn: psycopg.Connection, cfg: Config, run_id: str) -> dict[str, ob
                                        " AND as_of IS NOT NULL ORDER BY as_of, run_id LIMIT 1")).fetchone()
         step = {"clock_step": {
             "first_step_run_id": first[0] if first else None, "previous_as_of": ts(run[4]) if run[4] else None,
-            "as_of": ts(run[5]), "window": "(previous_as_of, as_of]" if run[4] else "[clock_start, as_of]",
+            "as_of": ts(run[5]), "window": "[previous_as_of, as_of)" if run[4] else "[clock_start, as_of)",
             "window_start": ts(run[4]) if run[4] else ts(datetime.fromisoformat(run[6]))}}
     return {
         "run_id": run_id, "generator_version": run[0], "data_version": run[3], "config_sha256": run[1],

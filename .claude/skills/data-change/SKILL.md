@@ -20,7 +20,8 @@ be versioned.
 ## 2. Equality and recovery
 - **Steps equal generate:** `tests/test_clock.py`, the step tests in `tests/test_feeds.py`,
   `tests/integration/test_advance.py` and `test_step_files.py` must pass. They cover any steps reaching `clock_end`
-  giving exactly `generate`'s rows and records, half-open windows `(previous, as_of]`, and empty windows.
+  giving exactly `generate`'s rows and records, windows `[previous, as_of)` (data version 4: a record at exactly a
+  step's as_of belongs to the next step), and empty windows.
 - **Crash/resume:** `tests/integration/test_resume.py` and the SIGKILL stages in `test_step_files.py` (db, csv,
   jsonl, place, manifest, complete) must pass. Add a stage when you add a write point.
 - **10k end to end** (when step or file logic changed), in a throwaway DB:

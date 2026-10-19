@@ -201,7 +201,7 @@ def _update(cur: psycopg.Cursor[tuple[object, ...]], cfg: Config, table: str,
 def write_step(conn: psycopg.Connection, cfg: Config, run_id: str, world: generate.World,
                previous: datetime | None, as_of: datetime) -> tuple[int, int]:
     """Write a clock step's chunks not yet in the ledger: master data in the first step, then the orders placed or
-    changed in (previous, as_of]. Return (written, skipped)."""
+    changed in [previous, as_of). Return (written, skipped)."""
     written, skipped = (0, 0) if previous is not None else write_chunks(conn, cfg, run_id, world,
                                                                         generate.MASTER_ENTITIES)
     chunk_rows = cfg.generator.chunk_rows

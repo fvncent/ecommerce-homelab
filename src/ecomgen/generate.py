@@ -10,9 +10,10 @@ Identity strategy:
 - FK-safe order: ENTITY_ORDER. Category parents always have a lower ID.
 
 Simulation clock: `World.order(n, as_of)` is order N as it stands at time `as_of` (default clock_end): the same
-draws, with only the events up to as_of applied. Orders are placed in ID order, so the orders that exist at T are
-1..orders_by(T). A clock step (previous, as_of] inserts the orders placed in it and updates earlier ones that
-changed (`step_chunk`); stepping to clock_end in any number of steps gives exactly the rows `generate` writes.
+draws, with only the events strictly before as_of applied (an event at exactly as_of belongs to what comes next).
+Orders are placed in ID order, so the orders that exist at T are 1..orders_by(T). A clock step [previous, as_of)
+inserts the orders placed in it and updates earlier ones that changed (`step_chunk`); stepping to clock_end in any
+number of steps gives exactly the rows `generate` writes ([clock_start, clock_end)).
 
 Portability: only rng.random() (Mersenne Twister, platform-independent) with integer/Decimal arithmetic; no
 float transcendental functions, whose last-bit results can differ between libm implementations.
@@ -36,7 +37,9 @@ MAX_ATTEMPTS = 3
 # refuses runs written under another data version, since regenerated chunks would no longer match committed ones.
 # 2: file feeds (feeds.py) and World.clickstream_events; database rows are unchanged from 1.
 # 3: browsing sessions start in time slots (feeds._session_start), so clickstream files differ; rows unchanged.
-DATA_VERSION = 3
+# 4: clock-step windows are [previous, as_of) (were (previous, as_of]): a record at exactly a step's as_of moves to
+#    the next step. One-shot output is unchanged unless a record falls exactly on clock_end (none in the goldens).
+DATA_VERSION = 4
 PROBE_TRIES = 32
 CURRENCY = "USD"  # MVP: single-currency marketplace; per-market currencies come later
 MASTER_DATA_HISTORY = timedelta(days=730)  # master data is created in [clock_start - 730d, clock_start)
@@ -45,8 +48,9 @@ SHIPPING_FEE = Decimal("5.99")
 CENT = Decimal("0.01")
 # Longest time an order keeps changing after it is placed: the slowest path in _lifecycle (first attempt after
 # 120 s, two failed attempts of 90 + 600 s, authorization 60 s, processing 21,600 s, shipping 259,200 s, delivery
-# 518,400 s; settlement is at most shipped + 259,200 s, so earlier). After placed_at + LIFECYCLE_MAX an order and its
-# payments are final, so a clock step only revisits orders placed after previous - LIFECYCLE_MAX.
+# 518,400 s; settlement is at most shipped + 259,200 s, so earlier). Every change of an order and its payments is at
+# or before placed_at + LIFECYCLE_MAX, so as of any later time it is final and a clock step only revisits orders
+# placed at or after previous - LIFECYCLE_MAX.
 LIFECYCLE_MAX = timedelta(seconds=120 + 2 * (90 + 600) + 60 + 21_600 + 259_200 + 518_400)
 
 T = TypeVar("T")
@@ -290,11 +294,11 @@ class World:
         return self._placed(_rng(self.seed, "orders", n), n)
 
     def orders_by(self, t: datetime) -> int:
-        """Number of orders placed at or before t (binary search over placed_at, which never decreases)."""
+        """Number of orders placed before t (binary search over placed_at, which never decreases)."""
         lo, hi = 0, self.orders
         while lo < hi:
             mid = (lo + hi + 1) // 2
-            if self.placed_at(mid) <= t:
+            if self.placed_at(mid) < t:
                 lo = mid
             else:
                 hi = mid - 1
@@ -312,8 +316,8 @@ class World:
         oid = f"ord_{n}"
         placed = self._placed(rng, n)
         for end in ends:
-            if placed > end:
-                raise GenerationError(f"order {n} is placed at {placed.isoformat()}, after {end.isoformat()}")
+            if placed >= end:
+                raise GenerationError(f"order {n} is placed at {placed.isoformat()}, not before {end.isoformat()}")
 
         found = _probe(rng, self.customers, self.customer, lambda c: c.status == "ACTIVE", set())
         if found is None:
@@ -400,12 +404,13 @@ class _Timeline:
     attempts: list[tuple[datetime, list[tuple[str, datetime]]]]  # (created_at, [(state, at), ...]) in time order
 
     def state_at(self, end: datetime, n: int, total: Decimal) -> tuple[str, datetime, list[PaymentAttempt]]:
-        status, updated = [s for s in self.stages if s[1] <= end][-1]  # CREATED at placed <= end always holds
+        """The state just before `end`: changes at exactly end are not applied yet."""
+        status, updated = [s for s in self.stages if s[1] < end][-1]  # CREATED at placed < end always holds
         payments = []
         for attempt_no, (created, states) in enumerate(self.attempts, 1):
-            if created > end:
+            if created >= end:
                 break
-            state, at = [s for s in states if s[1] <= end][-1]
+            state, at = [s for s in states if s[1] < end][-1]
             payments.append(PaymentAttempt(f"pay_{(n - 1) * MAX_ATTEMPTS + attempt_no}", f"ord_{n}", attempt_no,
                                            self.provider, self.method, state, total, CURRENCY, created, at))
         return status, updated, payments
@@ -494,6 +499,8 @@ def check_step(world: World, previous: datetime | None, as_of: datetime) -> None
     """A step moves the clock forward within [clock_start, clock_end]."""
     if as_of.utcoffset() != timedelta(0):
         raise GenerationError(f"as_of must be a UTC timestamp, got {as_of!r}")
+    if as_of.microsecond:  # every generated time is a whole second; feeds compare second-resolution text
+        raise GenerationError(f"as_of must be a whole second, got {as_of.isoformat()}")
     if not world.clock_start <= as_of <= world.clock_end:
         raise GenerationError(f"as_of {as_of.isoformat()} is outside the simulation window "
                               f"{world.clock_start.isoformat()} .. {world.clock_end.isoformat()}")
@@ -503,8 +510,8 @@ def check_step(world: World, previous: datetime | None, as_of: datetime) -> None
 
 @dataclass(frozen=True)
 class StepPlan:
-    """A step (previous, as_of] and the orders it writes or revisits: the ones placed by as_of that may differ from
-    previous (placed after previous - LIFECYCLE_MAX). Orders 1..known existed at previous."""
+    """A step [previous, as_of) and the orders it writes or revisits: the ones placed before as_of that may differ
+    from previous (placed at or after previous - LIFECYCLE_MAX). Orders 1..known were placed before previous."""
     previous: datetime | None
     as_of: datetime
     orders: range
@@ -536,7 +543,7 @@ def step_chunk_count(plan: StepPlan, chunk_rows: int) -> int:
 
 def step_chunk(world: World, plan: StepPlan, chunk_no: int, chunk_rows: int) -> StepChunk:
     """The changes from plan.previous (None: nothing yet) to plan.as_of for one chunk of plan.orders. Orders placed
-    after previous are new; earlier ones are diffed against their state at previous. Items never change."""
+    at or after previous are new; earlier ones are diffed against their state at previous. Items never change."""
     if not 0 <= chunk_no < step_chunk_count(plan, chunk_rows):
         raise GenerationError(f"step chunk {chunk_no} out of range for {len(plan.orders)} orders / {chunk_rows} "
                               "per chunk")

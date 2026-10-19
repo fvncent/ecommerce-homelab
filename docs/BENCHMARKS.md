@@ -151,12 +151,24 @@ references (`scripts/expected_{mvp,feed}_digest.txt`, recorded on PG 17); replay
 exactly the plan; replayed originals = `scripts/expected_replay_originals.txt`; no orphans or staging left.
 WAL 16.7 MB (10k). Data root after a full run ≈ 70 MB.
 
+## Half-open step windows (macOS, 2026-10-19, `fix/half-open-windows`, data version 4)
+
+Windows `[previous, as_of)` instead of `(previous, as_of]`. In a throwaway `postgres:18.6-trixie` container:
+
+- `scripts/homelab_benchmark.sh` against the **unchanged** references: 49/49, exit 0. The 10k one-shot rows, smoke
+  and MVP files and replay originals are byte-identical to data version 3 (no record of the example config falls
+  exactly on `clock_end`).
+- 10k e2e: 31 daily `advance` steps vs one `generate`: identical table digests (orders, items, payments,
+  customers), identical file records (hash `cd41dcb4…`, the same as under data version 3), validate 20/20 for both.
+  No date partition holds files of two steps; the example config has one browsing event at an exact midnight, which
+  data version 3 would have split.
+
 ## Browsing sessions per clock step (macOS, 2026-10-19, `fix/session-ordering`, data version 3)
 
 Browsing events of 31 daily steps over the example clock (January 2026, chunk_rows 5000), pure generation without
 the database (`write_staged`'s browsing part), before (data version 2: every step generates every session and keeps
 its window) and after (sessions in time slots; a step generates only those started in
-`(previous - 25 min, as_of]`):
+`(previous - 25 min, as_of]`; `[previous - 25 min, as_of)` from data version 4):
 
 | Browsing events | Daily step before | Daily step after | 31 steps before | 31 steps after | validate's browse count (day 20) |
 |---|---|---|---|---|---|
