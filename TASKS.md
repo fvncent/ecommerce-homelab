@@ -4,9 +4,7 @@
 - [ ] Optional, user-approved only: `init-db` (migration 0008) on `ecommerce_oltp` / benchmark DBs; dropping the disposable `ecomgen_v030_smoke` + `data/v030-*` when no longer wanted
 - [ ] Push tag `v0.3.1-homelab` (created locally on `4632562` after checks; push awaits the user's OK; tags are immutable on GitHub)
 - [ ] Phase 3C outbox (branch `feat/outbox`, design approved 2026-10-19): `{integration}.outbox_events`, one event per order / payment transition, same transaction as the rows, deterministic IDs + per-aggregate sequence, run lineage, append-only, DATA_VERSION 5, migration 0009; implemented (generation, migration 0009, loader, validate, tests, docs; 412/0 on PG 17 + 18, benchmark 49/49); review next; release as `v0.4.0-homelab` after review
-- [ ] Practice runbook `docs/PRACTICE_RUNBOOK.md` + `config/practice.example.yaml` (own `practice_*` schemas and folder; rehearsed on the Mac): user's first Ubuntu run after `v0.4.0-homelab`
 - [ ] Fix (branch `fix/validate-pre-0008`): validate failed with DatatypeMismatch on schema sets from before migration 0008 that publish files (Ubuntu `ecommerce_oltp` `commerce`): untyped NULL clock columns; `db.clock_columns` now types them; regression test; patch `v0.4.1-homelab` after approval
-- [ ] Ubuntu v0.4.0 verification (in progress, user-run): steps 1-4 done (checkout `877c216`; older datasets read; bug above found), runbook steps next
 - [ ] 3D warehouses + inventory · 3E catch-up / `--follow` pacing
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 
@@ -20,6 +18,7 @@
 - Clearer error when `metadata_schema` is renamed after apply (currently fails loudly with DuplicateTable)
 
 ## Done
+- [x] Ubuntu v0.4.0 verification + practice runbook on the server (2026-10-19, user-run): `practice_*` schemas in `ecommerce_oltp`, 2 days identical to the Mac rehearsal, validate 24/24, read-only `ecomgen_reader`, snapshot diff clean (`docs/BENCHMARKS.md`)
 - [x] PR #27 Phase 3C outbox + practice runbook merged; `main` `877c216` CI 418/0; tag `v0.4.0-homelab` → `877c216` (user-approved; upgrade/rollback from v0.3.1 rehearsed); tag `v0.3.1-homelab` → `4632562` pushed (2026-10-19)
 - [x] PR #26 half-open windows `[previous, as_of)` (DATA_VERSION 4) merged at reviewed head `01be891`; `main` `4632562` CI green 387/0; upgrade/rollback from v0.3.0 rehearsed (no migration) (2026-10-19)
 - [x] User's hands-on `advance` walkthrough on Ubuntu (2026-10-19): `walk` chain, one order followed across steps, files per window, replay refusal, watermark extraction matched the step counts exactly

@@ -121,5 +121,7 @@ v0.3.0). `db.clock_columns` (shared by load/feeds/validate) returns typed NULLs;
 `test_publish.py` (drops 0008 columns + the outbox) reproduces the exact error on the old code.
 
 ## Next step
-User approved (2026-10-19): push `feat/outbox`, open + merge the PR after CI, push `v0.3.1-homelab`. Then propose `v0.4.0-homelab`. Separately: the user's OK to push the
-local `v0.3.1-homelab` tag. Ponytail `lite`. Ubuntu: give the host-snapshot command on its own line.
+Ubuntu v0.4.0 verified (`docs/BENCHMARKS.md`); the user builds a pipeline on the practice dataset (`practice_*` schemas
+in `ecommerce_oltp`, `practice/pipeline.yaml` + `pipeline.env`, one `advance` per business day, reads as
+`ecomgen_reader` via `~/.pgpass`; the reader password was pasted in chat once and rotated). Open: merge PR #28 and
+tag `v0.4.1-homelab` (code only) on approval; then 3D (warehouses/inventory) when the user asks. Ponytail `lite`.
