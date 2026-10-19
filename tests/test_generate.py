@@ -23,7 +23,8 @@ SPARSE = replace(WORLD, seed=7, sellers=2, customers=5, products=3, orders=200)
 GOLDEN = {1: "6747ce23f4146509c9294cb0b2a755c2a35ce2e3ddb10666f5ce9bbf516776d4",
           2: "6747ce23f4146509c9294cb0b2a755c2a35ce2e3ddb10666f5ce9bbf516776d4",  # 2 changed files only
           3: "6747ce23f4146509c9294cb0b2a755c2a35ce2e3ddb10666f5ce9bbf516776d4",  # 3 changed session times only
-          4: "6747ce23f4146509c9294cb0b2a755c2a35ce2e3ddb10666f5ce9bbf516776d4"}  # 4: step windows; one-shot same
+          4: "6747ce23f4146509c9294cb0b2a755c2a35ce2e3ddb10666f5ce9bbf516776d4",  # 4: step windows; one-shot same
+          5: "7669289ef8ef24e11966c390ce764eefcbd070f2471fd4983b5cd9db07787c50"}  # 5: + outbox_events
 ORDER_FLOW = ["CREATED", "CONFIRMED", "PROCESSING", "SHIPPED", "DELIVERED"]
 
 
@@ -47,6 +48,12 @@ def fingerprint(data: dict[str, list[tuple[object, ...]]]) -> str:
 def test_same_seed_same_data_and_independent_of_chunk_size(data: dict[str, list[tuple[object, ...]]]) -> None:
     assert rows(chunk_rows=7) == data
     assert rows(chunk_rows=10_000) == data
+
+
+def test_outbox_leaves_the_other_tables_unchanged(data: dict[str, list[tuple[object, ...]]]) -> None:
+    """Data version 5 only adds outbox_events: every other table is still data version 4's."""
+    both = {**data, **{f"sparse.{t}": r for t, r in rows(SPARSE).items()}}
+    assert fingerprint({k: v for k, v in both.items() if not k.endswith("outbox_events")}) == GOLDEN[4]
 
 
 def test_different_seed_different_data(data: dict[str, list[tuple[object, ...]]]) -> None:
