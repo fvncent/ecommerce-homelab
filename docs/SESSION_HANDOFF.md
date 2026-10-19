@@ -2,10 +2,13 @@
 
 Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
 
-**Updated:** 2026-10-18
-**Branch:** `feat/step-files` (from `main` `3e1d5a0` = PR #21 Phase 3A `advance` merged, CI 276/0 on PG 17 + 18).
-Phase 3B (files per clock step) of the approved Phase 3 plan (3A done → 3B → 3C outbox → 3D inventory → 3E
-catch-up/pacing). Decision kept: as-of clock inside clock_start..clock_end. Ubuntu stays on `v0.2.0-homelab`.
+**Updated:** 2026-10-19
+**Branch:** `fix/session-ordering` (from `main` `a01689d` = PR #22 Phase 3B merged, CI 301/0 on PG 17 + 18).
+Browsing-session ordering fix (approved 2026-10-19 as its own PR before the Phase 3 Ubuntu release). User's plan:
+1) this fix (push/PR after approval, no auto-merge) → 2) prepare a new Phase 3 release (3A + 3B + this; never reuse
+`v0.2.0-homelab`; report version, SHA, migrations incl. 0008, data-version impact, checksums, config changes,
+upgrade + rollback plan; approval before tagging) → 3) Ubuntu smoke + multi-day `advance` walkthrough, user-run, one
+step at a time, guide updated with verified commands → 4) Phase 3C only after that. Ubuntu stays on `v0.2.0-homelab`.
 **Practice dataset (Ubuntu, user-created 2026-10-18):** role `ecomgen_practice` (no privileges) owns `ecommerce_oltp`
 (CONNECT revoked from PUBLIC); config/env in `/srv/homelab/ecommerce/practice/` (`practice-10k.yaml` = example
 config, `practice.env` mode 600); files in `/srv/homelab/ecommerce/data/practice`; run
@@ -15,7 +18,7 @@ config, `practice.env` mode 600); files in `/srv/homelab/ecommerce/data/practice
 **Deployed on Ubuntu:** `v0.2.0-homelab`, verified 2026-10-18: the user dropped/recreated the 3 DBs by hand after a
 read-only inventory; benchmark 49/49 PASS, exit 0; snapshot diff = only the 3 DBs' sizes/counters; replay cleanup
 dry run only (`docs/BENCHMARKS.md`). Benchmark data kept in the DBs and `/srv/homelab/ecommerce/data`.
-**Phase 3:** not started; needs the user's go-ahead.
+**Phase 3:** 3A (PR #21) and 3B (PR #22) merged; 3C-3E wait (see plan above).
 **Ubuntu shell gotcha:** `!` inside double quotes triggers bash history expansion (`!~: event not found`); give
 SQL without `!` (e.g. `NOT LIKE 'pg\_%'`).
 
@@ -259,6 +262,39 @@ Suite after fixes: 276 passed with DB, 141 passed / 135 skipped without; mypy cl
 Suite after fixes: 301 passed with DB, 146 / 155 skipped without; mypy clean. validate now has 20 checks for a
 run with both feeds (was 19).
 
+## This task: browsing-session ordering (DATA_VERSION 3)
+- `feeds.py`: `_session_start` (first draw of the session's rng: slot s of [clock_start, clock_end - SESSION_SPAN),
+  whole seconds, never decreasing), `session_start`, `sessions_by(t)` (binary search), `step_sessions(world, plan)` =
+  sessions started in (previous - SESSION_SPAN, as_of] (first step: 1..sessions_by(as_of)); `_sessions(world, rows,
+  range)`, `_step_sessions` (filters the window, half-open as before); `browsing_events_by` counts sessions started by
+  as_of - SESSION_SPAN in full and generates only the rest. Every event of a session is in [start, start + 1500 s].
+- DATA_VERSION 3: clickstream bytes change, DB rows don't (GOLDEN[3] = GOLDEN[2], new FEED_GOLDEN[3]); benchmark
+  file references re-recorded (`RECORD_REFERENCES=1` in a throwaway PG 18.6 container), `expected_mvp_digest.txt`
+  unchanged; verification run 49/49 (again after the review fixes). A chain recorded under another data_version
+  gets its row checks plus one `files_match_ledger` failure naming the version (checked before the unfinished-step
+  reason); one-shot runs of v2 (Ubuntu's) validate fully (their browse count is the recorded clickstream_events).
+- Tests: `tests/test_feeds.py` +4 (monotone starts + event bounds incl. tiny window / 0-1 events, step needs ⊆
+  step_sessions and nothing older, boundaries on exact event times / empty / 1 s windows, empty window, 1M-event
+  history: an hour step generates < 0.5 % of sessions) + a 7-hourly 49-step union test;
+  `tests/integration/test_step_files.py` +2 (chain of another data version, COMPLETED / RUNNING).
+  Suite: 311 tests, 0 skipped on PG 17.11 and 18.6 (Docker); mypy clean.
+- Perf (`docs/BENCHMARKS.md`): daily step browsing 1.24 s → 0.083 s (100k), 11.6 s → 0.46 s (1M); 10k e2e 31 daily
+  steps 36 s, rows + 110,000 events identical to generate, validate 20/20.
+- Limitation: the first step still generates every session up to its as_of. "Ponytail Lite" is not installed in
+  this environment; review = `/code-review high`.
+
+## Session-ordering review (`/code-review high`) — 8 addressed
+| # | Finding | Fix |
+|---|---|---|
+| 1 | data_version guard raised, discarding the row checks | reported as one `files_match_ledger` result; row checks kept |
+| 2 | guard came after the unfinished-step reason | moved first; test for COMPLETED and RUNNING |
+| 3 | slots make browse volume flat; docs said "as before" | documented (645-646 sessions/day, last day 634; like orders); no time-of-day shape |
+| 4 | lost `as_of >= clock_end` shortcut in browsing_events_by | restored |
+| 5 | hand-rolled binary search | `bisect.bisect_right(..., key=)` |
+| 6 | session-range rule written twice | `_sessions_after(world, t, until)` shared by step_sessions and browsing_events_by |
+| 7 | slot constants recomputed per session | `_slots(world)` (lru_cache) |
+| 8 | 336-step test took 7 s | every 7 hours + the end (49 steps, 1.4 s) |
+
 ## Next step
-Ask to push `feat/step-files` + PR; decide on the session-time change (DATA_VERSION 3) as its own PR. No
-merge/tag/deploy without approval.
+Finish the review, then ask to push `fix/session-ordering` + open a PR (no auto-merge). After merge + green main:
+prepare the Phase 3 release report (step 2 above) and wait for tag approval.

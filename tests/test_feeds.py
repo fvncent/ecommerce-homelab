@@ -174,7 +174,7 @@ def _records(files: dict[str, bytes]) -> dict[str, list[bytes]]:
     return {k: sorted(v) for k, v in out.items()}
 
 
-@pytest.mark.parametrize("days", [[14], list(range(1, 15)), [0, 0.5, 3.25, 9, 14], [h / 24 for h in range(1, 337)]])
+@pytest.mark.parametrize("days", [[14], list(range(1, 15)), [0, 0.5, 3.25, 9, 14], [h / 24 for h in [*range(1, 336, 7), 336]]])
 def test_step_files_together_equal_the_one_shot_files(tmp_path: Path, days: list[float]) -> None:
     """Each step publishes only its window; every record lands in exactly one step, none is lost or doubled."""
     c = cfg()

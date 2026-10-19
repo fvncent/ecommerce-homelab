@@ -6,7 +6,8 @@ Feeds (schema_version 1), partitioned by event date (UTC) under the data root:
 - clickstream (JSONL, `clickstream/date=D/{run}-part-NNNNN.jsonl`): World.clickstream_events browsing events in
   sessions of SESSION_EVENTS (`evt_N`, `ses_N`), plus one `order_placed` event per order (`evt_ord_N`). Session s
   starts in slot s of the clock (like orders), so session starts never decrease with s and a time range maps to a
-  range of sessions: every event of a session is in [start, start + SESSION_SPAN].
+  range of sessions: every event of a session is in [start, start + SESSION_SPAN]. Slots make browse volume nearly
+  flat (equal sessions per equal time, +-1), as order volume already is.
 Rows within a file follow generation order, not event time. Files roll over at filesystem.max_file_size_mb.
 A clock step (`advance`) publishes the events of its window (previous_as_of, as_of] only (the first step:
 [clock_start, as_of]): settlements whose settled_at is in it, order_placed events of the orders placed in it, and
@@ -24,6 +25,7 @@ Publishing (DB and filesystem writes are not atomic together, so this converges 
    equal the regenerated ones. Anything else stops the run for a human to reconcile.
 """
 
+import bisect
 import csv
 import functools
 import hashlib
@@ -98,11 +100,17 @@ def session_count(world: generate.World) -> int:
     return -(-world.clickstream_events // SESSION_EVENTS)
 
 
+@functools.lru_cache(maxsize=16)
+def _slots(world: generate.World) -> tuple[int, int]:
+    """(seconds in [clock_start, clock_end - SESSION_SPAN), session count): the session slots of a World."""
+    last_start = max(world.clock_start, world.clock_end - SESSION_SPAN)
+    return int((last_start - world.clock_start).total_seconds()), session_count(world)
+
+
 def _session_start(world: generate.World, rng: random.Random, s: int) -> datetime:
     """Session s starts in slot s of [clock_start, clock_end - SESSION_SPAN) (whole seconds; the session's first
     draw), so the start never decreases with s."""
-    last_start = max(world.clock_start, world.clock_end - SESSION_SPAN)
-    span, count = int((last_start - world.clock_start).total_seconds()), session_count(world)
+    span, count = _slots(world)
     lo, hi = span * (s - 1) // count, span * s // count
     return world.clock_start + timedelta(seconds=lo + int(rng.random() * (hi - lo)))
 
@@ -114,22 +122,21 @@ def session_start(world: generate.World, s: int) -> datetime:
 
 
 def sessions_by(world: generate.World, t: datetime) -> int:
-    """Number of sessions started at or before t (binary search over session_start, which never decreases)."""
-    lo, hi = 0, session_count(world)
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if session_start(world, mid) <= t:
-            lo = mid
-        else:
-            hi = mid - 1
-    return lo
+    """Number of sessions started at or before t (session_start never decreases, so a binary search)."""
+    return bisect.bisect_right(range(1, session_count(world) + 1), t, key=lambda s: session_start(world, s))
+
+
+def _sessions_after(world: generate.World, t: datetime, until: datetime) -> range:
+    """The sessions started by `until` that can have an event after t: started after t - SESSION_SPAN (an older
+    session's events are all at or before t)."""
+    return range(sessions_by(world, t - SESSION_SPAN) + 1, sessions_by(world, until) + 1)
 
 
 def step_sessions(world: generate.World, plan: generate.StepPlan) -> range:
-    """The sessions that can have an event in the step window (previous, as_of]: started by as_of and, unless this
-    is the first step, after previous - SESSION_SPAN (an older session's events are all at or before previous)."""
-    first = 1 if plan.previous is None else sessions_by(world, plan.previous - SESSION_SPAN) + 1
-    return range(first, sessions_by(world, plan.as_of) + 1)
+    """The sessions that can have an event in the step window (previous, as_of] (first step: all started by as_of)."""
+    if plan.previous is None:
+        return range(1, sessions_by(world, plan.as_of) + 1)
+    return _sessions_after(world, plan.previous, plan.as_of)
 
 
 def session_events(world: generate.World, s: int,
@@ -263,12 +270,12 @@ def _sessions(world: generate.World, rows: int, sessions: range) -> Iterator[lis
 
 
 def browsing_events_by(world: generate.World, as_of: datetime, rows: int) -> int:
-    """How many browsing events happened by as_of (all of them at clock_end). Only sessions started in
-    (as_of - SESSION_SPAN, as_of] are generated: the ones before have every event by as_of."""
-    done = sessions_by(world, as_of - SESSION_SPAN)
-    limit = ts(as_of)
-    partial = range(done + 1, sessions_by(world, as_of) + 1)
-    return (min(world.clickstream_events, done * SESSION_EVENTS)
+    """How many browsing events happened by as_of (all of them at clock_end). Only the sessions that can have an
+    event after as_of are generated; the ones before them have every event by as_of."""
+    if as_of >= world.clock_end:
+        return world.clickstream_events
+    partial, limit = _sessions_after(world, as_of, as_of), ts(as_of)
+    return (min(world.clickstream_events, (partial.start - 1) * SESSION_EVENTS)
             + sum(1 for batch in _sessions(world, rows, partial) for e in batch if str(e["event_time"]) <= limit))
 
 

@@ -46,7 +46,8 @@ customer_id, session_id, product_id, event_time, arrived_at, source_system, payl
   `search` (no product; `query`, `results`), `added_to_cart` / `removed_from_cart` (`quantity`), `wishlist_added`.
   Products are active ones; customers are ACTIVE ones. Session `ses_K` starts in slot K of
   `[clock_start, clock_end - 25 min)` (data version 3), so later sessions never start earlier, and its events are
-  5-300 s apart, within 25 min (`SESSION_SPAN`) of its start.
+  5-300 s apart, within 25 min (`SESSION_SPAN`) of its start. Slots make browse volume nearly flat (equal sessions
+  per equal time, +-1, except the last 25 min), like order volume; no time-of-day or weekday shape.
 - Orders: one `order_placed` event `evt_ord_N` per order at `placed_at`, session `ses_ord_N`, payload `order_id`,
   `currency`, `total`.
 - `event_time` is in `[clock_start, clock_end)`; `arrived_at` = event_time + 1-30 s.

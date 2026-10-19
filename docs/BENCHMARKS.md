@@ -153,7 +153,8 @@ about what generating every session once costs. End-to-end on Docker `postgres:1
 unchanged (rows did not change). A following verification run: 49/49, exit 0.
 
 Remaining: the first step of a chain still generates every session up to its `as_of` (it publishes all of them);
-browsing sessions are spread evenly over the clock, as before, not shaped by time of day.
+slots make browse volume nearly flat (each day of the example gets 645-646 sessions, the last day 634 as no session starts in the last 25 min; before, uniform random
+starts varied by a few percent day to day), like order volume; time-of-day or weekday shapes are not modelled.
 
 ## Not yet measured
 
