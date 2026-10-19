@@ -1,8 +1,9 @@
 # Tasks
 
 ## Active
-- [ ] Browsing-session ordering fix (branch `fix/session-ordering`, approved 2026-10-19): sessions in time slots like orders, a step generates only the sessions that can touch its window; DATA_VERSION 3, new file goldens + references
-- [ ] Then: Phase 3 Ubuntu release (new tag; `v0.2.0-homelab` unchanged), Ubuntu smoke + multi-day `advance` walkthrough (user-run)
+- [ ] Push tag `v0.3.0-homelab` → `8f667d4` (approved; the classifier blocked Claude's push, so the user runs it)
+- [ ] Phase 3 Ubuntu verification (user-run, one step at a time): smoke DB → optional `init-db` of persistent DBs → multi-day `advance` walkthrough; user guide updated with the verified commands
+- [ ] Claude Code harness (branch `chore/claude-harness`): 3 skills, guard hook (inactive until approved), handoff trimmed; push/PR awaiting approval
 - [ ] Phase 3C outbox events (not before the Phase 3 release passes on Ubuntu and the walkthrough is done) · 3D warehouses + inventory · 3E catch-up / `--follow` pacing
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 
@@ -16,6 +17,8 @@
 - Clearer error when `metadata_schema` is renamed after apply (currently fails loudly with DuplicateTable)
 
 ## Done
+- [x] GitHub rulesets: `main` (PR + lint/test 17.11/test 18.6, no force-push/delete) and `v*-homelab` tags (no update/delete) (2026-10-19)
+- [x] PR #23 session ordering (DATA_VERSION 3) merged at reviewed head `03ee496`; `main` `8f667d4` CI green, 311 tests / 0 skipped on PG 17 + 18 (2026-10-19)
 - [x] PR #22 Phase 3B (files per clock step) merged at reviewed head `f06e130`; `main` `a01689d` CI green, 301 tests / 0 skipped on PG 17 + 18 (2026-10-18)
 - [x] PR #21 Phase 3A (`advance`: clock steps, migration 0008) merged at reviewed head `ba939e2`; `main` `3e1d5a0` CI green, 276 tests / 0 skipped on PG 17 + 18 (2026-10-18)
 - [x] PR #20 (generator user guide) merged; `main` `35e7278` (2026-10-18)
