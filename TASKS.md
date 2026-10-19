@@ -1,9 +1,9 @@
 # Tasks
 
 ## Active
-- [ ] Push tag `v0.3.0-homelab` → `8f667d4` (on hold by the user's 2026-10-19 instruction; not created yet)
-- [ ] Phase 3 Ubuntu verification (user-run, one step at a time): smoke DB → optional `init-db` of persistent DBs → multi-day `advance` walkthrough; user guide updated with the verified commands
-- [ ] Claude Code harness (branch `chore/claude-harness`): 3 skills, Bash guard hook (active, `onFailure: block`), handoff trimmed; PR open, merge awaiting approval
+- [ ] User's hands-on `advance` walkthrough (operating it, inspecting PostgreSQL and files); then Phase 3C may start
+- [ ] Optional, user-approved only: `init-db` (migration 0008) on `ecommerce_oltp` / benchmark DBs; dropping the disposable `ecomgen_v030_smoke` + `data/v030-*` when no longer wanted
+- [ ] Fix: a midnight event (`as_of` exactly 00:00:00) puts the ending step's file into the next day's partition, so day-aligned steps can still split a day for `replay-files` (error message and guide claimed otherwise); decide: windows `[previous, as_of)` or partition-aware replay check
 - [ ] Phase 3C outbox events (not before the Phase 3 release passes on Ubuntu and the walkthrough is done) · 3D warehouses + inventory · 3E catch-up / `--follow` pacing
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 
@@ -17,6 +17,9 @@
 - Clearer error when `metadata_schema` is renamed after apply (currently fails loudly with DuplicateTable)
 
 ## Done
+- [x] Ubuntu Phase 3 verification (2026-10-19, user-run): upgrade to `v0.3.0-homelab`, 0008 in disposable `ecomgen_v030_smoke`, smoke 20/20 + files identical to the reference, 9-step chain + SIGKILL/resume drill, stepped = one-shot (7 tables, settlements), snapshot diff clean (`docs/BENCHMARKS.md`)
+- [x] Tag `v0.3.0-homelab` -> `0301e1f` (user-approved; checks: main CI green 378/0 on PG 17 + 18, tag new, 0008 only migration, DATA_VERSION 3); `v0.2.0-homelab` unchanged (2026-10-19)
+- [x] PR #24 Claude Code harness (3 skills, Bash guard hook with `onFailure: block`, trimmed handoff) merged; `main` `0301e1f` CI green 378/0 (2026-10-19)
 - [x] GitHub rulesets: `main` (PR + lint/test 17.11/test 18.6, no force-push/delete) and `v*-homelab` tags (no update/delete) (2026-10-19)
 - [x] PR #23 session ordering (DATA_VERSION 3) merged at reviewed head `03ee496`; `main` `8f667d4` CI green, 311 tests / 0 skipped on PG 17 + 18 (2026-10-19)
 - [x] PR #22 Phase 3B (files per clock step) merged at reviewed head `f06e130`; `main` `a01689d` CI green, 301 tests / 0 skipped on PG 17 + 18 (2026-10-18)
