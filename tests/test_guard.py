@@ -47,6 +47,16 @@ guard = _load()
     "cd x && ssh host",
     "dropdb ecommerce_oltp",
     "psql -c 'DROP DATABASE ecomgen_practice'",
+    # edge cases: chained, prefixed, quoted, upper case, other git spellings
+    "ls && rm -rf /srv/homelab/ecommerce",
+    "sudo rm -r \"/srv/homelab/ecommerce/data\"",
+    "git -C /tmp/repo tag -d v0.2.0-homelab",
+    "git -C . push origin --delete feat/x",
+    "GIT_X=1 git push --force origin main",
+    "bash -c 'docker kill vlsim-tms-service-1'",
+    "DROPDB ECOMMERCE_OLTP",
+    "echo ok; ssh serveradmin@homelab",
+    "(ssh host)",
 ])
 def test_blocks(command: str) -> None:
     assert guard.blocked(command)
@@ -66,6 +76,12 @@ def test_blocks(command: str) -> None:
     "ls /srv/homelab/ecommerce",
     "uv run pytest -q",
     "git commit -m 'docs: ssh notes'",
+    "git push origin feat/tag-cleanup",
+    "git log --oneline v0.2.0-homelab..main",
+    "git ls-remote --tags origin",
+    "dropdb -U ecomgen e2e",
+    "rm -rf /private/tmp/claude-501/scratch/bench",
+    "",
 ])
 def test_allows(command: str) -> None:
     assert guard.blocked(command) is None
@@ -74,11 +90,25 @@ def test_allows(command: str) -> None:
 @pytest.mark.parametrize("stdin, code", [
     (json.dumps({"tool_input": {"command": "git tag -d v0.2.0-homelab"}}), 2),
     (json.dumps({"tool_input": {"command": "ls"}}), 0),
-    ("not json", 0),  # fails open
+    ("not json", 0),  # unparseable without risky words: allowed
+    ("not json: git push --force origin main", 2),  # unparseable with risky words: blocked
+    ("", 0),
     (json.dumps({"tool_input": {}}), 0),
+    (json.dumps({"tool_input": {"command": ["rm", "-rf", "/srv/homelab"]}}), 2),  # not a string: fallback check
 ])
 # the hook runs under whatever python3 is on PATH: also the system one (3.9 on macOS)
 @pytest.mark.parametrize("python", sorted({sys.executable} | {p for p in ["/usr/bin/python3"] if Path(p).exists()}))
 def test_hook_protocol(stdin: str, code: int, python: str) -> None:
     r = subprocess.run([python, str(GUARD)], input=stdin, capture_output=True, text=True, timeout=10)
     assert r.returncode == code and (code == 0 or "Blocked" in r.stderr)
+
+
+def test_settings_register_the_hook_and_block_on_failure() -> None:
+    hook = json.loads((GUARD.parents[1] / "settings.json").read_text())["hooks"]["PreToolUse"]
+    assert [h["matcher"] for h in hook] == ["Bash"]
+    (cmd,) = hook[0]["hooks"]
+    assert cmd["onFailure"] == "block" and cmd["command"].endswith('/.claude/hooks/guard.py"')
+
+
+def test_the_hook_never_runs_commands() -> None:
+    assert not {"subprocess", "os", "shutil"} & set(guard.__dict__)

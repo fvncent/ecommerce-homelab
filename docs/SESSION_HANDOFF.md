@@ -71,9 +71,12 @@ data version, checksums, upgrade/rollback rehearsal) is in the 2026-10-19 conver
   - VLSIM or Redpanda docker changes; docker prune; port 55432;
   - rm, mv or find -delete under `/srv/homelab`; ssh;
   - dropping `ecommerce_oltp`, `ecomgen_practice` or the VLSIM DBs.
-  It fails open and takes ~20 ms. `tests/test_guard.py` runs it under the venv Python and macOS's
-  `/usr/bin/python3` 3.9. **It is not activated**: it needs the user's OK to register it in `.claude/settings.json`
-  as a PreToolUse Bash hook.
+  It takes ~20 ms and never runs anything itself. Errors don't authorize a risky command: unparseable input is
+  checked for risky words, and `onFailure: "block"` blocks the command if the script can't run.
+  `tests/test_guard.py` runs it under the venv Python and macOS's `/usr/bin/python3` 3.9 (67 tests). Active via
+  `.claude/settings.json` (approved 2026-10-19). Its limits and how to disable it are in `.claude/hooks/README.md`.
+  It matches text, so a command that merely *mentions* a blocked pattern (a heredoc of test strings, `echo "git tag
+  -d"`) is blocked too: edit such files with Edit, not Bash.
 - GitHub rulesets (active):
   - 25365485 on `main`: no delete or force-push; PR required; lint plus both test checks required.
   - 25365486 on `v*-homelab` tags: no delete, update or force; creating a tag is allowed.
@@ -81,5 +84,6 @@ data version, checksums, upgrade/rollback rehearsal) is in the 2026-10-19 conver
 - This file went from 27,608 bytes to the size in the PR description.
 
 ## Next step
-Ask the user to approve pushing `chore/claude-harness` and opening the PR, and to approve activating the hook. Then,
-once the tag is pushed, start Ubuntu step 3 with the `homelab-release` skill.
+PR for `chore/claude-harness` is open; wait for the user's merge approval. The user has to type `/ponytail lite`
+(the persisted level is `full`; only the user prompt hook changes it). The tag `v0.3.0-homelab` waits for the
+user's go-ahead. Then Ubuntu step 3 with the `homelab-release` skill.

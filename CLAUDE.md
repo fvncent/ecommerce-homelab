@@ -28,5 +28,6 @@ Synthetic e-commerce **source-data generator** (Python + PostgreSQL + files) for
 - Never commit secrets, DB files, datasets, generated outputs, or session scratch.
 - Inspect with targeted queries (`LIMIT`, counts, `head`); don't dump tables or huge logs.
 - Project skills: `implement-phase` (dev loop, test commands), `data-change` (generated data, goldens, recovery),
-  `homelab-release` (user-invoked). `main` and `v*-homelab` tags are protected by GitHub rulesets.
+  `homelab-release` (user-invoked). Bash safety hook: `.claude/hooks/` (README: limits, disabling). `main` and
+  `v*-homelab` tags are protected by GitHub rulesets.
 - Before compaction or ending a significant session, update `docs/SESSION_HANDOFF.md`. Unrelated task → suggest `/clear`.

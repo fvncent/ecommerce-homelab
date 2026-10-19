@@ -1,9 +1,9 @@
 # Tasks
 
 ## Active
-- [ ] Push tag `v0.3.0-homelab` → `8f667d4` (approved; the classifier blocked Claude's push, so the user runs it)
+- [ ] Push tag `v0.3.0-homelab` → `8f667d4` (on hold by the user's 2026-10-19 instruction; not created yet)
 - [ ] Phase 3 Ubuntu verification (user-run, one step at a time): smoke DB → optional `init-db` of persistent DBs → multi-day `advance` walkthrough; user guide updated with the verified commands
-- [ ] Claude Code harness (branch `chore/claude-harness`): 3 skills, guard hook (inactive until approved), handoff trimmed; push/PR awaiting approval
+- [ ] Claude Code harness (branch `chore/claude-harness`): 3 skills, Bash guard hook (active, `onFailure: block`), handoff trimmed; PR open, merge awaiting approval
 - [ ] Phase 3C outbox events (not before the Phase 3 release passes on Ubuntu and the walkthrough is done) · 3D warehouses + inventory · 3E catch-up / `--follow` pacing
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 
