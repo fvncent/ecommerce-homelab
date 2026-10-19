@@ -4,27 +4,20 @@ Update before compaction or ending a significant session. Overwrite it: git hist
 per-PR review tables up to PR #23 are in commit `03ee496`). Task list: `TASKS.md`.
 
 **Updated:** 2026-10-19
-**Branch:** `chore/claude-harness` (from `main` `8f667d4`).
-**main:** `8f667d4` = PR #23 (browsing-session ordering, DATA_VERSION 3) merged; CI 311 tests / 0 skipped on
-PG 17.11 and 18.6. Phase 3A (`advance`, migration 0008, PR #21) and 3B (files per clock step, PR #22) are merged.
-**Release:** `v0.3.0-homelab` → `8f667d4` was approved, but **not pushed yet**: the classifier blocked the push and
-the user was given the command. `v0.2.0-homelab` (`de90a6a`) stays as it is. The release report (migrations,
-data version, checksums, upgrade/rollback rehearsal) is in the 2026-10-19 conversation. Re-create it with the
-`homelab-release` skill.
-**Deployed on Ubuntu:** `v0.2.0-homelab` (benchmark 49/49, 2026-10-18).
+**Branch:** `docs/v0.3.0-ubuntu` (from `main` `0301e1f` = PR #24 Claude harness merged, CI 378/0 on PG 17 + 18).
+**Released:** `v0.3.0-homelab` → `0301e1f` (Phase 3A, 3B, session ordering, harness; tag pushed 2026-10-19).
+`v0.2.0-homelab` (`de90a6a`) unchanged, kept for rollback.
+**Deployed on Ubuntu:** `v0.3.0-homelab`, verified 2026-10-19 (`docs/BENCHMARKS.md`). Disposable DB
+`ecomgen_v030_smoke` (role `ecomgen_practice`): smoke run in `commerce`, 9-step chain in `commerce_stepped`;
+files in `data/v030-smoke`, `data/v030-stepped`; config `practice/v030-stepped.yaml`. `ecommerce_oltp` and the
+benchmark DBs are **not** migrated to 0008 yet (optional, user-approved step). v0.3.0 commands on them were not
+tried on Ubuntu; the Mac rehearsal showed a v0.2.0 run validating 20/20 after `init-db`.
 
 ## User's plan (2026-10-19)
-1. Session-ordering fix: done (PR #23).
-2. Phase 3 release `v0.3.0-homelab`: tag push pending (user).
-3. Ubuntu verification, run by the user one step at a time:
-   - isolated smoke DB first;
-   - `init-db` on persistent DBs only as separately approved steps;
-   - a multi-day `advance` walkthrough in its own schema set;
-   - inspect PostgreSQL, CSV and JSONL; validate;
-   - update `docs/GENERATOR_USER_GUIDE.md` with the verified commands. Its `init-db` example (0001-0007) and
-     "19 passed" become 0001-0008 and 20.
-4. Phase 3C (outbox) only after step 3 and the user's hands-on walkthrough. Then 3D (warehouses/inventory) and 3E
-   (catch-up / `--follow`).
+1. Session-ordering fix: done (PR #23). 2. Release `v0.3.0-homelab`: done. 3. Ubuntu verification: done.
+4. Now: the user's hands-on walkthrough of `advance` (operate it, inspect PostgreSQL and files).
+5. Phase 3C (outbox) only after step 4. Then 3D (warehouses/inventory) and 3E (catch-up / `--follow`).
+Open finding (TASKS): midnight events split day-aligned steps for `replay-files`.
 
 ## Upgrade facts for v0.3.0 (rehearsed on a throwaway PG 18.6 DB)
 - Migration 0008 only adds things. On v0.2.0 runs, `validate` gives 20/20, every file's sha256 is unchanged, and
@@ -84,6 +77,7 @@ data version, checksums, upgrade/rollback rehearsal) is in the 2026-10-19 conver
 - This file went from 27,608 bytes to the size in the PR description.
 
 ## Next step
-PR for `chore/claude-harness` is open; wait for the user's merge approval. The user has to type `/ponytail lite`
-(the persisted level is `full`; only the user prompt hook changes it). The tag `v0.3.0-homelab` waits for the
-user's go-ahead. Then Ubuntu step 3 with the `homelab-release` skill.
+PR for `docs/v0.3.0-ubuntu` awaits the user's merge approval. Then guide the hands-on `advance` walkthrough on
+Ubuntu (one step at a time; the user runs the commands). Ponytail level is `lite` (persisted).
+Ubuntu step notes: the user's "before" snapshot lacked `PG_LOCAL_SUPERUSER=1` (paste got garbled); next time give
+the snapshot command on its own line.

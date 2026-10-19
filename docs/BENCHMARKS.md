@@ -14,6 +14,25 @@ Add a row per run; note the environment. The target is the Ubuntu server; macOS 
 Measured with `/usr/bin/time -l` (macOS) around `ecomgen generate`; WAL = `pg_wal_lsn_diff` across the run (server-wide;
 no other activity on the server at the time). Largest tables: order_items 3.9 MB, orders 3.2 MB, payment_attempts 2.7 MB.
 
+## Ubuntu Phase 3 release verification (`v0.3.0-homelab`, 2026-10-19)
+
+`v0.3.0-homelab` → `0301e1f` (PRs #21-#24; CI 378 tests / 0 skipped on PG 17.11 and 18.6). Run by the user on the
+homelab one step at a time (host PG 18.6, 127.0.0.1:5432 only; NVMe mounted rw):
+
+| Check | Result |
+|---|---|
+| Pre-checks (read-only) | mount, ports (5432 / 55432 localhost only), DB inventory, 4 VLSIM containers healthy, env files 600 |
+| Upgrade | `git checkout v0.3.0-homelab` + `uv sync --frozen` (dependencies unchanged since v0.2.0); `v0.2.0-homelab` kept for rollback |
+| Migration 0008 | applied first in a new disposable DB `ecomgen_v030_smoke` (all 0001-0008); existing DBs not migrated yet |
+| Smoke `generate` + `validate` | 20/20; files byte-identical to `scripts/expected_smoke_feed_digest.txt` (data version 3, cross-machine) |
+| Clock-step chain (10k config, own schema set) | 9 steps: day 1, six daily steps (0.3-0.5 s each), Jan 8 → 15, Jan 15 → end (3.1 s); repeat of a done step = no-op |
+| Recovery | SIGKILL after a step's DB commit, before its files → RUNNING, `advance` refused, `resume` published the files; validate 20/20; second resume no-op |
+| Stepped = one-shot | all 7 tables identical (md5 per table) to the one-shot 10k run in `ecommerce_oltp`; settlement records identical; 110,000 clickstream records |
+| Host snapshot diff | changes only in the git clone (checkout, fetched refs, `__pycache__`); no VLSIM or `postgresql@18-main` change. The "before" file lacked the database section (taken without `PG_LOCAL_SUPERUSER=1`); the after-values show `ecommerce_oltp` and the benchmark DBs unwritten (update counters 1-3 = their own runs) |
+
+Finding: a browsing event at exactly `2026-01-08T00:00:00Z` belongs to the step ending then but lands in
+`date=2026-01-08`, so day-aligned steps can still split a day for `replay-files` (see the user guide).
+
 ## Ubuntu Phase 2 release verification (`v0.2.0-homelab`, 2026-10-18)
 
 Operator-run per `docs/HOMELAB_DEPLOYMENT.md` "Phase 2 release": tag `v0.2.0-homelab` = `main` `de90a6a` (PR #18

@@ -3,8 +3,9 @@
 How to generate a practice dataset and look at it, as an operator. For the release benchmark (which needs empty
 databases and is not a way to make datasets) see `docs/HOMELAB_DEPLOYMENT.md`; for file contracts `docs/FEEDS.md`.
 
-Commands marked **verified** were run on the homelab on 2026-10-18 with `v0.2.0-homelab`. Everything is typed by
-hand in an SSH session on the server (`ssh serveradmin@<server>`). Copy only what is inside the boxes.
+Commands marked **verified** were run on the homelab: setup and `generate` on 2026-10-18 with `v0.2.0-homelab`;
+upgrade, smoke and clock steps (`advance`) on 2026-10-19 with `v0.3.0-homelab`. Everything is typed by hand in an
+SSH session on the server (`ssh serveradmin@<server>`). Copy only what is inside the boxes.
 
 ## Where things are
 
@@ -15,6 +16,7 @@ hand in an SSH session on the server (`ssh serveradmin@<server>`). Copy only wha
 | Practice files | `/srv/homelab/ecommerce/data/practice/` |
 | Practice database / role | `ecommerce_oltp`, owned by `ecomgen_practice` (no superuser, no createdb) |
 | Benchmark databases (leave alone) | `ecommerce_homelab_{smoke,test,crash}`, role `ecomgen_app`; files in `/srv/homelab/ecommerce/data/{source_feeds,clickstream,manifests,deliveries}` |
+| Disposable v0.3.0 test database (yours to keep or drop) | `ecomgen_v030_smoke` (role `ecomgen_practice`): smoke run in `commerce`, clock-step chain in `commerce_stepped`; files in `data/v030-smoke`, `data/v030-stepped`; config `practice/v030-stepped.yaml` |
 | PostgreSQL | host cluster 18 on `127.0.0.1:5432` only. Never 55432 (VLSIM container). |
 
 ## Quick start (dataset already set up: generate is done once per schema set)
@@ -30,7 +32,8 @@ uv run ecomgen validate /srv/homelab/ecommerce/practice/practice-10k.yaml | tail
 psql "$ECOMMERCE_DATABASE_URL"
 ```
 
-Expected: `run run_20261018T135727Z_72e31d: COMPLETED (profile mvp, …)`, `19 passed, 0 failed`, and the prompt
+Expected: `run run_20261018T135727Z_72e31d: COMPLETED (profile mvp, …)`, `19 passed, 0 failed` (20 checks from
+`v0.3.0-homelab` on, once `init-db` has added migration 0008 to this database), and the prompt
 `ecommerce_oltp=>` (`=>` = not a superuser). `\q` leaves psql.
 
 The `set -a; . FILE; set +a` line loads the file into the shell: the leading `. ` (dot, space) is required.
@@ -91,9 +94,9 @@ anomalies, AI sources.
    cd /srv/homelab/projects/ecommerce-homelab
    set -a; . /srv/homelab/ecommerce/practice/practice.env; set +a
    uv run ecomgen check-config /srv/homelab/ecommerce/practice/practice-10k.yaml
-   uv run ecomgen init-db /srv/homelab/ecommerce/practice/practice-10k.yaml      # applied: 0001_… 0007_cleanup.sql
+   uv run ecomgen init-db /srv/homelab/ecommerce/practice/practice-10k.yaml      # applied: 0001_… 0008_clock_steps.sql
    uv run ecomgen generate /srv/homelab/ecommerce/practice/practice-10k.yaml     # ~5 s for 10k orders
-   uv run ecomgen validate /srv/homelab/ecommerce/practice/practice-10k.yaml     # 19 passed, 0 failed
+   uv run ecomgen validate /srv/homelab/ecommerce/practice/practice-10k.yaml     # 20 passed, 0 failed
    ```
    Don't edit the YAML after `generate`: `resume` refuses a changed config.
 
@@ -121,7 +124,7 @@ Then `check-config`, `init-db`, `generate`, `validate` with `practice-100k.yaml`
 profiling. Different schema names per dataset is the benchmark's own approach (`*_pc` schemas), but true
 incremental generation (new orders appended to an existing dataset) is a Phase 3 feature, not available yet.
 
-## Clock steps (`advance`; after `v0.2.0-homelab`, not deployed yet)
+## Clock steps (`advance`; from `v0.3.0-homelab`, verified 2026-10-19)
 
 `generate` writes a dataset as it stands at `clock_end` in one go. `advance` moves a simulation clock through the
 same period instead, so the data changes the way a live shop's does. Each step is a run that:
@@ -139,28 +142,46 @@ Rules: a schema set holds either one `generate` run or one chain of steps, so gi
 schema names; every step uses the same config (same seed, counts, clock, data root and feeds); the clock only moves
 forward, within `clock_start`..`clock_end`.
 
+**Verified** (2026-10-19, in a disposable database `ecomgen_v030_smoke` with the practice role; any database
+works). A stepped dataset needs its own config copy (other schema names) and its own data folder:
+
 ```bash
 cd /srv/homelab/ecommerce/practice
-cp practice-10k.yaml stepped-10k.yaml
-sed -i -e 's/^  application_schema: commerce$/  application_schema: commerce_stepped/' -e 's/^  integration_schema: integration$/  integration_schema: integration_stepped/' -e 's/^  metadata_schema: generator_meta$/  metadata_schema: generator_meta_stepped/' stepped-10k.yaml
+ls v030-stepped.yaml 2>/dev/null && echo "EXISTS - stop"          # never overwrite a config a dataset uses
+cp --update=none practice-10k.yaml v030-stepped.yaml
+sed -i -e 's/^  application_schema: commerce$/  application_schema: commerce_stepped/' -e 's/^  integration_schema: integration$/  integration_schema: integration_stepped/' -e 's/^  metadata_schema: generator_meta$/  metadata_schema: generator_meta_stepped/' v030-stepped.yaml
+grep -n "_schema:" v030-stepped.yaml                               # three *_stepped names
+mkdir /srv/homelab/ecommerce/data/v030-stepped
 cd /srv/homelab/projects/ecommerce-homelab
-uv run ecomgen init-db /srv/homelab/ecommerce/practice/stepped-10k.yaml
-uv run ecomgen advance /srv/homelab/ecommerce/practice/stepped-10k.yaml --to 2026-01-08T00:00:00Z
-uv run ecomgen advance /srv/homelab/ecommerce/practice/stepped-10k.yaml --to 2026-01-15T00:00:00Z
-uv run ecomgen advance /srv/homelab/ecommerce/practice/stepped-10k.yaml --to end
-uv run ecomgen validate /srv/homelab/ecommerce/practice/stepped-10k.yaml
+set -a; . /srv/homelab/ecommerce/practice/practice.env; set +a
+export ECOMMERCE_DATABASE_URL="${ECOMMERCE_DATABASE_URL%/ecommerce_oltp}/ecomgen_v030_smoke"   # omit to use ecommerce_oltp
+export ECOMGEN_DATA_ROOT=/srv/homelab/ecommerce/data/v030-stepped
+echo "$ECOMMERCE_DATABASE_URL" | sed 's#//\([^:]*\):[^@]*@#//\1:***@#'                           # check the database name
+S=/srv/homelab/ecommerce/practice/v030-stepped.yaml
+uv run ecomgen init-db $S                                           # applied: 0001_… 0008_clock_steps.sql
+uv run ecomgen advance $S --to 2026-01-02T00:00:00Z                 # first step: master data + day 1
+for d in 03 04 05 06 07 08; do uv run ecomgen advance $S --to 2026-01-${d}T00:00:00Z; done
+uv run ecomgen advance $S --to 2026-01-15T00:00:00Z
+uv run ecomgen advance $S --to end
+uv run ecomgen validate $S                                          # 20 passed, 0 failed
 ```
 
-To simulate business days, step one day at a time (`--to 2026-01-02T00:00:00Z`, `--to 2026-01-03T00:00:00Z`, ...).
-Measured on the Mac (10k config, 31 daily steps, data version 3): about 1.2 s per step including the database
-writes and the CLI start; the step only generates the browsing sessions near its window. Validate 20/20; rows and
-file records identical to `generate`'s.
+What it printed (10k config): the first step `inserted sellers=100 categories=40 customers=5000 products=2000
+orders=322 …`, `updated orders=0`; then each daily step about 320 new orders, with updates growing as earlier orders
+progress (`updated orders=119` on day 2 to `578` on day 7); 0.3-0.5 s per daily step, 3.1 s for the last 17 days.
+After day 1 no order was DELIVERED and no payment SETTLED (no settlement file yet); after day 7 there were 553
+DELIVERED orders and 962 SETTLED payments. At the end all 7 tables matched a one-shot `generate` of the same config
+row for row (md5 per table), the settlement records were identical, and the clickstream held 110,000 records.
 
 Each step prints `step run_… COMPLETED: clock <previous> -> <as_of>`, the rows inserted and updated, and its files.
 `--to` needs a time zone (`Z` for UTC; other offsets are converted) or `end`. Repeating a step that is already done,
 the latest or an earlier one, prints "a completed step already reached …" and changes nothing (no file is
 rewritten), so the whole list of commands can be re-run safely. A step killed midway stays RUNNING; `advance` then
 refuses until `uv run ecomgen resume CONFIG` finishes it (database rows, then the missing files, then the manifest).
+**Verified** with a hard kill (SIGKILL) after a step's rows were committed and before its files: `status` said
+"no process is writing: the run crashed"; `validate` failed `run_completed` and `files_match_ledger` (one reason:
+the step is RUNNING); `advance` refused (exit 1); `resume` printed `0 chunks written, 1 already committed` and
+published the files; `validate` then passed 20/20 and a second `resume` was a no-op.
 If a row was changed by hand in between, the step stops ("not as the previous step left them") without writing
 that chunk.
 
@@ -177,7 +198,7 @@ SELECT status, count(*) FROM commerce_stepped.orders GROUP BY 1 ORDER BY 2 DESC;
 `manifests/run_id=<step run id>/manifest.json` and carries a `clock_step` block:
 
 ```bash
-D=/srv/homelab/ecommerce/data/practice
+D=/srv/homelab/ecommerce/data/v030-stepped
 python3 -m json.tool $D/manifests/run_id=<step run id>/manifest.json | head -20
 find $D/source_feeds $D/clickstream -name '<step run id>*' | sort | head
 ```
@@ -194,8 +215,12 @@ run/ledger checks to one step. While a step is unfinished, its files are reporte
 step's files are checked once it completes") instead of as hundreds of missing records.
 
 **Replaying a step's files:** `replay-files CONFIG --run-id <step run id> --from D --to D` copies that step's files.
-A day whose files are split across two steps (a step that ended mid-day) is refused ("would deliver part of a
-day"); stepping on day boundaries (`--to …T00:00:00Z`) keeps every day in one step.
+A day whose files are split across two steps is refused ("would deliver part of a day"). A step that ends mid-day
+splits that day. **Known limitation:** stepping on day boundaries (`--to …T00:00:00Z`) does *not* always keep days
+whole. An event exactly at midnight belongs to the step that ends then (windows include their end), but sits in the
+next day's partition. On the homelab, one browsing event at `2026-01-08T00:00:00Z` put a file of the Jan 7 → Jan 8
+step into `date=2026-01-08`, so replaying Jan 8 from either step is refused. Replay the dates that hold files of
+one step only.
 
 **Time conventions (all UTC):** `event_time` / `settled_at` / `placed_at` = when it happened in the simulated
 business (a step's window is about these); `arrived_at` (clickstream) = when the web app received the event, 1-30 s
