@@ -20,7 +20,7 @@ Minimum tables; Claude should add indexes, check constraints, status enums / loo
 | returns | return_id | order_item_id FK, quantity, requested_at, reason, state |
 | refunds | refund_id | return_id or payment_id FK, amount, currency, issued_at, status |
 | cart_events | event_id | customer/session, product, action, event_time |
-| outbox_events | event_id | aggregate_type, aggregate_id, event_type, payload JSONB, created_at, schema_version |
+| outbox_events (integration schema) | event_id (`obx_<aggregate_id>_<seq>`) | aggregate_type, aggregate_id, aggregate_seq, event_type, schema_version, occurred_at, order_id FK, payment_id FK, payload JSONB (from/to + business fields), run_id FK; append-only, one per state transition (implemented: migration 0009, data version 5) |
 | generation_runs | run_id | seed, config_hash, state, timestamps, counts, version |
 
 **Scope notes:** For MVP, focus on the subset needed for 10,000 coherent orders; defer rich support/reviews/promotions until relationships and replay are proven. Any materialized `orders.total` is the sum of explicit price components and must reconcile with order items; payment settlements and refunds have their own timing rules.

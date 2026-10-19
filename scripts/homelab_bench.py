@@ -208,9 +208,10 @@ def sizes(name: str) -> None:
 
 
 def digest(name: str) -> None:
-    """Row count + md5 over every source table, rows sorted by text: equal output = identical data. Row text is
-    pinned to UTC/ISO and sorted bytewise (COLLATE "C"), so it doesn't depend on the server's time zone or locale."""
-    schema = _schemas()[0]
+    """Row count + md5 over every source table and the outbox, rows sorted by text: equal output = identical data.
+    Row text is pinned to UTC/ISO and sorted bytewise (COLLATE "C"), so it doesn't depend on the server's time zone
+    or locale. The outbox is hashed without run_id (which run wrote an event differs per machine, not the event)."""
+    schema, integration = _schemas()[:2]
     with psycopg.connect(db_url(name)) as c:
         c.execute("SET TIME ZONE 'UTC'")
         c.execute("SET DateStyle = 'ISO, MDY'")
@@ -219,6 +220,12 @@ def digest(name: str) -> None:
                 "SELECT count(*), md5(coalesce(string_agg(x::text, '|' ORDER BY x::text COLLATE \"C\"), ''))"
                 " FROM {}.{} x").format(sql.Identifier(schema), sql.Identifier(t))).fetchone()  # type: ignore[misc]
             print(f"{t} {n} {md5}")
+        row = "(event_id, aggregate_type, aggregate_id, aggregate_seq, event_type, schema_version, occurred_at," \
+              " order_id, payment_id, payload)::text"
+        n, md5 = c.execute(sql.SQL(
+            f"SELECT count(*), md5(coalesce(string_agg({row}, '|' ORDER BY {row} COLLATE \"C\"), ''))"
+            " FROM {}.outbox_events").format(sql.Identifier(integration))).fetchone()  # type: ignore[misc]
+        print(f"outbox_events {n} {md5}")
 
 
 def leftovers(name: str) -> None:

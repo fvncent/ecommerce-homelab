@@ -151,6 +151,15 @@ references (`scripts/expected_{mvp,feed}_digest.txt`, recorded on PG 17); replay
 exactly the plan; replayed originals = `scripts/expected_replay_originals.txt`; no orphans or staging left.
 WAL 16.7 MB (10k). Data root after a full run ≈ 70 MB.
 
+## Transactional outbox (macOS, 2026-10-19, `feat/outbox`, data version 5)
+
+Throwaway `postgres:18.6-trixie`. 10k example config: 88,450 outbox events (~8.8 per order). `homelab_benchmark.sh`
+now hashes the outbox too (without `run_id`); recording changed only `scripts/expected_mvp_digest.txt` (one added
+line, `outbox_events 88450 7899406d…`; the 7 table lines and every file reference unchanged); verification run 49/49.
+10k `generate` with files 7.8 s / 96 MB RSS (was ~5.7 s / 65 MB without the outbox). 31 daily `advance` steps vs one
+`generate`: identical outbox (88,450 events, same md5 without run_id), orders and payments; validate 24/24 both;
+31 steps in 33 s, each step's events carrying its run_id.
+
 ## Half-open step windows (macOS, 2026-10-19, `fix/half-open-windows`, data version 4)
 
 Windows `[previous, as_of)` instead of `(previous, as_of]`. In a throwaway `postgres:18.6-trixie` container:

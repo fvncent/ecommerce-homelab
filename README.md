@@ -27,6 +27,7 @@ uv run ecomgen status config/generator.example.yaml    # run state + chunk progr
 uv run ecomgen resume config/generator.example.yaml    # finish a crashed/FAILED run with the identical config
 uv run ecomgen advance STEPPED.yaml --to 2026-01-08T00:00:00Z   # clock step (rows + its window's files) in its own schema set;
                                          # steps to --to end equal `generate`; see docs/GENERATOR_USER_GUIDE.md
+                                         # every state change also writes integration.outbox_events (same transaction)
 uv run ecomgen replay-files config/generator.example.yaml --from 2026-01-05 --to 2026-01-08 --duplicate-pct 5
                                          # simulated delivery of a run's files (copies; originals untouched)
 uv run ecomgen cleanup-files config/generator.example.yaml --replay-id RPL   # dry run; then --delete --confirm TOKEN
