@@ -1,300 +1,89 @@
 # Session Handoff
 
-Update before compaction or ending a significant session. Overwrite; git history keeps the old ones. Task list: `TASKS.md`.
+Update before compaction or ending a significant session. Overwrite it: git history keeps the old versions (the full
+per-PR review tables up to PR #23 are in commit `03ee496`). Task list: `TASKS.md`.
 
 **Updated:** 2026-10-19
-**Branch:** `fix/session-ordering` (from `main` `a01689d` = PR #22 Phase 3B merged, CI 301/0 on PG 17 + 18).
-Browsing-session ordering fix (approved 2026-10-19 as its own PR before the Phase 3 Ubuntu release). User's plan:
-1) this fix (push/PR after approval, no auto-merge) → 2) prepare a new Phase 3 release (3A + 3B + this; never reuse
-`v0.2.0-homelab`; report version, SHA, migrations incl. 0008, data-version impact, checksums, config changes,
-upgrade + rollback plan; approval before tagging) → 3) Ubuntu smoke + multi-day `advance` walkthrough, user-run, one
-step at a time, guide updated with verified commands → 4) Phase 3C only after that. Ubuntu stays on `v0.2.0-homelab`.
-**Practice dataset (Ubuntu, user-created 2026-10-18):** role `ecomgen_practice` (no privileges) owns `ecommerce_oltp`
-(CONNECT revoked from PUBLIC); config/env in `/srv/homelab/ecommerce/practice/` (`practice-10k.yaml` = example
-config, `practice.env` mode 600); files in `/srv/homelab/ecommerce/data/practice`; run
-`run_20261018T135727Z_72e31d` COMPLETED, validate 19/19. Read-only `ecomgen_reader` documented, not created.
-**Released:** PR #18 merged at reviewed head `959fce9` → `main` `de90a6a` (CI 251/0 on PG 17 + 18); tag
-`v0.2.0-homelab` → `de90a6a` (user-approved); `v0.1.1-homelab` kept at `8c581ad`.
-**Deployed on Ubuntu:** `v0.2.0-homelab`, verified 2026-10-18: the user dropped/recreated the 3 DBs by hand after a
-read-only inventory; benchmark 49/49 PASS, exit 0; snapshot diff = only the 3 DBs' sizes/counters; replay cleanup
-dry run only (`docs/BENCHMARKS.md`). Benchmark data kept in the DBs and `/srv/homelab/ecommerce/data`.
-**Phase 3:** 3A (PR #21) and 3B (PR #22) merged; 3C-3E wait (see plan above).
-**Ubuntu shell gotcha:** `!` inside double quotes triggers bash history expansion (`!~: event not found`); give
-SQL without `!` (e.g. `NOT LIKE 'pg\_%'`).
+**Branch:** `chore/claude-harness` (from `main` `8f667d4`).
+**main:** `8f667d4` = PR #23 (browsing-session ordering, DATA_VERSION 3) merged; CI 311 tests / 0 skipped on
+PG 17.11 and 18.6. Phase 3A (`advance`, migration 0008, PR #21) and 3B (files per clock step, PR #22) are merged.
+**Release:** `v0.3.0-homelab` → `8f667d4` was approved, but **not pushed yet**: the classifier blocked the push and
+the user was given the command. `v0.2.0-homelab` (`de90a6a`) stays as it is. The release report (migrations,
+data version, checksums, upgrade/rollback rehearsal) is in the 2026-10-19 conversation. Re-create it with the
+`homelab-release` skill.
+**Deployed on Ubuntu:** `v0.2.0-homelab` (benchmark 49/49, 2026-10-18).
 
-## Previous task: PR C, benchmark with files (PR #18, merged) (`docs/HOMELAB_DEPLOYMENT.md`)
-- Decisions (user, 2026-10-18): publish crash in the smoke database, sequentially after the clean smoke run, from a
-  clean baseline without any reset: its own schema set (`*_pc`, derived config `generator_pc.yaml` in OUT; preflight
-  requires both schema sets empty). Replay cleanup: dry run unless `CLEANUP_REPLAY=1`, only for the replay this run
-  created (`owned-replay`), only if every earlier check passed; list reported first (`cleanup_plan.txt`).
-- Deployment rules (user): tag + SHA verified, PRs merged + CI green, localhost:5432 only (port 55432 refused in
-  preflight; `EXPECTED_PG_PORT`), inventory of the 3 DBs before proposing drops, no automatic drops, NVMe mount,
-  `ECOMGEN_DATA_ROOT=/srv/homelab/ecommerce/data`, everything under `/srv/homelab/ecommerce`, snapshot diff;
-  approval before creating/pushing `v0.2.0-homelab`; Ubuntu commands one step at a time, wait for output.
-- `homelab_bench.py`: local-only + forbidden-port + expected-port checks; `pc-config`, `run-id`, `feed-digest`,
-  `feed-stats`, `verify-files` (sha256 + orphans + staging), `feed-throughput`, `publish-crash` (kill after placing
-  file N, smoke DB only), `replay-crash` (test DB only), `replay-id`, `replay-originals`, `planned-replay-digest`,
-  `replay-digest`, `verify-replay`, `owned-replay`, `link-test`, `feeds-enabled`.
-- `homelab_benchmark.sh`: phases smoke → publish crash → MVP → feed-only throughput → load crash → replay crash →
-  cleanup; `same_as` (record-once with `RECORD_REFERENCES=1`, macOS only, exit 3); `expect` runs commands in a
-  subshell so SIGKILL notices go to the log.
-- Found: replay timing/duplicates are seeded by the replay id (includes the run id), so they differ per run and
-  can't be a cross-machine reference; the reference is the replayed originals, and deliveries are checked against
-  the locally computed plan. Making the schedule run-independent would be a REPLAY_VERSION 2 change (not done).
-- References: `scripts/expected_smoke_feed_digest.txt`, `expected_feed_digest.txt`, `expected_replay_originals.txt`
-  (recorded on Docker PG 17; `expected_mvp_digest.txt` re-recorded identical).
-- Rehearsals: Docker PG 17.11 (48/48, `CLEANUP_REPLAY=1`) and `postgres:18.6-trixie` (44/44, dry run), exit 0;
-  rehearsal role/DBs/container removed afterwards.
+## User's plan (2026-10-19)
+1. Session-ordering fix: done (PR #23).
+2. Phase 3 release `v0.3.0-homelab`: tag push pending (user).
+3. Ubuntu verification, run by the user one step at a time:
+   - isolated smoke DB first;
+   - `init-db` on persistent DBs only as separately approved steps;
+   - a multi-day `advance` walkthrough in its own schema set;
+   - inspect PostgreSQL, CSV and JSONL; validate;
+   - update `docs/GENERATOR_USER_GUIDE.md` with the verified commands. Its `init-db` example (0001-0007) and
+     "19 passed" become 0001-0008 and 20.
+4. Phase 3C (outbox) only after step 3 and the user's hands-on walkthrough. Then 3D (warehouses/inventory) and 3E
+   (catch-up / `--follow`).
 
-## PR C review (`/code-review high`) — all 10 fixed
-| # | Finding | Fix |
-|---|---|---|
-| 1 | Port gate used the server's inner port (published container passes) | `check_server`: URL port explicit, not 55432, = EXPECTED_PG_PORT, before connecting; tests |
-| 2 | `?hostaddr=`/`?service=`/PGHOSTADDR could redirect | Only sslmode/connect_timeout/application_name; PGHOST/PGHOSTADDR/PGSERVICE refused; tests |
-| 3 | Cleanup dry-run failure passed silently | Exit code checked; must list this replay's copies; CLEANUP_REPLAY=1 without deletion = FAIL |
-| 4 | Record mode recorded after failures | Pending references in OUT/references, copied to scripts/ only if all checks passed (else exit 2) |
-| 5 | Data-root gate on path text | `check-paths` helper (resolve; strictly inside the project, no symlink, not benchmarks/; OUT not in data root), unit-tested; DATA_ROOT pinned on Linux |
-| 6 | Smoke/pc digests without completeness check | digest_ok before the diff |
-| 7 | EXPECTED_PG_PORT optional on Linux | Required on Linux; checked pre-connection |
-| 8 | Second rerun exit code ignored; "duplicates" over-claimed | Exit code checked; labels state what is checked (plan diff = none missing/extra) |
-| 9 | Host clock vs server clock in owned-replay | STARTED_EPOCH from the server (`server-epoch`) |
-| 10 | Orphan scan walked the whole data root; private `_originals` | Scan only source_feeds/, clickstream/, the run's manifest dir; `replay.originals` public |
+## Upgrade facts for v0.3.0 (rehearsed on a throwaway PG 18.6 DB)
+- Migration 0008 only adds things. On v0.2.0 runs, `validate` gives 20/20, every file's sha256 is unchanged, and
+  `resume` of a COMPLETED run is a no-op.
+- Rollback = check out `v0.2.0-homelab`: `status` and `validate` (19/19) still work. Its `init-db` refuses
+  ("migrations this generator doesn't know: [8]"); that's harmless. v0.2.0 doesn't understand chains.
+- DATA_VERSION 3 changes clickstream bytes only (rows unchanged). An unfinished v2 run can't be resumed with v0.3.0;
+  all Ubuntu runs are COMPLETED.
 
-## PR C final review (`/code-review high` on PR #18) — all 10 fixed (2 critical/high)
-| # | Finding | Fix |
-|---|---|---|
-| 1 | **Critical:** urllib vs libpq parse: `user@127.0.0.1:55432,x@127.0.0.1:5432` showed 5432, libpq tries 55432 first | Gate judges libpq's own parse (`conninfo_to_dict`): one host, one port, allowed keys only; netloc with >1 '@' refused; tests |
-| 2 | **High:** symlinked project root moves confinement | Project path must equal its resolved path; test |
-| 3 | mem_stop in $(...) left a stale PID for the EXIT trap | Sampler stopped in the main shell (`mem_stop`), peak read separately (`mem_peak`) |
-| 4 | Expected exit 1 could be any error | `expect_msg`: exit code and the expected message (`FAIL run_completed`, `already holds run`, `removed by cleanup`) |
-| 5 | replay-crash params from CONFIG env, replay from argv config | Both from the same loaded config |
-| 6 | sh -c quoting / vacuous pass in "nothing else" | Counted in bash; the preceding check requires the file and its copies |
-| 7 | Test name mangled by the rename | Restored |
-| 8 | Duplicate PARENT gate | Removed |
-| 9 | `_schemas` duplicated `_cfg`, loaded twice | Reuses `_cfg`, once per preflight |
-| 10 | Exit code 1 undocumented | Header lists 0/1/2/3 |
-
-## Previous task: PR B, `cleanup-files` (PR #17, merged) (`docs/FEEDS.md` "Cleanup")
-- `cleanup.py`: `Target` (staging | replay | run), `plan` (read-only, hashes candidates: ledger-recorded,
-  not-deleted files of a COMPLETED run/replay (gone ones included, changed ones kept out), or known `staging/<id>`
-  dirs of runs/replays/cleanups; manifests kept; `check_root`), `token`, `run` (run lock; token must match before
-  any side effect; finishes RUNNING cleanups of the same root; cleanups row → per item `_delete` (fd chain from
-  root with O_NOFOLLOW, regular file, checksum + inode, unlink / fd rmtree, fsync) → one transaction: mark + note
-  in details → `_finish_audit` (DB-only JSON; already-gone not counted as deleted) → COMPLETED).
-- Migration 0007: `cleanups` (target, token, data_root, details, state), `deleted_at/deleted_by` on both ledgers
-  with CHECKs (both or neither; manifests never deleted), partial indexes on deleted_by.
-- `feeds.RUN_ID`, `replay.REPLAY_ID`, `cleanup.CLEANUP_ID` patterns shared (staging recognition).
-- `validate`: deleted files → files_match_ledger "deleted by cleanup <id>". `replay`: cleaned originals refused,
-  cleaned replay verify refused (named). CLI `cleanup-files` (exit 0/1/2/3; --delete needs --confirm).
-- Tests: 8 unit (`tests/test_cleanup.py`, incl. a directory swapped for a symlink mid-delete), 11 integration
-  (`tests/integration/test_cleanup_files.py`, incl. a real SIGKILL after the 3rd unlink before its mark → rerun:
-  1 already gone, first audit finished, refused delete side-effect free, ledger == disk; pre-0007 databases).
-  Suite: 235 passed with DB, 109 passed / 126 skipped without; mypy clean (29 files).
-
-## PR B review (`/code-review high`) — all 10 fixed
-| # | Finding | Fix |
-|---|---|---|
-| 1 | validate/replay crash on pre-0007 databases | `db.has_table("cleanups")` gates deleted_by reads; test on a 0006-shaped DB |
-| 2 | TOCTOU: symlink swap between check and unlink | fd chain with O_NOFOLLOW; hash, inode check and unlink via dir fd; fd rmtree; race test |
-| 3 | Already-gone counted as deleted in audit | Recorded in details with the mark; excluded from deleted_files/bytes; test |
-| 4 | Pending audits finished under any root, before token check | `cleanups.data_root`; finished only for the same root, only after the token matches; test |
-| 5 | Staging dirs reported as removed before removal | Recorded per dir after rmtree (`staging_dirs_removed`) |
-| 6 | Changed files stay candidates; cleanup_id collisions | Changed files excluded at plan time; random cleanup_id suffix; test |
-| 7 | Docs exit 3 vs missing-0007 exit 1 | Missing 0007 → RunLookupError (exit 3) |
-| 8 | `--replay-id ""` traceback | `is not None` + CleanupError → exit 2; test |
-| 9 | No index on deleted_by | Partial indexes in 0007 |
-| 10 | Duplicated id patterns; cln_* staging "unknown" | Shared RUN_ID/REPLAY_ID/CLEANUP_ID; cleanups known |
-
-## Earlier: PR A, `replay-files` (PR #16, merged) (`docs/FEEDS.md` "Replay")
-- `replay.py`: `Params` (from/to/feeds/delay/jitter/dup pct, validated), `replay_id` (hash of run + params +
-  REPLAY_VERSION), pure `schedule` (arrival = end of partition day + delay + jitter; dup 1-24 h later; both rng draws
-  always made), `delivery_manifest` (plan only, reproducible), `_originals` (manifest vs ledger sha, each original vs
-  manifest; all problems before any write), `replay` (run lock; COMPLETED run; same data root; copy → verify sha →
-  `feeds.place_file` → `file_deliveries` row; manifest row + COMPLETED in one transaction; verify-only once done).
-- `feeds.place_file` extracted from `_place` (publish uses it; messages now "recorded file", "while placing it").
-- Migration 0006: `replays`, `file_deliveries`. CLI `replay-files` (exit 0/1/2/3).
-- Tests: 12 unit (`tests/test_replay.py`), 16 integration (`tests/integration/test_replay_files.py`, incl. real
-  SIGKILL before the 6th placement → rerun → exact plan + reproducible manifest). Suite: 216 passed with DB,
-  101 passed / 115 skipped without; mypy clean (26 files).
-
-- Crash between a file landing in place and its PostgreSQL commit (user requirement before merging PR A): real
-  SIGKILL right after `place_file` returns, for the 6th delivery and for the delivery manifest (row + COMPLETED not
-  committed), and the same for publishing (4th file, run manifest). The rerun/resume adopts the placed file
-  (identical bytes, fsynced, no rewrite); afterwards ledger == disk exactly (no orphans, no duplicates), staging
-  empty, state COMPLETED / validate clean. Also a kill just before placing (existing tests).
-
-## PR A review (`/code-review high`) — all 10 fixed
-| # | Finding | Fix |
-|---|---|---|
-| 1 | Staging left forever after a crash post-COMPLETED | Staging cleared before every path, verify-only included; test |
-| 2 | Manifest paths unchecked (`..`, absolute) | `feeds.safe_rel` + feed-directory/partition pattern; refused before any write; tests |
-| 3 | Symlinks followed (originals, targets, staging) | `feeds.no_links`; `place_file` refuses links (publish too); tests |
-| 4 | Huge hours → OverflowError traceback | 0..87,600 h bounds in Params (exit 2); test |
-| 5 | feeds not normalized/validated | Sorted + deduplicated; non-empty known subset; tests |
-| 6 | Verify re-read originals, failed after cleanup | Verify-only before reading originals; test with a removed original |
-| 7 | Unquoted to_regclass; unmigrated DB exit 1 | `db.has_table` (quoted); no ledger → RunLookupError (exit 3); test |
-| 8 | `.dupN` inserted into directories | Only the file name changes; tests |
-| 9 | Docs exit code for empty range; manifest counted as delivery | Docs fixed (exit 1); newly_delivered counts files only |
-| 10 | Invariants only in Python | 0006: component-wise path CHECKs, replay-dir prefix, manifest-row shape, FK to published_files and to (replay, run); test. Residual: "COMPLETED has a manifest row" stays in code (one transaction) |
-
-## Ubuntu facts (from the user, 2026-10-18)
-- Ubuntu Server, Ryzen 5 5600, ~14 GiB usable RAM, user `serveradmin`. Root fs ~73 GB free.
-- NVMe Samsung 990 EVO Plus 1 TB, `/dev/nvme0n1p1` ext4 at `/srv/homelab` (~906 GiB free). Project root
-  `/srv/homelab/ecommerce/{source,data/{csv,jsonl,parquet,events},checkpoints,logs,benchmarks,metadata}`.
-- Host PostgreSQL 18 (`18/main`, 127.0.0.1:5432; only `postgres` DB). Approved databases: `ecommerce_homelab_smoke`,
-  `_test`, `_crash`; dedicated least-privilege role. Never drop automatically; never change server settings.
-- Do not touch: VLSIM engine + TMS, PostgreSQL 17 container (host port 55432), Redpanda. No new PG container.
-- Repo is now **public** (history scanned: no secrets ever committed). Clone: `/srv/homelab/projects/ecommerce-homelab`
-  (`.env` mode 600 there, `.venv` via uv). Role `ecomgen_app` + 3 databases exist and hold the benchmark data.
-- User runs every Ubuntu command by hand; they prefer one complete ordered list of steps (each marked read-only or
-  changes, with expected output) over one-step-per-message. Claude never SSHes.
-
-## Previous task: host-PostgreSQL tooling (PR #12, merged)
-- `homelab_bench.py`: fixed set of three databases; no create/drop; `preflight` refuses a role with any rol*
-  privilege, any role membership, ownership of other databases, or non-empty databases; `same-server` (backend PID
-  in the systemd unit cgroup / container); `leftovers` (client backends + prepared xacts after SIGKILL); digest
-  pinned to UTC + `COLLATE "C"`; `?dbname=` (even empty) refused; `pg-stats` survives an unreachable server.
-- `homelab_benchmark.sh`: OUT must be under DATA_ROOT and on `MOUNT_TARGET` with `MOUNT_UUID`, read-write (required
-  on Linux); `PG_SERVICE` required on Linux and proven to be the URL's server; optional `PG_MAJOR`; throughput.
-- `host_snapshot.sh`: default `/srv/homelab` minus the project dir, full depth + unreadable-path count, container
-  IDs/start times/restarts, `DOCKER UNAVAILABLE` warning, `PG_LOCAL_SUPERUSER=1` (read-only `sudo -u postgres psql`:
-  roles, memberships, all settings, DB ACLs, sizes/counters; works before our role exists).
-- `expected_mvp_digest.txt` recomputed (same data, new method). Runbook rewritten (`docs/HOMELAB_DEPLOYMENT.md`).
-- Rehearsals: Docker PG 17.11 (test DB `LOCALE 'C'` + New York time zone) and a throwaway `postgres:18` (18.6): all
-  expectations passed, digest = reference; refusals tested (superuser, membership, extra owned DB, empty `?dbname=`,
-  wrong server, OUT outside DATA_ROOT, wrong major, missing dir); mount gate tested in an Ubuntu container (no UUID,
-  not on mount, wrong UUID; the pass case needs real ext4). Runbook Stage 2 SQL run verbatim on PG 18. All
-  rehearsal roles/databases/containers removed; Mac back to `ecommerce_mvp`, `ecommerce_oltp`, role `ecomgen`.
-- Tests: 146 passed with DB; 73 passed / 73 skipped without; mypy clean.
-
-## PR #12 review (`/code-review high`) — all 10 fixed
-| # | Finding | Fix |
-|---|---|---|
-| 1 | Handoff still named v0.1.0-homelab as target | Handoff rewritten; deploy target v0.1.1-homelab |
-| 2 | Preflight ignored role memberships | Refuses any membership and ownership of other DBs; tested on PG 18 |
-| 3 | Empty `?dbname=` passed | `keep_blank_values=True`; test |
-| 4 | Snapshot as ecomgen_app can't precede Stage 2 | `PG_LOCAL_SUPERUSER=1` mode; before snapshot moved ahead of Stage 2 |
-| 5 | Runbook put the password in an export | Snapshot needs no URL; benchmark reads `.env` |
-| 6 | maxdepth 4 hid deeper changes | Full depth by default; unreadable paths counted |
-| 7 | Mount gate checked DATA_ROOT, not OUT | OUT must be under DATA_ROOT; findmnt on OUT's parent |
-| 8 | PG_SERVICE not tied to the URL's server | `same-server` cgroup/container check; PG_SERVICE required on Linux |
-| 9 | leftovers counted autovacuum workers | `backend_type = 'client backend'` |
-| 10 | Settings proof incomplete as unprivileged role | Superuser snapshot reads all settings |
+## Ubuntu facts (from the user)
+- Ryzen 5 5600, ~14 GiB RAM, user `serveradmin`.
+- NVMe UUID `d263e3fd-041a-4070-a72a-28e01126aa6f`, ext4 at `/srv/homelab`.
+- Clone `/srv/homelab/projects/ecommerce-homelab` (`.env` mode 600). Data `/srv/homelab/ecommerce/data`.
+- Host PostgreSQL 18.6 on 127.0.0.1:5432 only. Leave VLSIM + TMS, its PG 17 container (55432) and Redpanda alone.
+- Role `ecomgen_app` owns `ecommerce_homelab_{smoke,test,crash}`, which hold the benchmark data.
+- Practice dataset: role `ecomgen_practice` (no privileges) owns `ecommerce_oltp`; config and env in
+  `/srv/homelab/ecommerce/practice/` (`practice-10k.yaml`, `practice.env` mode 600); files in
+  `/srv/homelab/ecommerce/data/practice`; run `run_20261018T135727Z_72e31d`.
+- The user runs every command by hand, one step per message: purpose, read-only or modifying, exact commands,
+  expected result. No heredocs. No `!` in double quotes. Claude never SSHes and never drops anything.
 
 ## Key decisions
-- Safety on the homelab rests on PostgreSQL permissions: the role can only connect to and write its own three
-  databases; the script refuses to run if the role has more. Cleanup = manual, approved superuser SQL.
-- Integration tests need CREATEDB (create/drop throwaway DBs) → not run on Ubuntu; Mac (and future CI) cover them.
-- Server memory on Ubuntu = whole `postgresql@18-main` unit incl. page cache; WAL is server-wide.
-- Earlier decisions (resume rebuilds the World from `resume_fields`, DATA_VERSION/golden, status read-only, exit
-  codes) are unchanged: see git history of this file (commit `4e356de`).
+- One run per schema set; an `advance` chain needs its own schema set. The clock is as-of inside
+  `clock_start`..`clock_end`.
+- Step windows are `(previous_as_of, as_of]` (first step `[clock_start, as_of]`).
+- All steps together = the `generate` rows and records.
+- Data changes bump DATA_VERSION and add a golden entry, never edit one (`data-change` skill).
+- Homelab safety rests on PostgreSQL permissions: least-privilege roles, DBs created and dropped by hand.
+- Integration tests need CREATEDB, so they don't run on Ubuntu; the Mac and CI cover them.
 
-## Known failures / limitations
-- Ubuntu-only gates (mount UUID, systemd cgroup, pinned DATA_ROOT) are exercised only by the Ubuntu run (passed).
-- Snapshot can't see inside paths `serveradmin` can't read (counted), or docker if not permitted (warned).
-- Replay timing/duplicates depend on the run id: compared with the local plan, not across machines.
-- Not yet: Parquet snapshots, supplier/courier feeds, age-based retention, profiles above 10k, `workers: 2`.
+## Known limitations
+- The first step of a chain generates every browsing session up to its `as_of`.
+- Browse and order volume are nearly flat over time (no time-of-day shape).
+- Replay timing depends on the run id. The Ubuntu-only gates are exercised only by the Ubuntu run.
+- Not yet: Parquet, supplier/courier feeds, age-based retention, profiles above 10k, `workers: 2`.
 
-## Previous task: 3A `advance` (PR #21, merged) (`docs/GENERATOR_USER_GUIDE.md` "Clock steps")
-- `generate.py`: `World.order(n, as_of)` (state as of a time; same draws), `placed_at`, `orders_by(t)` (binary
-  search; placed_at never decreases), `LIFECYCLE_MAX` (800,760 s: after placed + it an order is final),
-  `check_step`, `step_orders` (orders placed after previous - LIFECYCLE_MAX .. by as_of), `step_chunk` (inserts for
-  new orders/attempts, (before, after) pairs for changed orders/payments).
-- `load.py`: `advance` (run lock: refuses a schema set with a generate run, unrecorded rows, a non-COMPLETED last
-  step, another world/data_version/schema, backwards or out-of-window clock, feeds on; same as_of → None),
-  `write_step` (first step: master chunks; then step chunks: COPY inserts + `_update` via unnest with the
-  before-values in WHERE; rowcount mismatch → LoadError, chunk rolled back), ledger keys `<table>_updated`;
-  `resume` and `status` know steps (`_clock_columns`, NULL before 0008); `_complete` returns every ledger key.
-- Migration 0008: `as_of`, `previous_as_of`, UNIQUE both, FK previous → as_of, as_of > previous, one first step.
-- validate: ledger_matches_tables sums every run in the schema set. CLI `advance CONFIG --to ISO|end` (exit 0/1/2).
-- Tests: `tests/test_clock.py` (9: any steps == generate, state == world as of T, LIFECYCLE_MAX bound),
-  `tests/integration/test_advance.py` (9: steps == generate, refusals, tampered row, real SIGKILL mid-step →
-  resume, chain constraints, CLI). Suite 275 passed with DB, 140/135 without; mypy clean (31 files).
-- Mac 10k: 4 steps to the end = generate table-for-table, ~1 s per step, validate 12/12.
-
-## 3A review (`/code-review high`) — all 9 fixed
-| # | Finding | Fix |
-|---|---|---|
-| 1 | **Bug:** resume of a step failed under a non-UTC session TimeZone (as_of read back in that zone, check_step refused) | as_of/previous normalized to UTC where read (resume, status, chain); test with `SET TimeZone 'America/Chicago'` (fails without the fix) |
-| 2 | **Bug:** naive / non-UTC `to` compared before validation (TypeError, odd results) | advance refuses naive, converts any offset to UTC, checks the window first; tests |
-| 3 | Re-running an earlier step's `--to` failed (not idempotent) | as_of equal to any recorded step → no-op; test repeats the whole list |
-| 4 | "one generate run or one chain" only in Python | 0008: unique index on `previous_as_of IS NULL` (one origin run); tests |
-| 5 | Revisited orders generated twice | `World.order_at(n, ends)`: one generation, timeline cut at several times |
-| 6 | Step range recomputed per chunk | `StepPlan` from `plan_step`, computed once per step |
-| 7 | status label overstated "changed" | label says every order written or re-checked |
-| 8 | Duplicate must-match lists / regclass formatting | `CHAIN_MUST_MATCH` + `_mismatch`; `db._meta_regclass` |
-| 9 | `ENTITY_ORDER[:-1]` as "master data" | `generate.MASTER_ENTITIES` |
-
-Suite after fixes: 276 passed with DB, 141 passed / 135 skipped without; mypy clean.
-
-## This task: 3B files per step (`docs/FEEDS.md` "Clock steps", user guide "Clock steps")
-- `feeds.py`: `in_window(plan, t)` ((previous, as_of]; first step [clock_start, as_of]); `write_staged(..., plan)`:
-  settlements of payments SETTLED in the window (`_order_batches` over plan.orders), order_placed of orders placed in
-  it (n > plan.known), browsing events with event_time in it (`_sessions` scans all sessions);
-  `browsing_events_by(world, t)`; `publish(..., plan)`; manifest gets `clock_step` for steps only (one-shot bytes
-  unchanged; FEED_GOLDEN unchanged).
-- `load.py`: steps publish after their DB chunks, before COMPLETED (same protocol as generate); feeds refusal
-  removed; `CHAIN_MUST_MATCH` += data_root, feeds; `recorded_world` public.
-- `validate.py`: `_file_runs` (a chain: every step), `_file_results` over several runs (`_load_run_files`), browse
-  count = browsing events by the latest as_of.
-- Tests: `tests/test_feeds.py` +5 (steps' records == one-shot, half-open windows, browse count);
-  `tests/integration/test_step_files.py` (15: 5-step chain validated after each step + manifest/window checks +
-  converges to generate rows and records; determinism across chains; real SIGKILL at db/csv/jsonl/place/manifest/
-  complete → resume; repeat changes no file; deleted/corrupted file reported; read-only tree → FAILED → resume;
-  DB error in manifest → FAILED → resume; chain data root; replay + cleanup of a step).
-  Suite: 296 passed with DB, 146/150 without; mypy clean.
-- Mac 10k, 4 steps with files: 8,295 settlements + 110,000 events identical to generate's; validate 19/19; ~2.5 s
-  per step (session scan dominates; a run-independent session time would need a DATA_VERSION bump).
-
-## 3B review (`/code-review high`) — 8 fixed, 2 deferred (decision for the user)
-| # | Finding | Fix |
-|---|---|---|
-| 1 | validate couldn't tell if a record was in the right step's window | `records_in_their_step_window` (event_time / settled_at + run_id in the temp tables, `pg_temp.feed_windows`); corruption test + "event moved to the wrong step" test |
-| 2 | replay of a step delivered part of a day split across steps | `_refuse_split_days`: refused with the steps named; day-aligned steps replay whole days; test |
-| 3 | unfinished step = hundreds of file violations | one `files_match_ledger` reason per unfinished step; asserted in the SIGKILL tests |
-| 4 | malformed resume fields crashed validate | ValidateError (exit 3); test |
-| 5-6 | every step / validate scans all browsing sessions (O(N) per step) | **deferred**: needs session start = slot s (like orders) → DATA_VERSION 3, new goldens + references, Ubuntu re-verify |
-| 7 | ts() → parse per event to filter | fixed-width string compare (`_in_window_text`) |
-| 8 | separate plan=None code path | a whole run = `plan_step(world, None, clock_end)`; one path (FEED_GOLDEN unchanged) |
-| 9 | chain locked max_file_size_mb | `CHAIN_MUST_MATCH` compares `feeds.enabled` (nested keys in `_mismatch`); test |
-| 10 | first_step_run_id lookup unordered | `ORDER BY as_of, run_id LIMIT 1` |
-
-Suite after fixes: 301 passed with DB, 146 / 155 skipped without; mypy clean. validate now has 20 checks for a
-run with both feeds (was 19).
-
-## This task: browsing-session ordering (DATA_VERSION 3)
-- `feeds.py`: `_session_start` (first draw of the session's rng: slot s of [clock_start, clock_end - SESSION_SPAN),
-  whole seconds, never decreasing), `session_start`, `sessions_by(t)` (binary search), `step_sessions(world, plan)` =
-  sessions started in (previous - SESSION_SPAN, as_of] (first step: 1..sessions_by(as_of)); `_sessions(world, rows,
-  range)`, `_step_sessions` (filters the window, half-open as before); `browsing_events_by` counts sessions started by
-  as_of - SESSION_SPAN in full and generates only the rest. Every event of a session is in [start, start + 1500 s].
-- DATA_VERSION 3: clickstream bytes change, DB rows don't (GOLDEN[3] = GOLDEN[2], new FEED_GOLDEN[3]); benchmark
-  file references re-recorded (`RECORD_REFERENCES=1` in a throwaway PG 18.6 container), `expected_mvp_digest.txt`
-  unchanged; verification run 49/49 (again after the review fixes). A chain recorded under another data_version
-  gets its row checks plus one `files_match_ledger` failure naming the version (checked before the unfinished-step
-  reason); one-shot runs of v2 (Ubuntu's) validate fully (their browse count is the recorded clickstream_events).
-- Tests: `tests/test_feeds.py` +4 (monotone starts + event bounds incl. tiny window / 0-1 events, step needs ⊆
-  step_sessions and nothing older, boundaries on exact event times / empty / 1 s windows, empty window, 1M-event
-  history: an hour step generates < 0.5 % of sessions) + a 7-hourly 49-step union test;
-  `tests/integration/test_step_files.py` +2 (chain of another data version, COMPLETED / RUNNING).
-  Suite: 311 tests, 0 skipped on PG 17.11 and 18.6 (Docker); mypy clean.
-- Perf (`docs/BENCHMARKS.md`): daily step browsing 1.24 s → 0.083 s (100k), 11.6 s → 0.46 s (1M); 10k e2e 31 daily
-  steps 36 s, rows + 110,000 events identical to generate, validate 20/20.
-- Limitation: the first step still generates every session up to its as_of. "Ponytail Lite" is not installed in
-  this environment; review = `/code-review high`.
-
-## Session-ordering review (`/code-review high`) — 8 addressed
-| # | Finding | Fix |
-|---|---|---|
-| 1 | data_version guard raised, discarding the row checks | reported as one `files_match_ledger` result; row checks kept |
-| 2 | guard came after the unfinished-step reason | moved first; test for COMPLETED and RUNNING |
-| 3 | slots make browse volume flat; docs said "as before" | documented (645-646 sessions/day, last day 634; like orders); no time-of-day shape |
-| 4 | lost `as_of >= clock_end` shortcut in browsing_events_by | restored |
-| 5 | hand-rolled binary search | `bisect.bisect_right(..., key=)` |
-| 6 | session-range rule written twice | `_sessions_after(world, t, until)` shared by step_sessions and browsing_events_by |
-| 7 | slot constants recomputed per session | `_slots(world)` (lru_cache) |
-| 8 | 336-step test took 7 s | every 7 hours + the end (49 steps, 1.4 s) |
+## This task: Claude Code harness (user approved all 4 items, 2026-10-19)
+- Skills in `.claude/skills/`:
+  - `implement-phase`: dev loop, test commands incl. the throwaway PG 18 container, review, PR/CI gate;
+  - `data-change`: DATA_VERSION, goldens, reference re-recording, equality, recovery, compatibility;
+  - `homelab-release`: report, rehearsal, tag, Ubuntu steps; `disable-model-invocation`, so the user runs it.
+- `.claude/hooks/guard.py` blocks these Bash commands:
+  - deleting or moving tags; force-pushing main or tags; `gh` deletes;
+  - VLSIM or Redpanda docker changes; docker prune; port 55432;
+  - rm, mv or find -delete under `/srv/homelab`; ssh;
+  - dropping `ecommerce_oltp`, `ecomgen_practice` or the VLSIM DBs.
+  It takes ~20 ms and never runs anything itself. Errors don't authorize a risky command: unparseable input is
+  checked for risky words, and `onFailure: "block"` blocks the command if the script can't run.
+  `tests/test_guard.py` runs it under the venv Python and macOS's `/usr/bin/python3` 3.9 (67 tests). Active via
+  `.claude/settings.json` (approved 2026-10-19). Its limits and how to disable it are in `.claude/hooks/README.md`.
+  It matches text, so a command that merely *mentions* a blocked pattern (a heredoc of test strings, `echo "git tag
+  -d"`) is blocked too: edit such files with Edit, not Bash.
+- GitHub rulesets (active):
+  - 25365485 on `main`: no delete or force-push; PR required; lint plus both test checks required.
+  - 25365486 on `v*-homelab` tags: no delete, update or force; creating a tag is allowed.
+- Ponytail plugin loads after `/reload-plugins` (`/ponytail-review` now exists).
+- This file went from 27,608 bytes to the size in the PR description.
 
 ## Next step
-Finish the review, then ask to push `fix/session-ordering` + open a PR (no auto-merge). After merge + green main:
-prepare the Phase 3 release report (step 2 above) and wait for tag approval.
+PR for `chore/claude-harness` is open; wait for the user's merge approval. The user has to type `/ponytail lite`
+(the persisted level is `full`; only the user prompt hook changes it). The tag `v0.3.0-homelab` waits for the
+user's go-ahead. Then Ubuntu step 3 with the `homelab-release` skill.
