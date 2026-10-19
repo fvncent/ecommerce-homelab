@@ -345,11 +345,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="use built-in counts (smoke: 1,000 orders) instead of the config's counts")
     p = sub.add_parser("advance", help="move the simulation clock forward: add the orders placed since the last "
                                        "step and update the ones that changed",
-                       description="Each step is a run in the same schema set: it inserts the orders placed up to "
-                                   "--to and updates earlier orders and payments whose state changed. Stepping to "
-                                   "the end in any number of steps gives exactly the rows `generate` writes. Needs "
-                                   "an empty schema set for the first step (not one holding a generate run) and a "
-                                   "config with file feeds off. A crashed step is finished with `resume`. Exit codes: "
+                       description="Each step is a run in the same schema set covering [previous step, --to): it "
+                                   "inserts the orders placed before --to, updates earlier orders and payments whose "
+                                   "state changed, and publishes that window's files (an event at exactly --to "
+                                   "belongs to the next step). Stepping to the end in any number of steps gives "
+                                   "exactly the rows and records `generate` writes. Needs an empty schema set for the "
+                                   "first step (not one holding a generate run). A crashed step is finished with "
+                                   "`resume`. Exit codes: "
                                    "0 done (or already there), 1 refused or failed, 2 config/argument error.")
     p.add_argument("config", help="path to generator YAML (the same for every step)")
     p.add_argument("--to", required=True,

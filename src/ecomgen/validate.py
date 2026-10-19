@@ -144,7 +144,7 @@ TEMP_TABLES = {
                    " event_time timestamptz, run_id text",
     "feed_windows": "run_id text, clock_start timestamptz, window_start timestamptz, window_end timestamptz",
 }
-# Every record lies in the window of the run that published it: (previous_as_of, as_of] for a clock step (first step:
+# Every record lies in the window of the run that published it: [previous_as_of, as_of) for a clock step (first step:
 # from clock_start), [clock_start, clock_end) for a generate run. With the per-feed "exactly once" checks this pins
 # each record to exactly one step.
 WINDOW_CHECK = Check("records_in_their_step_window", "every settlement / event lies in the time window of the run "
@@ -153,8 +153,8 @@ WINDOW_CHECK = Check("records_in_their_step_window", "every settlement / event l
         SELECT settlement_id AS id, settled_at AS at, run_id FROM pg_temp.feed_settlements
         UNION ALL SELECT event_id, event_time, run_id FROM pg_temp.feed_events) f
     JOIN pg_temp.feed_windows w USING (run_id)
-    WHERE f.at IS NULL OR f.at < w.clock_start OR f.at > w.window_end
-       OR (w.window_start IS NOT NULL AND f.at <= w.window_start)""")
+    WHERE f.at IS NULL OR f.at < w.clock_start OR f.at >= w.window_end
+       OR (w.window_start IS NOT NULL AND f.at < w.window_start)""")
 SETTLEMENT_CHECKS = (
     Check("settlements_match_payments", "each settlement row is a SETTLED payment with the same order, amount, "
           "currency and time; fee >= 0 and fee + net = gross; no field missing", """

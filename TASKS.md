@@ -1,10 +1,9 @@
 # Tasks
 
 ## Active
-- [ ] User's hands-on `advance` walkthrough (operating it, inspecting PostgreSQL and files); then Phase 3C may start
 - [ ] Optional, user-approved only: `init-db` (migration 0008) on `ecommerce_oltp` / benchmark DBs; dropping the disposable `ecomgen_v030_smoke` + `data/v030-*` when no longer wanted
-- [ ] Fix: a midnight event (`as_of` exactly 00:00:00) puts the ending step's file into the next day's partition, so day-aligned steps can still split a day for `replay-files` (error message and guide claimed otherwise); decide: windows `[previous, as_of)` or partition-aware replay check
-- [ ] Phase 3C outbox events (not before the Phase 3 release passes on Ubuntu and the walkthrough is done) · 3D warehouses + inventory · 3E catch-up / `--follow` pacing
+- [ ] Fix half-open step windows (branch `fix/half-open-windows`, Option 1 approved 2026-10-19): windows `[previous, as_of)`, DATA_VERSION 4; tests + review done, 384 tests / 0 skipped on PG 17 + 18; push awaiting approval; then patch release proposal `v0.3.1-homelab`
+- [ ] Phase 3C outbox events: plan only after the window fix is merged; implement after the user approves the plan · 3D warehouses + inventory · 3E catch-up / `--follow` pacing
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 
 ## Next (Phase 1)
@@ -17,6 +16,8 @@
 - Clearer error when `metadata_schema` is renamed after apply (currently fails loudly with DuplicateTable)
 
 ## Done
+- [x] User's hands-on `advance` walkthrough on Ubuntu (2026-10-19): `walk` chain, one order followed across steps, files per window, replay refusal, watermark extraction matched the step counts exactly
+- [x] PR #25 (v0.3.0 release + Ubuntu verification docs) merged; `main` `9ad04f5` CI green 378/0 (2026-10-19)
 - [x] Ubuntu Phase 3 verification (2026-10-19, user-run): upgrade to `v0.3.0-homelab`, 0008 in disposable `ecomgen_v030_smoke`, smoke 20/20 + files identical to the reference, 9-step chain + SIGKILL/resume drill, stepped = one-shot (7 tables, settlements), snapshot diff clean (`docs/BENCHMARKS.md`)
 - [x] Tag `v0.3.0-homelab` -> `0301e1f` (user-approved; checks: main CI green 378/0 on PG 17 + 18, tag new, 0008 only migration, DATA_VERSION 3); `v0.2.0-homelab` unchanged (2026-10-19)
 - [x] PR #24 Claude Code harness (3 skills, Bash guard hook with `onFailure: block`, trimmed handoff) merged; `main` `0301e1f` CI green 378/0 (2026-10-19)

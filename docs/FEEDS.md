@@ -170,16 +170,20 @@ cleanup) and compares the files with macOS references: see `docs/HOMELAB_DEPLOYM
 
 ## Clock steps (`ecomgen advance`)
 
-A step publishes the events of its window `(previous_as_of, as_of]` (first step `[clock_start, as_of]`, UTC):
+A step publishes the events of its window `[previous_as_of, as_of)` (first step `[clock_start, as_of)`, UTC; data
+version 4, `v0.3.1-homelab` on; an event at exactly `as_of` belongs to the next step):
 settlements by `settled_at`, `order_placed` by `placed_at` (the orders the step inserts), browsing events by
 `event_time`. Same staging, never-overwrite placement, ledger and manifest-last protocol as `generate`, after the
 step's database chunks and before COMPLETED, so `resume` finishes any interrupted part. The step manifest adds
 `clock_step` (`first_step_run_id`, `previous_as_of`, `as_of`, `window`, `window_start`); a one-shot manifest is
 unchanged. All steps' records together = the one-shot run's records. `validate` checks every step's files together,
 including `records_in_their_step_window`. `replay-files` of a step refuses dates whose partitions also hold files of
-another step (a mid-day step boundary), so a replayed day is never partial.
+another step (a mid-day step boundary), so a replayed day is never partial. Steps ending at midnight cover
+`[D 00:00, D+1 00:00)`, exactly the `date=D` partition, so they never split a day. (Data version 3 used
+`(previous_as_of, as_of]`: an event at exactly midnight went to the step ending then but into the next day's
+partition, splitting that day for replay.)
 `arrived_at` may be up to 30 s after the step's `as_of` (receive time, not the window). A step generates only the
-sessions that can have an event in its window: those started in `(previous_as_of - 25 min, as_of]` (found by binary
+sessions that can have an event in its window: those started in `[previous_as_of - 25 min, as_of)` (found by binary
 search, since session starts never decrease), then keeps the events inside the window; validate's browse count
 does the same. A daily step at 100k events takes ~0.08 s for its browsing events (was ~1.2 s with the whole history
 read every step); see `docs/BENCHMARKS.md`. The first step still generates every session up to its `as_of`.

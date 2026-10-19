@@ -134,7 +134,7 @@ def test_multi_step_chain(migrated: Migrated, small_cfg: config.Config, data_roo
         doc = json.loads((data_root / feeds.manifest_path(r.run_id)).read_text())
         assert doc["run_id"] == r.run_id and doc["clock_step"] == {
             "first_step_run_id": first_id, "previous_as_of": feeds.ts(previous) if previous else None,
-            "as_of": feeds.ts(as_of), "window": "(previous_as_of, as_of]" if previous else "[clock_start, as_of]",
+            "as_of": feeds.ts(as_of), "window": "[previous_as_of, as_of)" if previous else "[clock_start, as_of)",
             "window_start": feeds.ts(previous or START)}
         assert {f["file_path"] for f in doc["files"]} == set(ledger(c, r.run_id)) - {feeds.manifest_path(r.run_id)}
         plan = generate.plan_step(generate.World.from_config(small_cfg), previous, as_of)
@@ -261,11 +261,14 @@ def test_database_error_while_publishing_fails_the_step_and_resume_finishes(
     assert_converged(c, small_cfg, data_root, digest, one_shot)
 
 
-def _move_last_event(conn: psycopg.Connection, root: Path, src: str, dst: str) -> None:
-    """Move the last line of src to the end of dst, keeping both ledger rows consistent with the new bytes."""
+def _move_last_event(conn: psycopg.Connection, root: Path, src: str, dst: str, line: str | None = None) -> None:
+    """Move the last line of src (or `line`) to the end of dst, keeping both ledger rows consistent with the new
+    bytes."""
     lines = (root / src).read_text().splitlines(keepends=True)
-    (root / src).write_text("".join(lines[:-1]))
-    (root / dst).write_text((root / dst).read_text() + lines[-1])
+    moved = line or lines[-1]
+    lines.remove(moved)
+    (root / src).write_text("".join(lines))
+    (root / dst).write_text((root / dst).read_text() + moved)
     for rel in (src, dst):
         data = (root / rel).read_bytes()
         conn.execute("UPDATE generator_meta.published_files SET records = %s, bytes = %s, sha256 = %s"
@@ -282,6 +285,79 @@ def test_an_event_published_by_the_wrong_step_is_caught(migrated: Migrated, smal
     bad = {b.split(":")[0] for b in failing(c, small_cfg)}
     assert "records_in_their_step_window" in bad
     assert not bad & {"events_unique_and_complete", "orders_placed_once", "files_match_ledger"}
+
+
+@pytest.fixture
+def midnight_cfg(cfg_path: Path, tmp_path: Path) -> config.Config:
+    """test_feeds.MIDNIGHT: 3 days, 6,000 browsing events, evt_4010 at exactly an interior midnight."""
+    text = cfg_path.read_text()
+    for old, new in (("seed: 20261017", "seed: 11"), ("clock_end: '2026-02-01T00:00:00Z'", "clock_end: '2026-01-04T00:00:00Z'"),
+                     ("customers: 300", "customers: 200"), ("products: 150", "products: 100"),
+                     ("sellers: 20", "sellers: 10"), ("orders: 900", "orders: 300"),
+                     ("clickstream_events: 700", "clickstream_events: 6000")):
+        assert old in text
+        text = text.replace(old, new)
+    (tmp_path / "midnight.yaml").write_text(text)
+    return config.load(tmp_path / "midnight.yaml")
+
+
+def _midnight_chain(c: psycopg.Connection, cfg: config.Config, root: Path) -> tuple[list[load.RunResult], str, str]:
+    """Three day-aligned steps; (results, rel path, line) of the file holding evt_4010."""
+    steps = [load.advance(c, cfg, START + timedelta(days=d)) for d in (1, 2, 3)]
+    results = [s for s in steps if s is not None]
+    assert len(results) == 3
+    for p in sorted(root.glob("clickstream/date=*/*.jsonl")):
+        for line in p.read_text().splitlines(keepends=True):
+            if '"evt_4010"' in line:
+                return results, str(p.relative_to(root)), line
+    raise AssertionError("evt_4010 not published")
+
+
+def test_day_aligned_steps_replay_every_day_including_the_midnight_one(migrated: Migrated, midnight_cfg: config.Config,
+                                                                      data_root: Path) -> None:
+    """The midnight event is published by the step starting at it, into its own day: every day replays whole from
+    one step (with (previous, as_of] windows its day held files of two steps and was refused)."""
+    c = migrated(midnight_cfg)
+    steps, rel, line = _midnight_chain(c, midnight_cfg, data_root)
+    assert failing(c, midnight_cfg) == []
+    at = datetime.fromisoformat(json.loads(line)["event_time"])
+    owner = next(s for s in steps if s.previous_as_of == at)
+    assert at.time().isoformat() == "00:00:00" and rel.startswith(f"clickstream/date={at.date()}/{owner.run_id}")
+    for s in steps:
+        day = (s.previous_as_of or START).date()
+        params = replay.Params(day, day, ("clickstream", "payment_settlement"), 24, 0, 0)
+        assert replay.replay(c, midnight_cfg, params, s.run_id).deliveries > 0
+
+
+def test_a_midnight_event_in_the_step_ending_at_it_is_caught(migrated: Migrated, midnight_cfg: config.Config,
+                                                            data_root: Path) -> None:
+    """Moved to where (previous, as_of] windows put it, the event is outside that step's window."""
+    c = migrated(midnight_cfg)
+    steps, rel, line = _midnight_chain(c, midnight_cfg, data_root)
+    at = datetime.fromisoformat(json.loads(line)["event_time"])
+    earlier = next(s for s in steps if s.as_of == at)
+    dst = sorted(r for r in ledger(c, earlier.run_id) if r.startswith("clickstream/"))[-1]
+    _move_last_event(c, data_root, rel, dst, line)
+    bad = {b.split(":")[0] for b in failing(c, midnight_cfg)}
+    assert "records_in_their_step_window" in bad  # (manifest_matches_ledger too: the manifest keeps the old bytes)
+    assert not bad & {"events_unique_and_complete", "orders_placed_once", "files_match_ledger"}
+
+
+def test_a_v3_chain_is_neither_advanced_nor_resumed(migrated: Migrated, small_cfg: config.Config,
+                                                   data_root: Path) -> None:
+    """Data version 3 cut windows as (previous, as_of]: continuing such a chain would mix the two rules at its
+    boundaries, so advance and resume refuse it and change nothing."""
+    c = migrated(small_cfg)
+    load.advance(c, small_cfg, MID)
+    c.execute("UPDATE generator_meta.generation_runs SET resume_fields = resume_fields || '{\"data_version\": 3}'")
+    files, disk = ledger(c), on_disk(data_root)
+    with pytest.raises(load.LoadError, match="data_version differ"):
+        load.advance(c, small_cfg, END)
+    c.execute("UPDATE generator_meta.generation_runs SET state = 'RUNNING', finished_at = NULL")
+    with pytest.raises(load.LoadError, match="data_version differ"):
+        load.resume(c, small_cfg)
+    assert ledger(c) == files and on_disk(data_root) == disk
+    assert c.execute("SELECT count(*) FROM generator_meta.generation_runs").fetchone() == (1,)
 
 
 def test_malformed_recorded_fields_are_a_validate_error(migrated: Migrated, small_cfg: config.Config) -> None:

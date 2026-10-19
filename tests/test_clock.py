@@ -69,27 +69,30 @@ def test_state_after_each_step_equals_the_world_as_of_that_time() -> None:
 
 
 def test_lifecycle_max_bounds_every_order() -> None:
-    """An order's state at placed + LIFECYCLE_MAX is final (equal to a year later)."""
+    """Every change is at or before placed + LIFECYCLE_MAX, so the state just after it is final (= a year later)."""
     for world in (WORLD, replace(WORLD, seed=7, orders=2000)):
         for n in range(1, world.orders + 1):
             placed = world.placed_at(n)
-            assert world.order(n, placed + g.LIFECYCLE_MAX) == world.order(n, placed + timedelta(days=365)), n
+            final = placed + g.LIFECYCLE_MAX + timedelta(seconds=1)
+            assert world.order(n, final) == world.order(n, placed + timedelta(days=365)), n
 
 
 def test_orders_by_matches_placed_at() -> None:
     placed = [WORLD.placed_at(n) for n in range(1, WORLD.orders + 1)]
     assert placed == sorted(placed)
     for t in (START, placed[0], placed[0] - timedelta(seconds=1), placed[199], END):
-        assert WORLD.orders_by(t) == sum(p <= t for p in placed)
+        assert WORLD.orders_by(t) == sum(p < t for p in placed)
     crowded = replace(WORLD, clock_end=START + timedelta(seconds=100))  # more orders than seconds: equal times
     times = [crowded.placed_at(n) for n in range(1, crowded.orders + 1)]
-    assert times == sorted(times) and crowded.orders_by(times[150]) == sum(p <= times[150] for p in times)
+    assert times == sorted(times) and crowded.orders_by(times[150]) == sum(p < times[150] for p in times)
 
 
 def test_order_as_of_clock_end_is_the_default_and_unplaced_orders_are_refused() -> None:
     assert WORLD.order(7) == WORLD.order(7, END)
-    with pytest.raises(g.GenerationError, match="after"):
+    with pytest.raises(g.GenerationError, match="not before"):
         WORLD.order(WORLD.orders, START)
+    with pytest.raises(g.GenerationError, match="not before"):  # placed exactly at as_of: not there yet
+        WORLD.order(7, WORLD.placed_at(7))
 
 
 def test_a_step_revisits_only_orders_that_can_still_change() -> None:
@@ -118,6 +121,27 @@ def test_empty_step_has_no_chunks() -> None:
     assert g.step_chunk_count(plan, 10) == 0
     with pytest.raises(g.GenerationError, match="out of range"):
         g.step_chunk(WORLD, plan, 0, 10)
+
+
+def test_a_change_at_exactly_as_of_belongs_to_the_next_step() -> None:
+    """Windows are [previous, as_of): an order placed, or a status / payment change made, at exactly a step's as_of is
+    not in that step's state but in the next one; stepping through those very instants still equals generate."""
+    n = next(k for k in range(30, WORLD.orders) if WORLD.order(k)[0].updated_at > WORLD.placed_at(k))
+    placed, (order, _, pays) = WORLD.placed_at(n), WORLD.order(n)
+    change, pay_change = order.updated_at, pays[-1].updated_at
+    assert placed < change < END and placed < pay_change < END
+    assert n not in g.plan_step(WORLD, None, placed).orders and n in g.plan_step(WORLD, placed, change).orders
+    before = WORLD.order(n, change)
+    assert before[0].updated_at < change and WORLD.order(n, change + timedelta(seconds=1))[0] == order
+    assert WORLD.order(n, pay_change)[2][-1].updated_at < pay_change
+    stops = sorted({placed, change, pay_change}) + [END]
+    for k, as_of in enumerate(stops):
+        state = apply_steps(WORLD, stops[:k + 1])
+        if as_of <= placed:
+            assert order.order_id not in state["orders"]  # placed at as_of: inserted by the next step
+        else:
+            assert state["orders"][order.order_id] == WORLD.order(n, as_of)[0]
+    assert apply_steps(WORLD, stops) == historical(WORLD)
 
 
 def test_order_at_several_times_equals_each_alone() -> None:

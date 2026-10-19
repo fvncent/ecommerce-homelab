@@ -131,7 +131,8 @@ same period instead, so the data changes the way a live shop's does. Each step i
 
 - **inserts** the orders placed since the previous step and **updates** earlier orders and payments whose status
   changed (CONFIRMED → SHIPPED → DELIVERED, CAPTURED → SETTLED) in PostgreSQL;
-- then **publishes the files of its window** `(previous step, this step]` (the first step: from `clock_start`):
+- then **publishes the files of its window** `[previous step, this step)` (the first step: from `clock_start`; an
+  event at exactly this step's time belongs to the next step):
   settlements whose `settled_at` is in it, `order_placed` events of the orders placed in it, browsing events whose
   `event_time` is in it, and a manifest for the step.
 
@@ -205,7 +206,7 @@ find $D/source_feeds $D/clickstream -name '<step run id>*' | sort | head
 
 ```json
 "clock_step": {"first_step_run_id": "run_…", "previous_as_of": "2026-01-08T00:00:00Z", "as_of": "2026-01-15T00:00:00Z",
-               "window": "(previous_as_of, as_of]", "window_start": "2026-01-08T00:00:00Z"}
+               "window": "[previous_as_of, as_of)", "window_start": "2026-01-08T00:00:00Z"}
 ```
 
 `validate CONFIG` checks the files of every step together against the current tables (each settled payment in
@@ -216,11 +217,11 @@ step's files are checked once it completes") instead of as hundreds of missing r
 
 **Replaying a step's files:** `replay-files CONFIG --run-id <step run id> --from D --to D` copies that step's files.
 A day whose files are split across two steps is refused ("would deliver part of a day"). A step that ends mid-day
-splits that day. **Known limitation:** stepping on day boundaries (`--to …T00:00:00Z`) does *not* always keep days
-whole. An event exactly at midnight belongs to the step that ends then (windows include their end), but sits in the
-next day's partition. On the homelab, one browsing event at `2026-01-08T00:00:00Z` put a file of the Jan 7 → Jan 8
-step into `date=2026-01-08`, so replaying Jan 8 from either step is refused. Replay the dates that hold files of
-one step only.
+splits that day; steps on day boundaries (`--to …T00:00:00Z`) keep every day in one step, from `v0.3.1-homelab`
+(data version 4) on. With `v0.3.0-homelab` (data version 3, windows `(previous, as_of]`) an event at exactly
+midnight went to the step ending then but into the next day's partition: on the homelab, one browsing event at
+`2026-01-08T00:00:00Z` split `date=2026-01-08` between two steps, so replaying Jan 8 was refused. Chains written by
+v0.3.0 keep that layout and can't be continued by v0.3.1 (`advance` / `resume` refuse: `data_version differ`).
 
 **Time conventions (all UTC):** `event_time` / `settled_at` / `placed_at` = when it happened in the simulated
 business (a step's window is about these); `arrived_at` (clickstream) = when the web app received the event, 1-30 s

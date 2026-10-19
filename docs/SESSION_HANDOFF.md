@@ -4,7 +4,7 @@ Update before compaction or ending a significant session. Overwrite it: git hist
 per-PR review tables up to PR #23 are in commit `03ee496`). Task list: `TASKS.md`.
 
 **Updated:** 2026-10-19
-**Branch:** `docs/v0.3.0-ubuntu` (from `main` `0301e1f` = PR #24 Claude harness merged, CI 378/0 on PG 17 + 18).
+**Branch:** `fix/half-open-windows` (from `main` `9ad04f5` = PR #25 v0.3.0 Ubuntu docs merged, CI 378/0).
 **Released:** `v0.3.0-homelab` → `0301e1f` (Phase 3A, 3B, session ordering, harness; tag pushed 2026-10-19).
 `v0.2.0-homelab` (`de90a6a`) unchanged, kept for rollback.
 **Deployed on Ubuntu:** `v0.3.0-homelab`, verified 2026-10-19 (`docs/BENCHMARKS.md`). Disposable DB
@@ -14,10 +14,10 @@ benchmark DBs are **not** migrated to 0008 yet (optional, user-approved step). v
 tried on Ubuntu; the Mac rehearsal showed a v0.2.0 run validating 20/20 after `init-db`.
 
 ## User's plan (2026-10-19)
-1. Session-ordering fix: done (PR #23). 2. Release `v0.3.0-homelab`: done. 3. Ubuntu verification: done.
-4. Now: the user's hands-on walkthrough of `advance` (operate it, inspect PostgreSQL and files).
-5. Phase 3C (outbox) only after step 4. Then 3D (warehouses/inventory) and 3E (catch-up / `--follow`).
-Open finding (TASKS): midnight events split day-aligned steps for `replay-files`.
+1. Done: session ordering (PR #23), `v0.3.0-homelab`, Ubuntu verification, the user's `advance` walkthrough.
+2. Now: half-open windows fix (Option 1 approved): `[previous, as_of)`, DATA_VERSION 4. Push only on approval;
+   then a patch release proposal `v0.3.1-homelab` (confirm migrations: none expected), tag only on approval.
+3. Then: Phase 3C outbox **plan** (no implementation before the user approves it). Then 3D, 3E.
 
 ## Upgrade facts for v0.3.0 (rehearsed on a throwaway PG 18.6 DB)
 - Migration 0008 only adds things. On v0.2.0 runs, `validate` gives 20/20, every file's sha256 is unchanged, and
@@ -42,7 +42,8 @@ Open finding (TASKS): midnight events split day-aligned steps for `replay-files`
 ## Key decisions
 - One run per schema set; an `advance` chain needs its own schema set. The clock is as-of inside
   `clock_start`..`clock_end`.
-- Step windows are `(previous_as_of, as_of]` (first step `[clock_start, as_of]`).
+- Step windows are `[previous_as_of, as_of)` (first step `[clock_start, as_of)`), data version 4; "as of T" =
+  everything strictly before T, in rows and files alike. Data version 3 (`v0.3.0`) used `(previous, as_of]`.
 - All steps together = the `generate` rows and records.
 - Data changes bump DATA_VERSION and add a golden entry, never edit one (`data-change` skill).
 - Homelab safety rests on PostgreSQL permissions: least-privilege roles, DBs created and dropped by hand.
@@ -54,30 +55,32 @@ Open finding (TASKS): midnight events split day-aligned steps for `replay-files`
 - Replay timing depends on the run id. The Ubuntu-only gates are exercised only by the Ubuntu run.
 - Not yet: Parquet, supplier/courier feeds, age-based retention, profiles above 10k, `workers: 2`.
 
-## This task: Claude Code harness (user approved all 4 items, 2026-10-19)
-- Skills in `.claude/skills/`:
-  - `implement-phase`: dev loop, test commands incl. the throwaway PG 18 container, review, PR/CI gate;
-  - `data-change`: DATA_VERSION, goldens, reference re-recording, equality, recovery, compatibility;
-  - `homelab-release`: report, rehearsal, tag, Ubuntu steps; `disable-model-invocation`, so the user runs it.
-- `.claude/hooks/guard.py` blocks these Bash commands:
-  - deleting or moving tags; force-pushing main or tags; `gh` deletes;
-  - VLSIM or Redpanda docker changes; docker prune; port 55432;
-  - rm, mv or find -delete under `/srv/homelab`; ssh;
-  - dropping `ecommerce_oltp`, `ecomgen_practice` or the VLSIM DBs.
-  It takes ~20 ms and never runs anything itself. Errors don't authorize a risky command: unparseable input is
-  checked for risky words, and `onFailure: "block"` blocks the command if the script can't run.
-  `tests/test_guard.py` runs it under the venv Python and macOS's `/usr/bin/python3` 3.9 (67 tests). Active via
-  `.claude/settings.json` (approved 2026-10-19). Its limits and how to disable it are in `.claude/hooks/README.md`.
-  It matches text, so a command that merely *mentions* a blocked pattern (a heredoc of test strings, `echo "git tag
-  -d"`) is blocked too: edit such files with Edit, not Bash.
-- GitHub rulesets (active):
-  - 25365485 on `main`: no delete or force-push; PR required; lint plus both test checks required.
-  - 25365486 on `v*-homelab` tags: no delete, update or force; creating a tag is allowed.
-- Ponytail plugin loads after `/reload-plugins` (`/ponytail-review` now exists).
-- This file went from 27,608 bytes to the size in the PR description.
+## Harness (PR #24, merged)
+Skills `implement-phase`, `data-change`, `homelab-release` (user-invoked); Bash guard hook `.claude/hooks/guard.py`
+(active, `onFailure: block`; it matches text, so commands that merely mention a blocked pattern are blocked too:
+edit such files with Edit, not Bash); GitHub rulesets on `main` (PR + 3 checks) and `v*-homelab` tags (immutable).
+
+## This task: half-open step windows (`fix/half-open-windows`)
+- Why: on Ubuntu a browsing event at exactly `2026-01-08T00:00:00Z` belonged to the step ending then but sat in
+  `date=2026-01-08`, so day-aligned steps split a day and `replay-files` refused it.
+- `generate.py`: `orders_by(t)` = placed before t; `_Timeline.state_at(end)` applies changes before end only;
+  `order_at` refuses an order not placed before an end; DATA_VERSION 4 (comment says what changed);
+  LIFECYCLE comment: every change at or before placed + LIFECYCLE_MAX.
+- `feeds.py`: `in_window` / `_in_window_text` = `[previous, as_of)`; `sessions_by` = started before t
+  (`bisect_left`); `browsing_events_by` counts `< as_of`; manifest `window` text `[previous_as_of, as_of)` /
+  `[clock_start, as_of)`. `validate.py` WINDOW_CHECK `at >= window_end` / `at < window_start` fail. CLI help.
+- One-shot output unchanged: no record of the example or golden worlds falls exactly on `clock_end`; GOLDEN[4] /
+  FEED_GOLDEN[4] repeat the v3 values; benchmark references unchanged (49/49 on PG 18.6).
+- Tests: `test_clock` (a change / placement at exactly as_of goes to the next step; steps through those instants
+  = generate), `test_feeds` (records at a step end belong to the next step; MIDNIGHT world seed 11 with evt_4010
+  at an interior midnight: each date partition from one step), integration (midnight day replays from its step;
+  the midnight event moved to the old step is caught by `records_in_their_step_window`; a v3 chain is neither
+  advanced nor resumed, nothing changed). All new tests fail on the old code. 384 tests / 0 skipped on PG 17 and
+  18.6. 10k e2e: 31 daily steps = generate (tables, records `cd41dcb4…`), no partition shared by two steps.
+- Compatibility: no migration (0008 unchanged). v3 one-shot runs unaffected; v3 chains (Ubuntu's disposable
+  `stepped`, `walk`) can't be continued (`data_version differ`), validate keeps their row checks.
 
 ## Next step
-PR for `docs/v0.3.0-ubuntu` awaits the user's merge approval. Then guide the hands-on `advance` walkthrough on
-Ubuntu (one step at a time; the user runs the commands). Ponytail level is `lite` (persisted).
-Ubuntu step notes: the user's "before" snapshot lacked `PG_LOCAL_SUPERUSER=1` (paste got garbled); next time give
-the snapshot command on its own line.
+Independent review of `fix/half-open-windows`, fix findings, then ask to push. After merge + green main: patch
+release proposal `v0.3.1-homelab`, then the Phase 3C plan. Ponytail level `lite`.
+Ubuntu step notes: give the host-snapshot command on its own line (the v0.3.0 "before" paste got garbled).
