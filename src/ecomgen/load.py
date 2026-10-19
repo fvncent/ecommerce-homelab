@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 from psycopg import sql
@@ -70,7 +70,9 @@ def _table(cfg: Config, table: str) -> sql.Identifier:
 
 def _stamped(table: str, rows: Sequence[tuple[object, ...]], run_id: str) -> Sequence[tuple[object, ...]]:
     """Outbox events carry the run that wrote them (lineage); generation leaves run_id empty."""
-    return [r._replace(run_id=run_id) for r in rows if isinstance(r, generate.OutboxEvent)] if table == OUTBOX else rows
+    if table != OUTBOX:
+        return rows
+    return [cast(generate.OutboxEvent, r)._replace(run_id=run_id) for r in rows]
 
 
 def _write(cur: psycopg.Cursor[tuple[object, ...]], cfg: Config, table: str,
@@ -123,7 +125,7 @@ def recorded_world(recorded: dict[str, object]) -> generate.World:
 
 def _start_run(conn: psycopg.Connection, cfg: Config, profile: str, world: generate.World) -> str:
     reset_hint = ("To finish a RUNNING or FAILED run use `ecomgen resume`; to start over, drop and recreate the "
-                  "database (or its application and metadata schemas) and run init-db")
+                  "database (or all three of its application, integration and metadata schemas) and run init-db")
     with conn.transaction():
         existing = conn.execute(db.q(cfg, "SELECT run_id, state FROM {meta}.generation_runs"
                                         " ORDER BY started_at DESC LIMIT 1")).fetchone()

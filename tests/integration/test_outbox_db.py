@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 import psycopg
 import pytest
 
-from ecomgen import config, generate, load, validate
+from ecomgen import config, db, generate, load, validate
 
 ADMIN_URL = os.environ.get("ECOMGEN_TEST_DATABASE_URL", "")
 pytestmark = pytest.mark.skipif(not ADMIN_URL, reason="ECOMGEN_TEST_DATABASE_URL not set")
@@ -74,6 +74,10 @@ def test_a_failed_chunk_commits_neither_rows_nor_events_and_resume_adds_them_onc
     ("payment_id = NULL WHERE aggregate_type = 'payment'", psycopg.errors.CheckViolation),
     ("event_type = 'OrderStatusChanged' WHERE event_id = 'obx_ord_1_1'", psycopg.errors.CheckViolation),
     ("order_id = 'ord_999999' WHERE event_id = 'obx_ord_1_1'", psycopg.errors.CheckViolation),
+    # a missing key must not slip through as NULL, and the payload must be an object
+    ("payload = payload - 'from' WHERE event_type = 'OrderStatusChanged'", psycopg.errors.CheckViolation),
+    ("payload = payload - 'to' WHERE event_id = 'obx_ord_1_1'", psycopg.errors.CheckViolation),
+    ("payload = '[]'::jsonb WHERE event_id = 'obx_ord_1_1'", psycopg.errors.CheckViolation),
 ])
 def test_the_table_refuses_invalid_events(migrated: Migrated, small_cfg: config.Config, change: str,
                                          error: type[Exception]) -> None:
@@ -82,6 +86,26 @@ def test_the_table_refuses_invalid_events(migrated: Migrated, small_cfg: config.
     c.execute("SET session_replication_role = replica")  # past the append-only trigger: the CHECKs must refuse
     with pytest.raises(error):
         c.execute(f"UPDATE integration.outbox_events SET {change}".encode())
+
+
+def test_a_payment_event_belongs_to_its_payments_order(migrated: Migrated, small_cfg: config.Config) -> None:
+    """Composite FK (payment_id, order_id): an otherwise valid event naming pay_1 with another order is refused."""
+    c = migrated(small_cfg)
+    load.run(c, small_cfg, "smoke")
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        c.execute("INSERT INTO integration.outbox_events SELECT 'obx_pay_1_9', aggregate_type, aggregate_id, 9,"
+                  " 'PaymentStateChanged', schema_version, occurred_at, 'ord_2', payment_id,"
+                  " '{\"from\": \"CAPTURED\", \"to\": \"SETTLED\"}', run_id"
+                  " FROM integration.outbox_events WHERE event_id = 'obx_pay_1_1'")
+
+
+def test_a_second_schema_set_may_not_share_the_integration_schema(migrated: Migrated,
+                                                                  small_cfg: config.Config) -> None:
+    c = migrated(small_cfg)
+    other = replace(small_cfg, postgres=replace(small_cfg.postgres, application_schema="commerce_b",
+                                                metadata_schema="generator_meta_b"))
+    with pytest.raises(db.MigrationError, match="already holds outbox_events"):
+        db.migrate(c, other)
 
 
 def test_the_outbox_is_append_only(migrated: Migrated, small_cfg: config.Config) -> None:

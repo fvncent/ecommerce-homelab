@@ -203,7 +203,7 @@ def sizes(name: str) -> None:
         print(f"database {name} {c.execute('SELECT pg_database_size(current_database())').fetchone()[0]} bytes")  # type: ignore[index]
         for rel, rows, size in c.execute(
             "SELECT relname, n_live_tup, pg_total_relation_size(relid) FROM pg_stat_user_tables"
-            " WHERE schemaname = %s ORDER BY 3 DESC", (_schemas()[0],)):
+            " WHERE schemaname IN (%s, %s) ORDER BY 3 DESC", _schemas()[:2]):
             print(f"  {rel} rows={rows} bytes={size}")
 
 

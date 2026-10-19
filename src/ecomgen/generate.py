@@ -391,11 +391,11 @@ class World:
                               total, updated), items, payments))
         if window is None:
             return out, []
-        placed_payload: dict[str, object] = {"customer_id": customer.customer_id, "currency": CURRENCY, "subtotal": str(subtotal),
-                          "discount": str(discount), "tax": str(tax), "shipping": str(shipping), "total": str(total),
-                          "items": [{"order_item_id": i.order_item_id, "product_id": i.product_id,
-                                     "quantity": i.quantity, "unit_price": str(i.unit_price),
-                                     "line_total": str(i.line_total)} for i in items]}
+        def placed_payload() -> dict[str, object]:
+            return {"customer_id": customer.customer_id, "currency": CURRENCY, "subtotal": str(subtotal),
+                    "discount": str(discount), "tax": str(tax), "shipping": str(shipping), "total": str(total),
+                    "items": [{"order_item_id": i.order_item_id, "product_id": i.product_id, "quantity": i.quantity,
+                               "unit_price": str(i.unit_price), "line_total": str(i.line_total)} for i in items]}
         return out, timeline.events(window, n, total, placed_payload)
 
     def _lifecycle(self, rng: random.Random, placed: datetime) -> "_Timeline":
@@ -457,32 +457,37 @@ class _Timeline:
         return status, updated, payments
 
     def events(self, window: tuple[datetime | None, datetime], n: int, total: Decimal,
-               placed_payload: dict[str, object]) -> list[OutboxEvent]:
-        """One event per state transition (creation included) with occurred_at in window [start, end)."""
+               placed_payload: Callable[[], dict[str, object]]) -> list[OutboxEvent]:
+        """One event per state transition (creation included) with occurred_at in window [start, end). Payloads are
+        built only for the events kept."""
         start, end = window
         oid, out = f"ord_{n}", []
 
-        def add(kind: str, agg_id: str, seq: int, at: datetime, payment_id: str | None, payload: str) -> None:
-            if (start is None or at >= start) and at < end:
-                out.append(OutboxEvent(f"obx_{agg_id}_{seq}", "payment" if payment_id else "order", agg_id, seq,
-                                       kind, OUTBOX_SCHEMA_VERSION, at, oid, payment_id, payload))
+        def keep(at: datetime) -> bool:
+            return (start is None or at >= start) and at < end
+
+        def event(kind: str, agg_id: str, seq: int, at: datetime, payment_id: str | None,
+                  payload: dict[str, object]) -> OutboxEvent:
+            return OutboxEvent(f"obx_{agg_id}_{seq}", "payment" if payment_id else "order", agg_id, seq, kind,
+                               OUTBOX_SCHEMA_VERSION, at, oid, payment_id, _payload(**payload))
 
         for seq, (status, at) in enumerate(self.stages, 1):
-            if seq == 1:
-                add("OrderPlaced", oid, seq, at, None, _payload(**{"from": None, "to": status}, **placed_payload))
-            else:
-                add("OrderStatusChanged", oid, seq, at, None, _payload(**{"from": self.stages[seq - 2][0], "to": status}))
+            if keep(at):
+                out.append(event("OrderPlaced", oid, seq, at, None, {"from": None, "to": status, **placed_payload()})
+                           if seq == 1 else
+                           event("OrderStatusChanged", oid, seq, at, None,
+                                 {"from": self.stages[seq - 2][0], "to": status}))
+        money = {"amount": str(total), "currency": CURRENCY}
         for attempt_no, (_, states) in enumerate(self.attempts, 1):
             pid = f"pay_{(n - 1) * MAX_ATTEMPTS + attempt_no}"
             for seq, (state, at) in enumerate(states, 1):
-                money = {"amount": str(total), "currency": CURRENCY}
-                if seq == 1:
-                    add("PaymentAttemptCreated", pid, seq, at, pid, _payload(
-                        **{"from": None, "to": state}, attempt_no=attempt_no, provider=self.provider,
-                        method=self.method, **money))
-                else:
-                    add("PaymentStateChanged", pid, seq, at, pid, _payload(**{"from": states[seq - 2][0], "to": state},
-                                                                         **money))
+                if keep(at):
+                    out.append(event("PaymentAttemptCreated", pid, seq, at, pid,
+                                     {"from": None, "to": state, "attempt_no": attempt_no, "provider": self.provider,
+                                      "method": self.method, **money})
+                               if seq == 1 else
+                               event("PaymentStateChanged", pid, seq, at, pid,
+                                     {"from": states[seq - 2][0], "to": state, **money}))
         return out
 
 

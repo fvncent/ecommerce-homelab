@@ -89,6 +89,23 @@ the window check; v3 chains refused by advance/resume. Review table in git histo
   corruption tests for each outbox check. 412 tests / 0 skipped on PG 17 and 18.6; benchmark 49/49; 10k e2e
   chain = generate incl. outbox, validate 24/24.
 
+## Outbox review (`/code-review high` + `/ponytail-review`) — 9 fixed, 1 kept
+| # | Finding | Fix |
+|---|---|---|
+| 1 | transition CHECK let a payload without `from`/`to` (or a non-object) through: NULL passes a CHECK | `jsonb_typeof(payload) = 'object' AND (CASE …) IS TRUE`; tests |
+| 2 | reset hint / README: dropping app + meta schemas leaves the outbox, init-db then fails | "all three … application, integration and metadata schemas" |
+| 3 | two schema sets sharing an integration schema: confusing DuplicateTable | `db.migrate` refuses 0009 on an integration schema that already has an outbox; test |
+| 4 | a payment event's order not tied to the payment's order | UNIQUE (payment_id, order_id) on payment_attempts + composite FK; test |
+| 5 | payload JSON built for events outside the window | window tested first; payloads built only for kept events (goldens unchanged) |
+| 6 | `_stamped` silently dropped non-OutboxEvent rows | `cast` + unconditional `_replace` |
+| 7 | `has_outbox` duplicated the regclass lookup | `has_table(..., schema)` |
+| 8 | benchmark `sizes()` omitted the integration schema | lists app + integration tables |
+| 9 | unused indexes (run_id, order_id) on the largest table | dropped; kept PK, UNIQUE (aggregate_id, seq), (occurred_at, event_id) |
+| — | `order_at` "pass-through" | kept: public, used by tests (state at several times) |
+
+After fixes: 417 tests / 0 skipped on PG 17 and 18.6; mypy clean; benchmark 49/49 (references unchanged since part 3).
+Note for release: 0009 also adds a UNIQUE (payment_id, order_id) index to `payment_attempts` of existing schemas.
+
 ## Next step
-Independent review of `feat/outbox`, fix findings, then ask to push + PR. Separately: the user's OK to push the
+Ask to push `feat/outbox` + open a PR (review done, 9 fixed). Separately: the user's OK to push the
 local `v0.3.1-homelab` tag. Ponytail `lite`. Ubuntu: give the host-snapshot command on its own line.
