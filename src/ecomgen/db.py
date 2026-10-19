@@ -50,6 +50,13 @@ def _render(m: Migration, cfg: Config, conn: psycopg.Connection) -> str:
     return text
 
 
+OUTBOX_MIGRATION = 9  # creates {integration}.outbox_events, which belongs to exactly one schema set
+
+
+def pg_name(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
 def migrate(conn: psycopg.Connection, cfg: Config) -> list[str]:
     """Apply pending migrations; return the names applied. Raises MigrationError on checksum drift."""
     meta = sql.Identifier(cfg.postgres.metadata_schema)
@@ -80,6 +87,11 @@ def migrate(conn: psycopg.Connection, cfg: Config) -> list[str]:
                         "instead) or schema names in config changed"
                     )
                 continue
+            if m.version == OUTBOX_MIGRATION and has_outbox(conn, cfg):
+                raise MigrationError(
+                    f"integration schema {pg_name(cfg.postgres.integration_schema)} already holds outbox_events of "
+                    "another schema set; give this config its own integration_schema (each dataset needs new "
+                    "application, integration and metadata schema names)")
             conn.execute(rendered.encode())  # bytes: run as a multi-statement script
             conn.execute(
                 sql.SQL("INSERT INTO {}.schema_migrations (version, name, checksum) VALUES (%s, %s, %s)").format(meta),
@@ -90,19 +102,23 @@ def migrate(conn: psycopg.Connection, cfg: Config) -> list[str]:
 
 
 def q(cfg: Config, query: str) -> sql.Composed:
-    """Format {app}/{meta} in query with the configured, quoted schema names."""
+    """Format {app}/{integration}/{meta} in query with the configured, quoted schema names."""
     return sql.SQL(query).format(app=sql.Identifier(cfg.postgres.application_schema),
+                                 integration=sql.Identifier(cfg.postgres.integration_schema),
                                  meta=sql.Identifier(cfg.postgres.metadata_schema))
 
 
-def _meta_regclass(conn: psycopg.Connection, cfg: Config, table: str) -> str:
-    """Quoted `<metadata schema>.<table>` for to_regclass (both quoted, so any configured schema name works)."""
-    return sql.SQL("{}.{}").format(sql.Identifier(cfg.postgres.metadata_schema), sql.Identifier(table)).as_string(conn)
+def _meta_regclass(conn: psycopg.Connection, cfg: Config, table: str, schema: str | None = None) -> str:
+    """Quoted `<schema>.<table>` for to_regclass (default: the metadata schema; both quoted, so any configured schema
+    name works)."""
+    return sql.SQL("{}.{}").format(sql.Identifier(schema or cfg.postgres.metadata_schema),
+                                   sql.Identifier(table)).as_string(conn)
 
 
-def has_table(conn: psycopg.Connection, cfg: Config, table: str) -> bool:
-    """True if the metadata schema has this table."""
-    return conn.execute("SELECT to_regclass(%s) IS NOT NULL", (_meta_regclass(conn, cfg, table),)).fetchone() == (True,)
+def has_table(conn: psycopg.Connection, cfg: Config, table: str, schema: str | None = None) -> bool:
+    """True if the metadata schema (or `schema`) has this table."""
+    return conn.execute("SELECT to_regclass(%s) IS NOT NULL",
+                        (_meta_regclass(conn, cfg, table, schema),)).fetchone() == (True,)
 
 
 def has_column(conn: psycopg.Connection, cfg: Config, table: str, column: str) -> bool:
@@ -110,6 +126,11 @@ def has_column(conn: psycopg.Connection, cfg: Config, table: str, column: str) -
     return conn.execute("SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass(%s)"
                         " AND attname = %s AND NOT attisdropped)",
                         (_meta_regclass(conn, cfg, table), column)).fetchone() == (True,)
+
+
+def has_outbox(conn: psycopg.Connection, cfg: Config) -> bool:
+    """True once migration 0009 has created the integration schema's outbox_events."""
+    return has_table(conn, cfg, "outbox_events", cfg.postgres.integration_schema)
 
 
 def has_ledger(conn: psycopg.Connection, cfg: Config) -> bool:

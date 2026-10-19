@@ -22,7 +22,8 @@ RUN = "run_20260101T000000Z_abcdef"
 # GOLDEN in test_generate.py: never edit an entry for a data change; bump DATA_VERSION and add one.
 FEED_GOLDEN = {2: "bfb7276d62db9a2f1487ea597baf383fe245c44457ad8d2d43ff1b0d39caf385",
                3: "af1de3311df79b3ccdbe07b8c24814df86ce2c5a3de8453c63a69527f733efc0",  # sessions in time slots
-               4: "af1de3311df79b3ccdbe07b8c24814df86ce2c5a3de8453c63a69527f733efc0"}  # windows [previous, as_of)
+               4: "af1de3311df79b3ccdbe07b8c24814df86ce2c5a3de8453c63a69527f733efc0",  # windows [previous, as_of)
+               5: "af1de3311df79b3ccdbe07b8c24814df86ce2c5a3de8453c63a69527f733efc0"}  # outbox: files unchanged
 
 
 def cfg(chunk_rows: int = 250, max_mb: int = 128, csv: bool = True, jsonl: bool = True) -> config.Config:

@@ -141,3 +141,12 @@ def test_cli_check_config(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Captur
     assert "ECOMMERCE_DATABASE_URL is not set" in capsys.readouterr().err
 
     assert main(["check-config", "/nonexistent.yaml"]) == 2
+
+
+def test_practice_template_uses_its_own_schemas_and_folder() -> None:
+    """docs/PRACTICE_RUNBOOK.md: the practice dataset shares no schema or data folder with the example / benchmark."""
+    practice, example = config.load(EXAMPLE.with_name("practice.example.yaml")), config.load(EXAMPLE)
+    names = ("application_schema", "integration_schema", "metadata_schema")
+    assert {getattr(practice.postgres, n) for n in names} == {"practice_commerce", "practice_integration", "practice_meta"}
+    assert not {getattr(practice.postgres, n) for n in names} & {getattr(example.postgres, n) for n in names}
+    assert practice.filesystem.root != example.filesystem.root and practice.generator.counts == example.generator.counts

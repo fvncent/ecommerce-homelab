@@ -2,6 +2,7 @@
 
 How to generate a practice dataset and look at it, as an operator. For the release benchmark (which needs empty
 databases and is not a way to make datasets) see `docs/HOMELAB_DEPLOYMENT.md`; for file contracts `docs/FEEDS.md`.
+**To set up a dataset for your pipeline, follow `docs/PRACTICE_RUNBOOK.md`** (own `practice_*` schemas, step by step).
 
 Commands marked **verified** were run on the homelab: setup and `generate` on 2026-10-18 with `v0.2.0-homelab`;
 upgrade, smoke and clock steps (`advance`) on 2026-10-19 with `v0.3.0-homelab`. Everything is typed by hand in an
@@ -228,6 +229,49 @@ business (a step's window is about these); `arrived_at` (clickstream) = when the
 later, so it can fall just after the step's `as_of`; `published_at` (manifest) = when the generator recorded the
 file (generation time, wall clock); delivery time = `replay-files`' `arrived=` partition and delivery manifest.
 Partitions (`date=`) are the UTC date of the event time.
+
+## Outbox events (`integration.outbox_events`, data version 5, `v0.4.0-homelab` on)
+
+Every order and payment-attempt state change also writes one row to the integration schema's `outbox_events`, in
+the **same transaction** as the row change, so a committed change always has its event and a failed chunk leaves
+neither. It is the change log a downstream CDC / event pipeline would read (publishing it, Kafka/Redpanda and
+Debezium come in later phases; nothing reads or marks events here).
+
+| Column | Meaning |
+|---|---|
+| `event_id` | `obx_<aggregate_id>_<aggregate_seq>`, e.g. `obx_ord_42_3`: the same in every run, resume and step layout |
+| `aggregate_type`, `aggregate_id` | `order` + `ord_N`, or `payment` + `pay_N` |
+| `aggregate_seq` | 1 = creation, then one per transition; the order **within** an aggregate |
+| `event_type` | `OrderPlaced`, `OrderStatusChanged`, `PaymentAttemptCreated`, `PaymentStateChanged` |
+| `occurred_at` | simulated business time (UTC); overall order: `(occurred_at, event_id)` |
+| `order_id`, `payment_id` | the order (always) and payment attempt (payment events), foreign keys |
+| `payload` | `from` / `to` status, plus the order (totals, items) or the payment (attempt, provider, method, amount) |
+| `schema_version`, `run_id` | payload shape (1); the run or clock step that wrote it (lineage) |
+
+Rules the table itself enforces: the id form, one creation event per aggregate (seq 1), only the lifecycle's
+transitions (order `CREATED→CONFIRMED→PROCESSING→SHIPPED→DELIVERED`, `CREATED/CONFIRMED→CANCELLED`; payment
+`INITIATED→AUTHORIZED→CAPTURED→SETTLED`, `INITIATED→FAILED`, `AUTHORIZED→VOIDED`), and **append-only** (updates,
+deletes and truncation are refused; the rows an event refers to can't be deleted either). A clock step writes every
+transition in its window `[previous, as_of)`, so a step that spans an order's whole life writes all five order
+events while the order row changes once; all steps together equal one `generate`.
+
+```sql
+-- one order's history, in order
+SELECT aggregate_seq, event_type, payload->>'from' AS from_status, payload->>'to' AS to_status, occurred_at
+FROM integration.outbox_events WHERE aggregate_id = 'ord_42' ORDER BY aggregate_seq;
+-- everything since your watermark (e.g. the previous step's as_of), in delivery order
+SELECT event_id, event_type, aggregate_id, occurred_at FROM integration.outbox_events
+WHERE occurred_at >= '2026-01-03T00:00:00Z' ORDER BY occurred_at, event_id LIMIT 20;
+-- what each clock step wrote
+SELECT run_id, count(*) FROM integration.outbox_events GROUP BY 1 ORDER BY min(occurred_at);
+```
+
+`validate` adds four checks for data-version-5 runs (24 for a run with both file feeds): outbox ledger = rows, the
+history reconstructs each order / payment row (creation event at creation time with its amounts; latest event =
+current status / state and `updated_at`), each chain is contiguous, each event is in its run's window. Runs written
+before data version 5 have no events; their outbox checks are skipped. A schema without migration 0009 still
+validates, but `generate` / `advance` / `resume` ask for `init-db` first. Size: about 8.8 events per order (88,450 for
+the 10k example), roughly 2 s more for a 10k `generate`.
 
 ## Crashes and history
 

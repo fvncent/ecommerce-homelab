@@ -1,0 +1,64 @@
+# Practice dataset for building a downstream pipeline (docs/PRACTICE_RUNBOOK.md): its own three schemas and data
+# folder, never shared with the benchmark (which uses its own databases ecommerce_homelab_*) or another dataset.
+# Validated by `ecomgen check-config`. generator/postgres/filesystem are strict; other sections are parsed in later phases.
+# Do not put database passwords or credentials in this file.
+generator:
+  version: 1
+  seed: 20261017
+  run_mode: historical  # historical | incremental | continuous
+  profile: practice      # config counts below (10k orders); a pipeline practice dataset, not the benchmark
+  workers: 1
+  chunk_rows: 5000
+  max_memory_mb: 1500     # soft application design budget, not OS enforcement
+  simulation:
+    clock_start: '2026-01-01T00:00:00Z'
+    clock_end: '2026-02-01T00:00:00Z'
+    time_multiplier: 1.0
+  counts:
+    customers: 5000
+    products: 2000
+    sellers: 100
+    warehouses: 3
+    orders: 10000
+    clickstream_events: 100000
+postgres:
+  connection_url_env: ECOMMERCE_DATABASE_URL
+  application_schema: practice_commerce
+  integration_schema: practice_integration
+  metadata_schema: practice_meta
+  bulk_copy: true
+  max_connection_pool: 4
+filesystem:
+  root: /srv/homelab/ecommerce/data/practice-pipeline
+  publish_via_staging: true
+  csv: true
+  jsonl: true
+  parquet: false  # enable after validating library/space
+  compression: snappy
+  partition_by: event_date
+  max_file_size_mb: 128
+  checksum: sha256
+scenario:
+  name: normal_day
+  anomaly_injection_enabled: false
+  anomaly_rate: 0.0
+ai_readiness:
+  # OPTIONAL FUTURE SOURCE DATA GENERATION; none of this is implemented in MVP.
+  enabled: false
+  generate_catalog_text: false
+  generate_search_impressions: false
+  generate_support_documents: false
+  generate_support_conversations: false
+  generate_private_evaluation_truth: false
+  text_generation_mode: templates  # deterministic synthetic text only
+  knowledge_root: /srv/ecommerce-data/ai_sources/knowledge_base
+  private_truth_root: /srv/ecommerce-data/private_ai_truth
+  preserve_document_versions: true
+safety:
+  require_explicit_reset: true
+  preserve_completed_runs: true
+  private_ground_truth_directory: /srv/ecommerce-data/anomaly_truth
+  refuse_when_disk_usage_percent_at_least: 90
+logging:
+  level: INFO
+  keep_run_manifests: true

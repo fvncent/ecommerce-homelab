@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 from psycopg import sql
@@ -30,6 +30,7 @@ from ecomgen.config import Config
 PROFILE_COUNTS = {"smoke": {"sellers": 20, "customers": 500, "products": 200, "orders": 1000,
                              "clickstream_events": 10_000}}
 TABLES = ("sellers", "categories", "customers", "products", "orders", "order_items", "payment_attempts")
+OUTBOX = "outbox_events"  # in the integration schema; written in the same transaction as the rows it describes
 # Tables a clock step updates: (key, changing column); updated_at changes with it. Ledger key: "<table>_updated".
 UPDATED = {"orders": ("order_id", "status"), "payment_attempts": ("payment_id", "state")}
 # Arbitrary constant; held for the whole run so two generate/resume processes never write concurrently.
@@ -62,13 +63,22 @@ def world_for(cfg: Config, preset: str | None) -> generate.World:
                    clickstream_events=c["clickstream_events"])
 
 
+def _table(cfg: Config, table: str) -> sql.Identifier:
+    schema = cfg.postgres.integration_schema if table == OUTBOX else cfg.postgres.application_schema
+    return sql.Identifier(schema, table)
+
+
+def _stamped(table: str, rows: Sequence[tuple[object, ...]], run_id: str) -> Sequence[tuple[object, ...]]:
+    """Outbox events carry the run that wrote them (lineage); generation leaves run_id empty."""
+    if table != OUTBOX:
+        return rows
+    return [cast(generate.OutboxEvent, r)._replace(run_id=run_id) for r in rows]
+
+
 def _write(cur: psycopg.Cursor[tuple[object, ...]], cfg: Config, table: str,
            rows: Sequence[tuple[object, ...]]) -> None:
     fields: tuple[str, ...] = getattr(rows[0], "_fields")  # by column name, never positional
-    target = sql.SQL("{}.{} ({})").format(
-        sql.Identifier(cfg.postgres.application_schema), sql.Identifier(table),
-        sql.SQL(", ").join(map(sql.Identifier, fields)),
-    )
+    target = sql.SQL("{} ({})").format(_table(cfg, table), sql.SQL(", ").join(map(sql.Identifier, fields)))
     if cfg.postgres.bulk_copy:
         with cur.copy(sql.SQL("COPY {} FROM STDIN").format(target)) as copy:
             for row in rows:
@@ -115,7 +125,7 @@ def recorded_world(recorded: dict[str, object]) -> generate.World:
 
 def _start_run(conn: psycopg.Connection, cfg: Config, profile: str, world: generate.World) -> str:
     reset_hint = ("To finish a RUNNING or FAILED run use `ecomgen resume`; to start over, drop and recreate the "
-                  "database (or its application and metadata schemas) and run init-db")
+                  "database (or all three of its application, integration and metadata schemas) and run init-db")
     with conn.transaction():
         existing = conn.execute(db.q(cfg, "SELECT run_id, state FROM {meta}.generation_runs"
                                         " ORDER BY started_at DESC LIMIT 1")).fetchone()
@@ -129,8 +139,7 @@ def _start_run(conn: psycopg.Connection, cfg: Config, profile: str, world: gener
 
 def _has_rows(conn: psycopg.Connection, cfg: Config) -> bool:
     has_rows = sql.SQL(" OR ").join(
-        sql.SQL("EXISTS (SELECT 1 FROM {}.{})").format(sql.Identifier(cfg.postgres.application_schema),
-                                                       sql.Identifier(t)) for t in TABLES)
+        sql.SQL("EXISTS (SELECT 1 FROM {})").format(_table(cfg, t)) for t in (*TABLES, OUTBOX))
     return conn.execute(sql.SQL("SELECT {}").format(has_rows)).fetchone() == (True,)
 
 
@@ -167,9 +176,9 @@ def write_chunks(conn: psycopg.Connection, cfg: Config, run_id: str, world: gene
                 continue
             chunk = generate.generate_chunk(world, entity, chunk_no, chunk_rows)  # one chunk in memory at a time
             with conn.transaction(), conn.cursor() as cur:
-                for table, rows in chunk.tables.items():  # parents before children (orders, items, payments)
+                for table, rows in chunk.tables.items():  # parents before children (orders, items, payments, events)
                     if rows:
-                        _write(cur, cfg, table, rows)
+                        _write(cur, cfg, table, _stamped(table, rows, run_id))
                 cur.execute(db.q(cfg, "INSERT INTO {meta}.generation_chunks"
                                     " (run_id, entity, chunk_no, row_count, table_rows) VALUES (%s, %s, %s, %s, %s)"),
                             (run_id, entity, chunk_no, chunk.last - chunk.first + 1,
@@ -218,8 +227,11 @@ def write_step(conn: psycopg.Connection, cfg: Config, run_id: str, world: genera
                     _write(cur, cfg, table, rows)
             _update(cur, cfg, "orders", chunk.order_updates)
             _update(cur, cfg, "payment_attempts", chunk.payment_updates)
+            if chunk.events:  # after the rows they reference; same transaction, so never a change without its event
+                _write(cur, cfg, OUTBOX, _stamped(OUTBOX, chunk.events, run_id))
             table_rows = {t: len(rows) for t, rows in chunk.inserts.items()} | {
-                "orders_updated": len(chunk.order_updates), "payment_attempts_updated": len(chunk.payment_updates)}
+                "orders_updated": len(chunk.order_updates), "payment_attempts_updated": len(chunk.payment_updates),
+                OUTBOX: len(chunk.events)}
             cur.execute(db.q(cfg, "INSERT INTO {meta}.generation_chunks"
                                 " (run_id, entity, chunk_no, row_count, table_rows) VALUES (%s, %s, %s, %s, %s)"),
                         (run_id, "orders", chunk_no, chunk.last - chunk.first + 1, Jsonb(table_rows)))
@@ -432,6 +444,8 @@ def _require_loadable(conn: psycopg.Connection, cfg: Config) -> None:
         raise LoadError("loader needs an autocommit connection so each chunk commits on its own")
     if not db.has_ledger(conn, cfg):
         raise LoadError("generator schema not found; run `ecomgen init-db` first")
+    if not db.has_outbox(conn, cfg):
+        raise LoadError("this schema predates the outbox (migration 0009); run `ecomgen init-db` first")
 
 
 @contextmanager
@@ -465,7 +479,7 @@ def _execute(conn: psycopg.Connection, cfg: Config, run_id: str, world: generate
     except BaseException as e:
         _fail(conn, cfg, run_id, e)
         raise
-    counts = {t: totals.get(t, 0) for t in TABLES}
+    counts = {t: totals.get(t, 0) for t in (*TABLES, OUTBOX)}
     if step is None:
         return RunResult(run_id, counts, written, skipped, published)
     updated = {t: totals.get(f"{t}_updated", 0) for t in UPDATED}

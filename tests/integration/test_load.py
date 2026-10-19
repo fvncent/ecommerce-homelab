@@ -77,6 +77,7 @@ def test_chunk_ledger_matches_rows(aconn: psycopg.Connection, small_cfg: config.
                                 " GROUP BY 1").fetchall())
     assert ledger == {"sellers": 20, "categories": 40, "customers": 500, "products": 200, "orders": SMOKE_ORDERS}
     actual = {t: one(aconn, f"SELECT count(*) FROM commerce.{t}") for t in load.TABLES}
+    actual[load.OUTBOX] = one(aconn, "SELECT count(*) FROM integration.outbox_events")
     assert result.counts == actual  # child tables too, from the ledger's table_rows
 
 

@@ -20,6 +20,7 @@ float transcendental functions, whose last-bit results can differ between libm i
 """
 
 import hashlib
+import json
 import random
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -39,7 +40,14 @@ MAX_ATTEMPTS = 3
 # 3: browsing sessions start in time slots (feeds._session_start), so clickstream files differ; rows unchanged.
 # 4: clock-step windows are [previous, as_of) (were (previous, as_of]): a record at exactly a step's as_of moves to
 #    the next step. One-shot output is unchanged unless a record falls exactly on clock_end (none in the goldens).
-DATA_VERSION = 4
+# 5: outbox_events (one per order / payment state transition); the other rows and the files are unchanged.
+DATA_VERSION = 5
+OUTBOX_SCHEMA_VERSION = 1  # payload shape of outbox_events
+# The state machines _lifecycle follows (migration 0009 enforces the same pairs): (from, to) per aggregate type.
+ORDER_TRANSITIONS = frozenset({("CREATED", "CONFIRMED"), ("CREATED", "CANCELLED"), ("CONFIRMED", "CANCELLED"),
+                               ("CONFIRMED", "PROCESSING"), ("PROCESSING", "SHIPPED"), ("SHIPPED", "DELIVERED")})
+PAYMENT_TRANSITIONS = frozenset({("INITIATED", "FAILED"), ("INITIATED", "AUTHORIZED"), ("AUTHORIZED", "VOIDED"),
+                                 ("AUTHORIZED", "CAPTURED"), ("CAPTURED", "SETTLED")})
 PROBE_TRIES = 32
 CURRENCY = "USD"  # MVP: single-currency marketplace; per-market currencies come later
 MASTER_DATA_HISTORY = timedelta(days=730)  # master data is created in [clock_start - 730d, clock_start)
@@ -135,6 +143,26 @@ class PaymentAttempt(NamedTuple):
     currency: str
     created_at: datetime
     updated_at: datetime
+
+
+class OutboxEvent(NamedTuple):
+    """One business state transition of an order or payment attempt, written in the same transaction as the row
+    change it describes. Order of events: aggregate_seq within an aggregate; overall (occurred_at, event_id)."""
+    event_id: str  # obx_<aggregate_id>_<aggregate_seq>: the same in every run, resume and step layout
+    aggregate_type: str  # order | payment
+    aggregate_id: str
+    aggregate_seq: int  # 1 = creation, then one per transition, in occurred_at order
+    event_type: str  # OrderPlaced | OrderStatusChanged | PaymentAttemptCreated | PaymentStateChanged
+    schema_version: int
+    occurred_at: datetime
+    order_id: str
+    payment_id: str | None
+    payload: str  # canonical JSON text (sorted keys): from (None for creation), to, and the business fields
+    run_id: str = ""  # lineage: the run (clock step) that wrote it, set by the loader
+
+
+def _payload(**fields: object) -> str:
+    return json.dumps(fields, sort_keys=True, separators=(",", ":"))
 
 
 # ---------- static vocabularies (synthetic) ----------
@@ -310,6 +338,12 @@ class World:
 
     def order_at(self, n: int, ends: tuple[datetime, ...]) -> list[tuple[Order, list[OrderItem], list[PaymentAttempt]]]:
         """Order N as of each time in ends: generated once, its timeline cut at each end."""
+        return self.order_history(n, ends)[0]
+
+    def order_history(self, n: int, ends: tuple[datetime, ...], window: tuple[datetime | None, datetime] | None = None
+                      ) -> tuple[list[tuple[Order, list[OrderItem], list[PaymentAttempt]]], list[OutboxEvent]]:
+        """order_at, plus the outbox events of the transitions in window [start, end) (start None: since placement;
+        window None: none). Events and states come from the same timeline, so they always agree."""
         if not 1 <= n <= self.orders:
             raise GenerationError(f"order {n} out of range 1..{self.orders}")
         rng = _rng(self.seed, "orders", n)
@@ -355,7 +389,14 @@ class World:
             status, updated, payments = timeline.state_at(end, n, total)
             out.append((Order(oid, customer.customer_id, placed, status, CURRENCY, subtotal, discount, tax, shipping,
                               total, updated), items, payments))
-        return out
+        if window is None:
+            return out, []
+        def placed_payload() -> dict[str, object]:
+            return {"customer_id": customer.customer_id, "currency": CURRENCY, "subtotal": str(subtotal),
+                    "discount": str(discount), "tax": str(tax), "shipping": str(shipping), "total": str(total),
+                    "items": [{"order_item_id": i.order_item_id, "product_id": i.product_id, "quantity": i.quantity,
+                               "unit_price": str(i.unit_price), "line_total": str(i.line_total)} for i in items]}
+        return out, timeline.events(window, n, total, placed_payload)
 
     def _lifecycle(self, rng: random.Random, placed: datetime) -> "_Timeline":
         """Simulate the whole order + payment timeline (every draw, always); cut it at any time with state_at."""
@@ -415,6 +456,40 @@ class _Timeline:
                                            self.provider, self.method, state, total, CURRENCY, created, at))
         return status, updated, payments
 
+    def events(self, window: tuple[datetime | None, datetime], n: int, total: Decimal,
+               placed_payload: Callable[[], dict[str, object]]) -> list[OutboxEvent]:
+        """One event per state transition (creation included) with occurred_at in window [start, end). Payloads are
+        built only for the events kept."""
+        start, end = window
+        oid, out = f"ord_{n}", []
+
+        def keep(at: datetime) -> bool:
+            return (start is None or at >= start) and at < end
+
+        def event(kind: str, agg_id: str, seq: int, at: datetime, payment_id: str | None,
+                  payload: dict[str, object]) -> OutboxEvent:
+            return OutboxEvent(f"obx_{agg_id}_{seq}", "payment" if payment_id else "order", agg_id, seq, kind,
+                               OUTBOX_SCHEMA_VERSION, at, oid, payment_id, _payload(**payload))
+
+        for seq, (status, at) in enumerate(self.stages, 1):
+            if keep(at):
+                out.append(event("OrderPlaced", oid, seq, at, None, {"from": None, "to": status, **placed_payload()})
+                           if seq == 1 else
+                           event("OrderStatusChanged", oid, seq, at, None,
+                                 {"from": self.stages[seq - 2][0], "to": status}))
+        money = {"amount": str(total), "currency": CURRENCY}
+        for attempt_no, (_, states) in enumerate(self.attempts, 1):
+            pid = f"pay_{(n - 1) * MAX_ATTEMPTS + attempt_no}"
+            for seq, (state, at) in enumerate(states, 1):
+                if keep(at):
+                    out.append(event("PaymentAttemptCreated", pid, seq, at, pid,
+                                     {"from": None, "to": state, "attempt_no": attempt_no, "provider": self.provider,
+                                      "method": self.method, **money})
+                               if seq == 1 else
+                               event("PaymentStateChanged", pid, seq, at, pid,
+                                     {"from": states[seq - 2][0], "to": state, **money}))
+        return out
+
 
 def _probe(
     rng: random.Random, count: int, make: Callable[[int], T], ok: Callable[[T], bool], exclude: set[int]
@@ -472,12 +547,13 @@ def generate_chunk(world: World, entity: str, chunk_no: int, chunk_rows: int) ->
     if entity == "categories":
         tables = {"categories": list(CATEGORIES[first - 1:last])}
     elif entity == "orders":
-        tables = {"orders": [], "order_items": [], "payment_attempts": []}
-        for n in ns:
-            order, items, payments = world.order(n)
+        tables = {"orders": [], "order_items": [], "payment_attempts": [], "outbox_events": []}
+        for n in ns:  # tables in FK order: orders, their items and payments, then the events about them
+            ((order, items, payments),), events = world.order_history(n, (world.clock_end,), (None, world.clock_end))
             tables["orders"].append(order)
             tables["order_items"].extend(items)
             tables["payment_attempts"].extend(payments)
+            tables["outbox_events"].extend(events)
     else:
         make: Callable[[int], tuple[object, ...]] = {
             "sellers": world.seller, "customers": world.customer, "products": world.product,
@@ -533,6 +609,7 @@ class StepChunk:
     inserts: dict[str, list[tuple[object, ...]]]  # orders, order_items, payment_attempts (new rows)
     order_updates: list[tuple[Order, Order]]  # (as of previous, as of as_of): status/updated_at changed
     payment_updates: list[tuple[PaymentAttempt, PaymentAttempt]]  # likewise for state/updated_at
+    events: list[OutboxEvent]  # every transition in [previous, as_of) of these orders and their payments
 
 
 def step_chunk_count(plan: StepPlan, chunk_rows: int) -> int:
@@ -551,15 +628,19 @@ def step_chunk(world: World, plan: StepPlan, chunk_no: int, chunk_rows: int) -> 
     inserts: dict[str, list[tuple[object, ...]]] = {"orders": [], "order_items": [], "payment_attempts": []}
     order_updates: list[tuple[Order, Order]] = []
     payment_updates: list[tuple[PaymentAttempt, PaymentAttempt]] = []
+    events: list[OutboxEvent] = []
+    window = (plan.previous, plan.as_of)
     for n in sub:
         if n > plan.known:
-            order, items, payments = world.order(n, plan.as_of)
+            ((order, items, payments),), new = world.order_history(n, (plan.as_of,), window)
             inserts["orders"].append(order)
             inserts["order_items"].extend(items)
             inserts["payment_attempts"].extend(payments)
+            events += new
             continue
         assert plan.previous is not None
-        (before, _, earlier), (order, _, payments) = world.order_at(n, (plan.previous, plan.as_of))
+        ((before, _, earlier), (order, _, payments)), new = world.order_history(n, (plan.previous, plan.as_of), window)
+        events += new
         if (before.status, before.updated_at) != (order.status, order.updated_at):
             order_updates.append((before, order))
         old = {p.attempt_no: p for p in earlier}
@@ -569,4 +650,4 @@ def step_chunk(world: World, plan: StepPlan, chunk_no: int, chunk_rows: int) -> 
                 inserts["payment_attempts"].append(p)
             elif (o.state, o.updated_at) != (p.state, p.updated_at):
                 payment_updates.append((o, p))
-    return StepChunk(chunk_no, sub[0], sub[-1], inserts, order_updates, payment_updates)
+    return StepChunk(chunk_no, sub[0], sub[-1], inserts, order_updates, payment_updates, events)

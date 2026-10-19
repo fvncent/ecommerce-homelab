@@ -2,8 +2,11 @@
 
 ## Active
 - [ ] Optional, user-approved only: `init-db` (migration 0008) on `ecommerce_oltp` / benchmark DBs; dropping the disposable `ecomgen_v030_smoke` + `data/v030-*` when no longer wanted
-- [ ] Fix half-open step windows (branch `fix/half-open-windows`, Option 1 approved 2026-10-19): windows `[previous, as_of)`, DATA_VERSION 4; reviewed (6 fixed), 387 tests / 0 skipped on PG 17 + 18, benchmark 49/49 on unchanged references, no migration; push awaiting approval; then patch release proposal `v0.3.1-homelab`
-- [ ] Phase 3C outbox events: plan only after the window fix is merged; implement after the user approves the plan · 3D warehouses + inventory · 3E catch-up / `--follow` pacing
+- [ ] Push tag `v0.3.1-homelab` (created locally on `4632562` after checks; push awaits the user's OK; tags are immutable on GitHub)
+- [ ] Phase 3C outbox (branch `feat/outbox`, design approved 2026-10-19): `{integration}.outbox_events`, one event per order / payment transition, same transaction as the rows, deterministic IDs + per-aggregate sequence, run lineage, append-only, DATA_VERSION 5, migration 0009; implemented (generation, migration 0009, loader, validate, tests, docs; 412/0 on PG 17 + 18, benchmark 49/49); review next; release as `v0.4.0-homelab` after review
+- [ ] Practice runbook `docs/PRACTICE_RUNBOOK.md` + `config/practice.example.yaml` (own `practice_*` schemas and folder; rehearsed on the Mac): user's first Ubuntu run after `v0.4.0-homelab`
+- [ ] Release proposal `v0.4.0-homelab` (migration 0009 adds outbox + a UNIQUE (payment_id, order_id) index on payment_attempts of the schema set init-db runs on)
+- [ ] 3D warehouses + inventory · 3E catch-up / `--follow` pacing
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 
 ## Next (Phase 1)
@@ -16,6 +19,7 @@
 - Clearer error when `metadata_schema` is renamed after apply (currently fails loudly with DuplicateTable)
 
 ## Done
+- [x] PR #26 half-open windows `[previous, as_of)` (DATA_VERSION 4) merged at reviewed head `01be891`; `main` `4632562` CI green 387/0; upgrade/rollback from v0.3.0 rehearsed (no migration) (2026-10-19)
 - [x] User's hands-on `advance` walkthrough on Ubuntu (2026-10-19): `walk` chain, one order followed across steps, files per window, replay refusal, watermark extraction matched the step counts exactly
 - [x] PR #25 (v0.3.0 release + Ubuntu verification docs) merged; `main` `9ad04f5` CI green 378/0 (2026-10-19)
 - [x] Ubuntu Phase 3 verification (2026-10-19, user-run): upgrade to `v0.3.0-homelab`, 0008 in disposable `ecomgen_v030_smoke`, smoke 20/20 + files identical to the reference, 9-step chain + SIGKILL/resume drill, stepped = one-shot (7 tables, settlements), snapshot diff clean (`docs/BENCHMARKS.md`)
