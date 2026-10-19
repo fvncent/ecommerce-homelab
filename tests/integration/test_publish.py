@@ -98,7 +98,7 @@ def test_run_publishes_files_manifest_and_ledger(published: psycopg.Connection, 
                             "clickstream": load.PROFILE_COUNTS["smoke"]["clickstream_events"] + 1000}
     results = validate.validate(published, small_cfg)[1]
     assert [r.check.name for r in results if not r.ok] == []
-    assert len(results) == len(validate.CHECKS) + 2 + len(validate.FEED_CHECKS)
+    assert len(results) == len(validate.CHECKS) + len(validate.OUTBOX_CHECKS) + 2 + len(validate.FEED_CHECKS)
 
 
 def test_publish_again_is_a_no_op(published: psycopg.Connection, small_cfg: config.Config, data_root: Path) -> None:

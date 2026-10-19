@@ -117,7 +117,8 @@ def test_resume_after_failed_run(
     monkeypatch.setattr(generate, "generate_chunk", real)
     result = load.resume(c, small_cfg)
     assert result is not None and (result.chunks_written, result.chunks_skipped) == (1, 8)
-    assert result.counts == {t: one(c, f"SELECT count(*) FROM commerce.{t}") for t in load.TABLES}
+    assert result.counts == {t: one(c, f"SELECT count(*) FROM commerce.{t}") for t in load.TABLES} | {
+        load.OUTBOX: one(c, "SELECT count(*) FROM integration.outbox_events")}
     assert digest(c) == expected
     row = c.execute("SELECT state, error, finished_at IS NOT NULL FROM generator_meta.generation_runs").fetchone()
     assert row == ("COMPLETED", "RuntimeError: simulated failure", True)  # first failure reason kept

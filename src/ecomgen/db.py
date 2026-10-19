@@ -90,8 +90,9 @@ def migrate(conn: psycopg.Connection, cfg: Config) -> list[str]:
 
 
 def q(cfg: Config, query: str) -> sql.Composed:
-    """Format {app}/{meta} in query with the configured, quoted schema names."""
+    """Format {app}/{integration}/{meta} in query with the configured, quoted schema names."""
     return sql.SQL(query).format(app=sql.Identifier(cfg.postgres.application_schema),
+                                 integration=sql.Identifier(cfg.postgres.integration_schema),
                                  meta=sql.Identifier(cfg.postgres.metadata_schema))
 
 
@@ -110,6 +111,12 @@ def has_column(conn: psycopg.Connection, cfg: Config, table: str, column: str) -
     return conn.execute("SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass(%s)"
                         " AND attname = %s AND NOT attisdropped)",
                         (_meta_regclass(conn, cfg, table), column)).fetchone() == (True,)
+
+
+def has_outbox(conn: psycopg.Connection, cfg: Config) -> bool:
+    """True once migration 0009 has created the integration schema's outbox_events."""
+    name = sql.SQL("{}.{}").format(sql.Identifier(cfg.postgres.integration_schema), sql.Identifier("outbox_events"))
+    return conn.execute("SELECT to_regclass(%s) IS NOT NULL", (name.as_string(conn),)).fetchone() == (True,)
 
 
 def has_ledger(conn: psycopg.Connection, cfg: Config) -> bool:

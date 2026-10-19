@@ -37,7 +37,7 @@ def test_clean_run_passes(loaded: psycopg.Connection, small_cfg: config.Config) 
     run_id, results = validate.validate(loaded, small_cfg)
     assert run_id.startswith("run_")
     assert [r.check.name for r in results if not r.ok] == []
-    assert len(results) == len(validate.CHECKS)
+    assert len(results) == len(validate.CHECKS) + len(validate.OUTBOX_CHECKS)
 
 
 # Each statement breaks exactly one invariant the schema can't see (all CHECK/FK constraints still hold).
@@ -68,10 +68,33 @@ CORRUPTIONS = {
                        " SELECT run_id, 'refunds', 0, 0 FROM generator_meta.generation_runs",
     "run_completed": "UPDATE generator_meta.generation_runs SET state = 'FAILED'",
 }
+# A hand-edited status or amount also no longer matches the order's / payment's outbox history.
+HISTORY_TOO = {"order_header_matches_items", "payment_amount_matches_total", "one_live_payment",
+               "order_status_matches_payment"}
+# outbox_events is append-only (trigger); replica mode skips triggers (test databases are ours, superuser), while
+# its CHECK constraints still hold, so each statement breaks only what the table can't see.
+REPLICA = "SET session_replication_role = replica; "
+OUTBOX_CORRUPTIONS = {
+    "outbox_ledger_matches_table": "UPDATE generator_meta.generation_chunks SET table_rows = jsonb_set(table_rows,"
+                                   " '{outbox_events}', to_jsonb((table_rows->>'outbox_events')::int + 1))"
+                                   " WHERE entity = 'orders' AND chunk_no = 0",
+    "outbox_reconstructs_rows": REPLICA + "UPDATE integration.outbox_events"
+                                " SET payload = jsonb_set(payload, '{total}', '\"0.00\"') WHERE event_id = 'obx_ord_1_1'",
+    # the 2nd of a 3+ event chain no later than the 1st (neither the creation nor the latest event changes)
+    "outbox_chains_contiguous": REPLICA + "UPDATE integration.outbox_events e SET occurred_at = f.occurred_at"
+                                " FROM integration.outbox_events f WHERE e.event_id = (SELECT 'obx_' || aggregate_id"
+                                " || '_2' FROM integration.outbox_events WHERE aggregate_seq = 3"
+                                " AND aggregate_type = 'order' ORDER BY event_id LIMIT 1)"
+                                " AND f.aggregate_id = e.aggregate_id AND f.aggregate_seq = 1",
+    "outbox_events_in_run_window": "UPDATE generator_meta.generation_runs SET resume_fields = jsonb_set(resume_fields,"
+                                   " '{world,clock_start}', to_jsonb((SELECT min(occurred_at) + interval '1 second'"
+                                   " FROM integration.outbox_events)::text))",
+}
 
 
 def test_every_check_has_a_corruption_test() -> None:
     assert set(CORRUPTIONS) == {c.name for c in validate.CHECKS}
+    assert set(OUTBOX_CORRUPTIONS) == {c.name for c in validate.OUTBOX_CHECKS}
 
 
 @pytest.mark.parametrize("check", sorted(CORRUPTIONS))
@@ -79,6 +102,15 @@ def test_corruption_is_caught_by_exactly_its_check(
     loaded: psycopg.Connection, small_cfg: config.Config, check: str
 ) -> None:
     loaded.execute(CORRUPTIONS[check].encode())
+    assert failing(loaded, small_cfg) == {check} | ({"outbox_reconstructs_rows"} if check in HISTORY_TOO else set())
+
+
+@pytest.mark.parametrize("check", sorted(OUTBOX_CORRUPTIONS))
+def test_outbox_corruption_is_caught_by_exactly_its_check(
+    loaded: psycopg.Connection, small_cfg: config.Config, check: str
+) -> None:
+    loaded.execute(OUTBOX_CORRUPTIONS[check].encode())
+    loaded.execute("RESET session_replication_role")
     assert failing(loaded, small_cfg) == {check}
 
 
@@ -94,24 +126,30 @@ def test_inconsistent_status_payment_pairs(
     loaded.execute(f"UPDATE commerce.orders SET status = '{status}' WHERE order_id = {FIRST_SETTLED};"
                    f" UPDATE commerce.payment_attempts SET state = '{state}'"
                    f" WHERE order_id = {FIRST_SETTLED} AND state = 'SETTLED'".encode())
-    assert failing(loaded, small_cfg) == {"order_status_matches_payment"}
+    assert failing(loaded, small_cfg) == {"order_status_matches_payment", "outbox_reconstructs_rows"}
 
 
 def test_status_rules_accept_valid_edge_cases(loaded: psycopg.Connection, small_cfg: config.Config) -> None:
     # split shipment with captured payment
+    # (the row rules accept these; the outbox rightly says the rows no longer match their recorded history)
     loaded.execute(f"UPDATE commerce.orders SET status = 'PARTIALLY_SHIPPED' WHERE order_id = {FIRST_SETTLED}")
-    assert failing(loaded, small_cfg) == set()
-    # docs/03 allows cancelling from CREATED, i.e. before any payment attempt
-    loaded.execute(f"UPDATE commerce.orders SET status = 'CANCELLED' WHERE order_id = {FIRST_SETTLED};"
-                   f" DELETE FROM commerce.payment_attempts WHERE order_id = {FIRST_SETTLED}".encode())
-    assert failing(loaded, small_cfg) == {"ledger_matches_tables"}  # only because rows were deleted behind the ledger
+    assert failing(loaded, small_cfg) == {"outbox_reconstructs_rows"}
+    # docs/03 allows cancelling from CREATED, i.e. before any payment attempt. A payment with outbox events can't
+    # be deleted (FK); replica mode skips that check here (test database only).
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        loaded.execute(f"DELETE FROM commerce.payment_attempts WHERE order_id = {FIRST_SETTLED}")
+    loaded.execute(f"SET session_replication_role = replica; UPDATE commerce.orders SET status = 'CANCELLED'"
+                   f" WHERE order_id = {FIRST_SETTLED}; DELETE FROM commerce.payment_attempts"
+                   f" WHERE order_id = {FIRST_SETTLED}; RESET session_replication_role".encode())
+    # ledger: rows were deleted behind it; outbox: the order's history no longer matches it
+    assert failing(loaded, small_cfg) == {"ledger_matches_tables", "outbox_reconstructs_rows"}
 
 
 def test_missing_chunk_marker_is_caught(loaded: psycopg.Connection, small_cfg: config.Config) -> None:
     loaded.execute("DELETE FROM generator_meta.generation_chunks WHERE entity = 'orders' AND chunk_no = 1")
     _, results = validate.validate(loaded, small_cfg)
     bad = {r.check.name: r for r in results if not r.ok}
-    assert set(bad) == {"ledger_complete", "ledger_matches_tables"}
+    assert set(bad) == {"ledger_complete", "ledger_matches_tables", "outbox_ledger_matches_table"}
     assert bad["ledger_complete"].samples == ["orders: planned 1000, ledger 700 rows in 3 chunks (max chunk_no 3)"]
 
 
@@ -156,7 +194,8 @@ def test_cli_validate(
     assert main(["generate", cfg_path, "--profile", "smoke"]) == 0
     capsys.readouterr()
     assert main(["validate", cfg_path]) == 0
-    assert f"{len(validate.CHECKS) + 2 + len(validate.FEED_CHECKS)} passed, 0 failed" in capsys.readouterr().out
+    passed = len(validate.CHECKS) + len(validate.OUTBOX_CHECKS) + 2 + len(validate.FEED_CHECKS)
+    assert f"{passed} passed, 0 failed" in capsys.readouterr().out
     assert main(["validate", cfg_path, "--run-id", "run_nope"]) == 3
     with psycopg.connect(db_url, autocommit=True) as c:
         c.execute("UPDATE commerce.order_items SET line_no = 9 WHERE order_item_id = 'itm_1'")

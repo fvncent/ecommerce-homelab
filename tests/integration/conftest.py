@@ -87,12 +87,17 @@ Digest = Callable[[psycopg.Connection], dict[str, str]]
 
 @pytest.fixture
 def digest() -> Digest:
-    """Content hash of every source table (rows sorted by their text form, so order is deterministic)."""
+    """Content hash of every source table and the outbox (rows sorted by their text form, so order is deterministic;
+    the outbox without run_id, which says which run or step wrote an event, not what it is)."""
+    outbox = ("(x.event_id, x.aggregate_type, x.aggregate_id, x.aggregate_seq, x.event_type, x.schema_version,"
+              " x.occurred_at, x.order_id, x.payment_id, x.payload)")
+
     def compute(conn: psycopg.Connection) -> dict[str, str]:
         out = {}
-        for t in load.TABLES:
-            row = conn.execute(f"SELECT md5(coalesce(string_agg(x::text, '|' ORDER BY x::text), ''))"
-                               f" FROM commerce.{t} x".encode()).fetchone()
+        for t, row_text, schema in [*((t, "x", "commerce") for t in load.TABLES),
+                                    (load.OUTBOX, outbox, "integration")]:
+            row = conn.execute(f"SELECT md5(coalesce(string_agg({row_text}::text, '|' ORDER BY {row_text}::text), ''))"
+                               f" FROM {schema}.{t} x".encode()).fetchone()
             out[t] = str(row[0]) if row else ""
         return out
     return compute

@@ -1,5 +1,5 @@
 """Outbox events without a database: one per order / payment state transition, consistent with the rows, the same
-in one shot and in any clock steps (with PostgreSQL: integration/test_outbox.py)."""
+in one shot and in any clock steps (with PostgreSQL: integration/test_outbox_db.py)."""
 
 import json
 from collections import defaultdict

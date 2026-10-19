@@ -130,6 +130,48 @@ DATA_CHECKS = (
         SELECT DISTINCT start AS id FROM walk WHERE cur = start"""),
 )
 CHECKS = LEDGER_CHECKS + DATA_CHECKS
+# Outbox (data version >= 5 with migration 0009; older runs wrote no events). Ids, aggregates, event types per
+# sequence number and the allowed transitions are constraints in the table; these check the history as a whole.
+OUTBOX_SINCE = 5
+OUTBOX_CHECKS = (
+    Check("outbox_ledger_matches_table", "ledger outbox_events totals (every run) equal the outbox row count", """
+        SELECT 'outbox_events: ledger ' || coalesce(l.n, 0) || ', table ' || c.n AS id
+        FROM (SELECT count(*) n FROM {integration}.outbox_events) c,
+             (SELECT sum((table_rows->>'outbox_events')::bigint) n FROM {meta}.generation_chunks) l
+        WHERE coalesce(l.n, 0) <> c.n"""),
+    Check("outbox_reconstructs_rows", "every order and payment attempt has a creation event at its creation time "
+          "carrying its amounts, and its latest event gives its current status / state and updated_at", """
+        SELECT o.order_id AS id FROM {app}.orders o
+        LEFT JOIN {integration}.outbox_events c ON c.event_id = 'obx_' || o.order_id || '_1'
+        LEFT JOIN LATERAL (SELECT payload ->> 'to' AS s, occurred_at AS at FROM {integration}.outbox_events e
+                           WHERE e.aggregate_id = o.order_id ORDER BY aggregate_seq DESC LIMIT 1) l ON true
+        WHERE c.occurred_at IS DISTINCT FROM o.placed_at OR c.payload ->> 'total' IS DISTINCT FROM o.total::text
+           OR c.payload ->> 'customer_id' IS DISTINCT FROM o.customer_id
+           OR l.s IS DISTINCT FROM o.status OR l.at IS DISTINCT FROM o.updated_at
+        UNION ALL
+        SELECT p.payment_id FROM {app}.payment_attempts p
+        LEFT JOIN {integration}.outbox_events c ON c.event_id = 'obx_' || p.payment_id || '_1'
+        LEFT JOIN LATERAL (SELECT payload ->> 'to' AS s, occurred_at AS at FROM {integration}.outbox_events e
+                           WHERE e.aggregate_id = p.payment_id ORDER BY aggregate_seq DESC LIMIT 1) l ON true
+        WHERE c.occurred_at IS DISTINCT FROM p.created_at OR c.order_id IS DISTINCT FROM p.order_id
+           OR c.payload ->> 'amount' IS DISTINCT FROM p.amount::text
+           OR l.s IS DISTINCT FROM p.state OR l.at IS DISTINCT FROM p.updated_at"""),
+    Check("outbox_chains_contiguous", "each event after the first follows its aggregate's previous event: no gap, "
+          "from = the previous to, strictly later, same order", """
+        SELECT e.event_id AS id FROM {integration}.outbox_events e
+        LEFT JOIN {integration}.outbox_events p
+               ON p.aggregate_id = e.aggregate_id AND p.aggregate_seq = e.aggregate_seq - 1
+        WHERE e.aggregate_seq > 1 AND (p.event_id IS NULL OR p.payload ->> 'to' IS DISTINCT FROM e.payload ->> 'from'
+              OR p.occurred_at >= e.occurred_at OR p.order_id <> e.order_id)"""),
+    Check("outbox_events_in_run_window", "each event lies in the time window of the run (clock step) that wrote "
+          "it: [previous_as_of, as_of), a generate run [clock_start, clock_end)", """
+        SELECT e.event_id AS id FROM {integration}.outbox_events e JOIN {meta}.generation_runs r USING (run_id)
+        WHERE e.occurred_at < coalesce(r.previous_as_of, (r.resume_fields->'world'->>'clock_start')::timestamptz)
+           OR e.occurred_at >= coalesce(r.as_of, (r.resume_fields->'world'->>'clock_end')::timestamptz)"""),
+)
+# Step windows and browsing-session times last changed in data version 4, so a chain's files are checkable by this
+# release from that version on (5 only added the outbox).
+CHAIN_FILES_SINCE = 4
 
 # Python-side checks on the files themselves; the query field is unused.
 FILES_INTACT = Check("files_match_ledger", "every recorded file exists with its recorded size, checksum and records",
@@ -224,14 +266,21 @@ def validate(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             run_id = db.resolve_run(conn, cfg, run_id)
             results = [_run_check(conn, cfg, c, run_id) for c in CHECKS]
+            version = conn.execute(db.q(cfg, "SELECT (resume_fields->>'data_version')::int"
+                                        " FROM {meta}.generation_runs WHERE run_id = %s"), (run_id,)).fetchone()
+            if db.has_outbox(conn, cfg) and version and (version[0] or 0) >= OUTBOX_SINCE:
+                results += [_run_check(conn, cfg, c, run_id) for c in OUTBOX_CHECKS]
             runs, as_of = _file_runs(conn, cfg, run_id)
             recorded = runs[0][1] if runs else {}
             published = recorded.get("feeds", {}).get("enabled") or []
             if published:  # runs from before file feeds (or with feeds disabled) publish nothing to check
-                if as_of is not None and recorded.get("data_version") != generate.DATA_VERSION:
-                    # a chain's browse count depends on the session times of its data version; the row checks don't
-                    reason = (f"the chain was written under data_version {recorded.get('data_version')}, not "
-                              f"{generate.DATA_VERSION}: check its files with the release that wrote it")
+                chain_version = recorded.get("data_version")
+                if as_of is not None and not (isinstance(chain_version, int)
+                                              and CHAIN_FILES_SINCE <= chain_version <= generate.DATA_VERSION):
+                    # a chain's files depend on the windows and session times of its data version; the rows don't
+                    reason = (f"the chain was written under data_version {chain_version}, not "
+                              f"{CHAIN_FILES_SINCE}..{generate.DATA_VERSION}: check its files with the release that "
+                              "wrote it")
                     return run_id, results + [Result(FILES_INTACT, 1, [reason])]
                 unfinished = [f"{r} is {state}: a clock step's files are checked once it completes"
                               for r, _, state in runs if state != "COMPLETED"] if as_of is not None else []
