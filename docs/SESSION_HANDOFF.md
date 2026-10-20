@@ -3,8 +3,8 @@
 Update before compaction or ending a significant session. Overwrite it: git history keeps the old versions (the full
 per-PR review tables up to PR #23 are in commit `03ee496`). Task list: `TASKS.md`.
 
-**Updated:** 2026-10-19
-**Branch:** `fix/validate-pre-0008` (from `main` `877c216`). Released: `v0.4.0-homelab` → `877c216`, `v0.3.1-homelab` → `4632562`. Ubuntu now on `v0.4.0-homelab` (checked out by the user; VLSIM containers are stopped/removed by the user).
+**Updated:** 2026-10-20
+**Branch:** `main` `4302a43` (PR #28 merged, CI 419/0). Released: `v0.4.1-homelab` → `4302a43` (validate fix, code only), `v0.4.0-homelab` → `877c216`, `v0.3.1-homelab` → `4632562`. Ubuntu on `v0.4.1-homelab` (user-run checkout 2026-10-20: old `commerce` set validates 20/20, practice set 24/24; VLSIM containers stopped/removed by the user).
 **Released:** `v0.3.0-homelab` → `0301e1f` (Phase 3A, 3B, session ordering, harness; tag pushed 2026-10-19).
 `v0.2.0-homelab` (`de90a6a`) unchanged, kept for rollback.
 **Deployed on Ubuntu:** `v0.3.0-homelab`, verified 2026-10-19 (`docs/BENCHMARKS.md`). Disposable DB
@@ -123,5 +123,6 @@ v0.3.0). `db.clock_columns` (shared by load/feeds/validate) returns typed NULLs;
 ## Next step
 Ubuntu v0.4.0 verified (`docs/BENCHMARKS.md`); the user builds a pipeline on the practice dataset (`practice_*` schemas
 in `ecommerce_oltp`, `practice/pipeline.yaml` + `pipeline.env`, one `advance` per business day, reads as
-`ecomgen_reader` via `~/.pgpass`; the reader password was pasted in chat once and rotated). Open: merge PR #28 and
-tag `v0.4.1-homelab` (code only) on approval; then 3D (warehouses/inventory) when the user asks. Ponytail `lite`.
+`ecomgen_reader` via `~/.pgpass`; the reader password was pasted in chat once and rotated). The user connects to it
+(2026-10-20). Open: 3D (warehouses/inventory) when the user asks.
+Ponytail `lite`.
