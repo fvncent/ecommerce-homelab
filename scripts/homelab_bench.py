@@ -17,7 +17,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
@@ -208,9 +208,10 @@ def sizes(name: str) -> None:
 
 
 def digest(name: str) -> None:
-    """Row count + md5 over every source table and the outbox, rows sorted by text: equal output = identical data.
-    Row text is pinned to UTC/ISO and sorted bytewise (COLLATE "C"), so it doesn't depend on the server's time zone
-    or locale. The outbox is hashed without run_id (which run wrote an event differs per machine, not the event)."""
+    """Row count + md5 over every source table, the outbox and inventory, rows sorted by text: equal output =
+    identical data. Row text is pinned to UTC/ISO and sorted bytewise (COLLATE "C"), so it doesn't depend on the
+    server's time zone or locale. Events and movements are hashed without run_id (which run wrote one differs per
+    machine, not what it is)."""
     schema, integration = _schemas()[:2]
     with psycopg.connect(db_url(name)) as c:
         c.execute("SET TIME ZONE 'UTC'")
@@ -226,6 +227,13 @@ def digest(name: str) -> None:
             f"SELECT count(*), md5(coalesce(string_agg({row}, '|' ORDER BY {row} COLLATE \"C\"), ''))"
             " FROM {}.outbox_events").format(sql.Identifier(integration))).fetchone()  # type: ignore[misc]
         print(f"outbox_events {n} {md5}")
+        moves = "(movement_id, warehouse_id, product_id, movement_type, quantity, on_hand_delta, reserved_delta," \
+                " occurred_at, order_item_id)::text"
+        for t, row in (("warehouses", "x::text"), ("inventory", "x::text"), ("inventory_movements", moves)):
+            n, md5 = c.execute(sql.SQL(
+                f"SELECT count(*), md5(coalesce(string_agg({row}, '|' ORDER BY {row} COLLATE \"C\"), ''))"
+                " FROM {}.{} x").format(sql.Identifier(schema), sql.Identifier(t))).fetchone()  # type: ignore[misc]
+            print(f"{t} {n} {md5}")
 
 
 def leftovers(name: str) -> None:
@@ -295,10 +303,11 @@ def crash(config_path: str, entity: str, chunk_no: str) -> None:
     real = generate.generate_chunk
     target = (entity, int(chunk_no))
 
-    def killing(world: generate.World, e: str, n: int, rows: int) -> generate.Chunk:
+    def killing(world: generate.World, e: str, n: int, rows: int,
+                window: tuple[datetime | None, datetime] | None = None) -> generate.Chunk:
         if (e, n) == target:
             os.kill(os.getpid(), signal.SIGKILL)
-        return real(world, e, n, rows)
+        return real(world, e, n, rows, window)
 
     generate.generate_chunk = killing  # type: ignore[assignment]
     with psycopg.connect(url, autocommit=True) as conn:

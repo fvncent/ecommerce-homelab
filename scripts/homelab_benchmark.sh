@@ -89,8 +89,9 @@ expect_msg() {
   else note "- FAIL $label (exit $got, want $want with \"$pattern\")"; FAILED=1; fi
   rm -f "$log"
 }
-# digest_ok FILE: the digest step produced all 7 tables + the outbox (an empty pair must never compare "identical")
-digest_ok() { [ "$(wc -l < "$1" | tr -d ' ')" = 8 ]; }
+# digest_ok FILE: the digest step produced all 7 tables, the outbox and the 3 inventory tables (an empty pair must
+# never compare "identical")
+digest_ok() { [ "$(wc -l < "$1" | tr -d ' ')" = 11 ]; }
 timed() {
   local name="$1"; shift
   if [ "$TIME_STYLE" = gnu ]; then /usr/bin/time -v "$@" 2> "$OUT/time_$name.txt"
@@ -223,7 +224,7 @@ bench feed-digest "$SMOKE" > "$OUT/feeds_smoke.txt" 2>> "$OUT/log.txt"
 same_as "$REF_SMOKE_FEEDS" "$OUT/feeds_smoke.txt" "smoke files identical to the macOS reference"
 expect 0 "smoke files intact, no orphans or staging left" bench verify-files "$SMOKE"
 bench digest "$SMOKE" > "$OUT/digest_smoke.txt" 2>> "$OUT/log.txt"
-expect 0 "smoke digest complete (7 tables + outbox)" digest_ok "$OUT/digest_smoke.txt"
+expect 0 "smoke digest complete (7 tables + outbox + inventory)" digest_ok "$OUT/digest_smoke.txt"
 
 note ""; note "## Publish crash (1,000 orders, schemas *_pc in $SMOKE): SIGKILL after placing file 4, then resume"
 PC_CONFIG="$OUT/generator_pc.yaml"
@@ -239,7 +240,7 @@ env CONFIG="$PC_CONFIG" "$PY" scripts/homelab_bench.py feed-digest "$SMOKE" > "$
 same_as "$REF_SMOKE_FEEDS" "$OUT/feeds_pc.txt" "files after crash + resume identical to the uninterrupted macOS reference"
 expect 0 "ledger == disk: every recorded file intact, no unrecorded files, no staging left" env CONFIG="$PC_CONFIG" "$PY" scripts/homelab_bench.py verify-files "$SMOKE"
 env CONFIG="$PC_CONFIG" "$PY" scripts/homelab_bench.py digest "$SMOKE" > "$OUT/digest_pc.txt" 2>> "$OUT/log.txt"
-expect 0 "publish-crash digest complete (7 tables + outbox)" digest_ok "$OUT/digest_pc.txt"
+expect 0 "publish-crash digest complete (7 tables + outbox + inventory)" digest_ok "$OUT/digest_pc.txt"
 expect 0 "database rows identical to the uninterrupted smoke run" diff "$OUT/digest_smoke.txt" "$OUT/digest_pc.txt"
 
 # ---------- 2. MVP benchmark (10,000 orders) ----------
@@ -261,7 +262,7 @@ expect 0 "validate" timed validate "$ECOMGEN" validate "$CONFIG"
 note "  - validate: $(time_summary validate)"
 "$ECOMGEN" status "$CONFIG" >> "$OUT/log.txt" 2>&1
 bench digest "$TEST" > "$OUT/digest_mvp.txt" 2>> "$OUT/log.txt"
-expect 0 "digest complete (7 tables + outbox)" digest_ok "$OUT/digest_mvp.txt"
+expect 0 "digest complete (7 tables + outbox + inventory)" digest_ok "$OUT/digest_mvp.txt"
 same_as "$EXPECTED_DIGEST" "$OUT/digest_mvp.txt" "database rows identical to the macOS baseline"
 bench feed-stats "$TEST" > "$OUT/feeds_stats_mvp.txt" 2>> "$OUT/log.txt"
 while read -r line; do note "  - files: $line"; done < "$OUT/feeds_stats_mvp.txt"
@@ -299,7 +300,7 @@ note "  - resume: $(time_summary resume); postgres server: $(mem_peak resume); C
 expect 0 "validate after resume" "$ECOMGEN" validate "$CONFIG"
 expect 0 "second resume is a no-op" "$ECOMGEN" resume "$CONFIG"
 bench digest "$CRASH" > "$OUT/digest_crash.txt" 2>> "$OUT/log.txt"
-expect 0 "digest complete (7 tables + outbox)" digest_ok "$OUT/digest_crash.txt"
+expect 0 "digest complete (7 tables + outbox + inventory)" digest_ok "$OUT/digest_crash.txt"
 expect 0 "resumed data identical to the clean run (no duplicates, nothing missing)" diff "$OUT/digest_mvp.txt" "$OUT/digest_crash.txt"
 bench feed-digest "$CRASH" > "$OUT/feeds_crash.txt" 2>> "$OUT/log.txt"
 expect 0 "resumed run's files identical to the clean run's" diff "$OUT/feeds_mvp.txt" "$OUT/feeds_crash.txt"

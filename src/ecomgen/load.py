@@ -7,6 +7,9 @@ is what makes a re-run of the same run (resume) idempotent.
 Two kinds of run: `generate` writes a whole dataset as of clock_end in one run; `advance` writes clock steps, each
 a run that inserts the orders placed since the previous step and updates earlier ones that changed (an update
 applies only to the row exactly as the previous step left it). A schema set holds one kind only.
+
+Inventory: each chunk that writes inventory_movements also applies their deltas to inventory in the same transaction
+(a RECEIPT opens a row), so inventory always equals the sum of the committed movements.
 """
 
 import dataclasses
@@ -28,9 +31,12 @@ from ecomgen.config import Config
 
 # Built-in profile counts; other profiles take counts from the config file.
 PROFILE_COUNTS = {"smoke": {"sellers": 20, "customers": 500, "products": 200, "orders": 1000,
-                             "clickstream_events": 10_000}}
+                             "clickstream_events": 10_000, "warehouses": 3}}
 TABLES = ("sellers", "categories", "customers", "products", "orders", "order_items", "payment_attempts")
 OUTBOX = "outbox_events"  # in the integration schema; written in the same transaction as the rows it describes
+MOVEMENTS = "inventory_movements"
+STOCK_TABLES = ("warehouses", MOVEMENTS)  # migration 0010; inventory itself is derived from the movements
+INVENTORY_MIGRATION = 10
 # Tables a clock step updates: (key, changing column); updated_at changes with it. Ledger key: "<table>_updated".
 UPDATED = {"orders": ("order_id", "status"), "payment_attempts": ("payment_id", "state")}
 # Arbitrary constant; held for the whole run so two generate/resume processes never write concurrently.
@@ -60,7 +66,7 @@ def world_for(cfg: Config, preset: str | None) -> generate.World:
         return world
     c = PROFILE_COUNTS[preset]
     return replace(world, sellers=c["sellers"], customers=c["customers"], products=c["products"], orders=c["orders"],
-                   clickstream_events=c["clickstream_events"])
+                   clickstream_events=c["clickstream_events"], warehouses=c["warehouses"])
 
 
 def _table(cfg: Config, table: str) -> sql.Identifier:
@@ -69,10 +75,51 @@ def _table(cfg: Config, table: str) -> sql.Identifier:
 
 
 def _stamped(table: str, rows: Sequence[tuple[object, ...]], run_id: str) -> Sequence[tuple[object, ...]]:
-    """Outbox events carry the run that wrote them (lineage); generation leaves run_id empty."""
-    if table != OUTBOX:
+    """Outbox events and stock movements carry the run that wrote them (lineage); generation leaves run_id empty."""
+    if table not in (OUTBOX, MOVEMENTS):
         return rows
-    return [cast(generate.OutboxEvent, r)._replace(run_id=run_id) for r in rows]
+    return [cast(generate.OutboxEvent | generate.InventoryMovement, r)._replace(run_id=run_id) for r in rows]
+
+
+def _insert(cur: psycopg.Cursor[tuple[object, ...]], cfg: Config, table: str, rows: Sequence[tuple[object, ...]],
+            run_id: str) -> None:
+    if not rows:
+        return
+    if table == MOVEMENTS:  # the inventory rows first: movements reference them
+        _apply_stock(cur, cfg, cast(Sequence[generate.InventoryMovement], rows))
+    _write(cur, cfg, table, _stamped(table, rows, run_id))
+
+
+def _apply_stock(cur: psycopg.Cursor[tuple[object, ...]], cfg: Config,
+                 moves: Sequence[generate.InventoryMovement]) -> None:
+    """Keep inventory = the sum of its movements: a RECEIPT opens its cell's row, the others add their deltas, summed
+    per cell so each row is updated once (the schema's CHECK then sees the chunk's net result)."""
+    inventory = sql.Identifier(cfg.postgres.application_schema, "inventory")
+    opened = [m for m in moves if m.movement_type == "RECEIPT"]
+    if opened:
+        cur.execute(sql.SQL("INSERT INTO {} (warehouse_id, product_id, on_hand, reserved, updated_at)"
+                            " SELECT w, p, n, 0, t FROM unnest(%s::text[], %s::text[], %s::int[], %s::timestamptz[])"
+                            " AS u (w, p, n, t)").format(inventory),
+                    [[m.warehouse_id for m in opened], [m.product_id for m in opened], [m.quantity for m in opened],
+                     [m.occurred_at for m in opened]])
+    deltas: dict[tuple[str, str], tuple[int, int, datetime]] = {}
+    for m in moves:
+        if m.movement_type != "RECEIPT":
+            cell = (m.warehouse_id, m.product_id)
+            on_hand, reserved, at = deltas.get(cell, (0, 0, m.occurred_at))
+            deltas[cell] = (on_hand + m.on_hand_delta, reserved + m.reserved_delta, max(at, m.occurred_at))
+    if not deltas:
+        return
+    cells = sorted(deltas)
+    cur.execute(sql.SQL("UPDATE {} x SET on_hand = x.on_hand + u.h, reserved = x.reserved + u.r,"
+                        " updated_at = greatest(x.updated_at, u.t)"
+                        " FROM unnest(%s::text[], %s::text[], %s::int[], %s::int[], %s::timestamptz[])"
+                        " AS u (w, p, h, r, t) WHERE x.warehouse_id = u.w AND x.product_id = u.p").format(inventory),
+                [[w for w, _ in cells], [p for _, p in cells], [deltas[c][0] for c in cells],
+                 [deltas[c][1] for c in cells], [deltas[c][2] for c in cells]])
+    if cur.rowcount != len(cells):
+        raise LoadError(f"inventory: {len(cells) - cur.rowcount} of {len(cells)} cell(s) have no row (opened by their "
+                        "RECEIPT in the first step); nothing from this chunk was written")
 
 
 def _write(cur: psycopg.Cursor[tuple[object, ...]], cfg: Config, table: str,
@@ -139,7 +186,8 @@ def _start_run(conn: psycopg.Connection, cfg: Config, profile: str, world: gener
 
 def _has_rows(conn: psycopg.Connection, cfg: Config) -> bool:
     has_rows = sql.SQL(" OR ").join(
-        sql.SQL("EXISTS (SELECT 1 FROM {})").format(_table(cfg, t)) for t in (*TABLES, OUTBOX))
+        sql.SQL("EXISTS (SELECT 1 FROM {})").format(_table(cfg, t))
+        for t in (*TABLES, *STOCK_TABLES, "inventory", OUTBOX))
     return conn.execute(sql.SQL("SELECT {}").format(has_rows)).fetchone() == (True,)
 
 
@@ -164,8 +212,10 @@ def _done(conn: psycopg.Connection, cfg: Config, run_id: str) -> set[tuple[str, 
 
 
 def write_chunks(conn: psycopg.Connection, cfg: Config, run_id: str, world: generate.World,
-                 entities: Sequence[str] = generate.ENTITY_ORDER) -> tuple[int, int]:
-    """Write every chunk of these entities not yet in the ledger for run_id; return (written, skipped)."""
+                 entities: Sequence[str] = generate.ENTITY_ORDER,
+                 window: tuple[datetime | None, datetime] | None = None) -> tuple[int, int]:
+    """Write every chunk of these entities not yet in the ledger for run_id; return (written, skipped). window: a
+    clock step's, for its inventory chunks."""
     chunk_rows = cfg.generator.chunk_rows
     done = _done(conn, cfg, run_id)
     written = skipped = 0
@@ -174,11 +224,10 @@ def write_chunks(conn: psycopg.Connection, cfg: Config, run_id: str, world: gene
             if (entity, chunk_no) in done:
                 skipped += 1
                 continue
-            chunk = generate.generate_chunk(world, entity, chunk_no, chunk_rows)  # one chunk in memory at a time
+            chunk = generate.generate_chunk(world, entity, chunk_no, chunk_rows, window)  # one chunk in memory
             with conn.transaction(), conn.cursor() as cur:
-                for table, rows in chunk.tables.items():  # parents before children (orders, items, payments, events)
-                    if rows:
-                        _write(cur, cfg, table, _stamped(table, rows, run_id))
+                for table, rows in chunk.tables.items():  # parents first (orders, items, payments, events, stock)
+                    _insert(cur, cfg, table, rows, run_id)
                 cur.execute(db.q(cfg, "INSERT INTO {meta}.generation_chunks"
                                     " (run_id, entity, chunk_no, row_count, table_rows) VALUES (%s, %s, %s, %s, %s)"),
                             (run_id, entity, chunk_no, chunk.last - chunk.first + 1,
@@ -209,10 +258,12 @@ def _update(cur: psycopg.Cursor[tuple[object, ...]], cfg: Config, table: str,
 
 def write_step(conn: psycopg.Connection, cfg: Config, run_id: str, world: generate.World,
                previous: datetime | None, as_of: datetime) -> tuple[int, int]:
-    """Write a clock step's chunks not yet in the ledger: master data in the first step, then the orders placed or
-    changed in [previous, as_of). Return (written, skipped)."""
-    written, skipped = (0, 0) if previous is not None else write_chunks(conn, cfg, run_id, world,
-                                                                        generate.MASTER_ENTITIES)
+    """Write a clock step's chunks not yet in the ledger: master data in the first step, then the receipts (first step)
+    and replenishments in [previous, as_of), then the orders placed or changed in it. Replenishments go first, so no
+    committed chunk leaves stock below what generate._openings guarantees. Return (written, skipped)."""
+    written, skipped = write_chunks(conn, cfg, run_id, world,
+                                    (*(generate.MASTER_ENTITIES if previous is None else ()), "inventory"),
+                                    (previous, as_of))
     chunk_rows = cfg.generator.chunk_rows
     plan = generate.plan_step(world, previous, as_of)
     done = _done(conn, cfg, run_id)
@@ -222,9 +273,8 @@ def write_step(conn: psycopg.Connection, cfg: Config, run_id: str, world: genera
             continue
         chunk = generate.step_chunk(world, plan, chunk_no, chunk_rows)
         with conn.transaction(), conn.cursor() as cur:
-            for table, rows in chunk.inserts.items():  # orders before their items and payments
-                if rows:
-                    _write(cur, cfg, table, rows)
+            for table, rows in chunk.inserts.items():  # orders before their items, payments and stock movements
+                _insert(cur, cfg, table, rows, run_id)
             _update(cur, cfg, "orders", chunk.order_updates)
             _update(cur, cfg, "payment_attempts", chunk.payment_updates)
             if chunk.events:  # after the rows they reference; same transaction, so never a change without its event
@@ -319,6 +369,7 @@ def _start_step(conn: psycopg.Connection, cfg: Config, world: generate.World,
                 raise LoadError(f"the clock is at {previous.isoformat()} (step {last_id}); it only moves forward, "
                                 f"and no step stopped at {as_of.isoformat()}")
         planned = {} if previous is not None else {e: world.count(e) for e in generate.MASTER_ENTITIES}
+        planned["inventory"] = world.count("inventory")
         orders = len(generate.plan_step(world, previous, as_of).orders)
         if orders:
             planned["orders"] = orders
@@ -387,7 +438,7 @@ def status(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -> 
     done: dict[str, int] = dict(conn.execute(db.q(cfg, "SELECT entity, sum(row_count)::int FROM {meta}.generation_chunks"
                                        " WHERE run_id = %s GROUP BY 1"), (run_id,)).fetchall())
     progress = {e: (done.get(e, 0), int(planned.get(e, 0))) for e in generate.ENTITY_ORDER
-                if as_of is None or e in planned or e in done}  # a step plans only what it writes
+                if e in planned or e in done}  # a step plans only what it writes; older runs had fewer entities
     holder = holder or _lock_holder(conn)
     return RunStatus(run_id, state, profile, version, mismatch, started_at, finished_at, error, progress, holder,
                      _utc(previous_as_of), _utc(as_of))
@@ -441,6 +492,8 @@ def _require_loadable(conn: psycopg.Connection, cfg: Config) -> None:
         raise LoadError("generator schema not found; run `ecomgen init-db` first")
     if not db.has_outbox(conn, cfg):
         raise LoadError("this schema predates the outbox (migration 0009); run `ecomgen init-db` first")
+    if not db.has_migration(conn, cfg, INVENTORY_MIGRATION):  # of the schema set, whatever the config's names
+        raise LoadError("this schema predates inventory (migration 0010); run `ecomgen init-db` first")
 
 
 @contextmanager
@@ -474,7 +527,7 @@ def _execute(conn: psycopg.Connection, cfg: Config, run_id: str, world: generate
     except BaseException as e:
         _fail(conn, cfg, run_id, e)
         raise
-    counts = {t: totals.get(t, 0) for t in (*TABLES, OUTBOX)}
+    counts = {t: totals.get(t, 0) for t in (*TABLES, *STOCK_TABLES, OUTBOX)}
     if step is None:
         return RunResult(run_id, counts, written, skipped, published)
     updated = {t: totals.get(f"{t}_updated", 0) for t in UPDATED}

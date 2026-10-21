@@ -3,6 +3,7 @@
 import os
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 import psycopg
@@ -72,11 +73,12 @@ def test_cli_generate_smoke(
 
 def test_chunk_ledger_matches_rows(aconn: psycopg.Connection, small_cfg: config.Config) -> None:
     result = load.run(aconn, small_cfg, "smoke")
-    assert result.chunks_written == 9 and result.chunks_skipped == 0  # 1+1+2+1+4
+    assert result.chunks_written == 11 and result.chunks_skipped == 0  # 1+1+2+1+1+1+4
     ledger: dict[str, int] = dict(aconn.execute("SELECT entity, sum(row_count) FROM generator_meta.generation_chunks"
                                 " GROUP BY 1").fetchall())
-    assert ledger == {"sellers": 20, "categories": 40, "customers": 500, "products": 200, "orders": SMOKE_ORDERS}
-    actual = {t: one(aconn, f"SELECT count(*) FROM commerce.{t}") for t in load.TABLES}
+    assert ledger == {"sellers": 20, "categories": 40, "customers": 500, "products": 200, "warehouses": 3,
+                      "inventory": 200, "orders": SMOKE_ORDERS}
+    actual = {t: one(aconn, f"SELECT count(*) FROM commerce.{t}") for t in (*load.TABLES, *load.STOCK_TABLES)}
     actual[load.OUTBOX] = one(aconn, "SELECT count(*) FROM integration.outbox_events")
     assert result.counts == actual  # child tables too, from the ledger's table_rows
 
@@ -112,8 +114,9 @@ def test_failure_leaves_only_whole_chunks_and_rerun_completes_identically(
 
     real = generate.generate_chunk
 
-    def boom(world: generate.World, entity: str, chunk_no: int, chunk_rows: int) -> generate.Chunk:
-        chunk = real(world, entity, chunk_no, chunk_rows)
+    def boom(world: generate.World, entity: str, chunk_no: int, chunk_rows: int,
+             window: tuple[datetime | None, datetime] | None = None) -> generate.Chunk:
+        chunk = real(world, entity, chunk_no, chunk_rows, window)
         if entity == "orders" and chunk_no == 2:
             # rows that would violate a CHECK mid-COPY: the whole chunk must roll back
             bad = chunk.tables["payment_attempts"][-1]._replace(amount=-1)  # type: ignore[attr-defined]
@@ -135,9 +138,9 @@ def test_failure_leaves_only_whole_chunks_and_rerun_completes_identically(
 
     monkeypatch.setattr(generate, "generate_chunk", real)
     run_id = str(one(c, "SELECT run_id FROM generator_meta.generation_runs"))
-    assert load.write_chunks(c, small_cfg, run_id, load.world_for(small_cfg, "smoke")) == (2, 7)
+    assert load.write_chunks(c, small_cfg, run_id, load.world_for(small_cfg, "smoke")) == (2, 9)
     assert digest(c) == expected
-    assert load.write_chunks(c, small_cfg, run_id, load.world_for(small_cfg, "smoke")) == (0, 9)
+    assert load.write_chunks(c, small_cfg, run_id, load.world_for(small_cfg, "smoke")) == (0, 11)
     assert digest(c) == expected
 
 

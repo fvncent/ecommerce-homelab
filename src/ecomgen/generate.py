@@ -15,10 +15,18 @@ Orders are placed in ID order, so the orders that exist at T are 1..orders_by(T)
 inserts the orders placed in it and updates earlier ones that changed (`step_chunk`); stepping to clock_end in any
 number of steps gives exactly the rows `generate` writes ([clock_start, clock_end)).
 
+Inventory (data version 6): each product is stocked in 1-3 warehouses; an order line is filled from the one in the
+customer's region (else the product's first). Stock moves only through append-only inventory_movements: an opening
+RECEIPT before clock_start, weekly REPLENISHMENTs, and RESERVE / RELEASE / SHIP at the order's CONFIRMED / CANCELLED
+(after confirmation) / SHIPPED times. An inventory row is the sum of its movements. The opening quantity covers the
+cell's worst point over the whole clock (one pass over every order, `_openings`), so on_hand - reserved is never
+negative as of any time, whatever steps the clock takes.
+
 Portability: only rng.random() (Mersenne Twister, platform-independent) with integer/Decimal arithmetic; no
 float transcendental functions, whose last-bit results can differ between libm implementations.
 """
 
+import functools
 import hashlib
 import json
 import random
@@ -30,8 +38,9 @@ from typing import NamedTuple, TypeVar
 
 from ecomgen.config import Config
 
-ENTITY_ORDER = ("sellers", "categories", "customers", "products", "orders")
-MASTER_ENTITIES = tuple(e for e in ENTITY_ORDER if e != "orders")  # static: all created before clock_start
+# inventory: stock movements per product (receipts, replenishments); its chunks are written per clock step too
+ENTITY_ORDER = ("sellers", "categories", "customers", "products", "warehouses", "inventory", "orders")
+MASTER_ENTITIES = ("sellers", "categories", "customers", "products", "warehouses")  # static: created before clock_start
 MAX_LINES = 5
 MAX_ATTEMPTS = 3
 # Bump whenever generated rows or files change for the same inputs (the golden tests are keyed by it): resume
@@ -41,7 +50,8 @@ MAX_ATTEMPTS = 3
 # 4: clock-step windows are [previous, as_of) (were (previous, as_of]): a record at exactly a step's as_of moves to
 #    the next step. One-shot output is unchanged unless a record falls exactly on clock_end (none in the goldens).
 # 5: outbox_events (one per order / payment state transition); the other rows and the files are unchanged.
-DATA_VERSION = 5
+# 6: warehouses and inventory_movements (inventory is their sum); the other rows and the files are unchanged.
+DATA_VERSION = 6
 OUTBOX_SCHEMA_VERSION = 1  # payload shape of outbox_events
 # The state machines _lifecycle follows (migration 0009 enforces the same pairs): (from, to) per aggregate type.
 ORDER_TRANSITIONS = frozenset({("CREATED", "CONFIRMED"), ("CREATED", "CANCELLED"), ("CONFIRMED", "CANCELLED"),
@@ -60,6 +70,10 @@ CENT = Decimal("0.01")
 # or before placed_at + LIFECYCLE_MAX, so as of any later time it is final and a clock step only revisits orders
 # placed at or after previous - LIFECYCLE_MAX.
 LIFECYCLE_MAX = timedelta(seconds=120 + 2 * (90 + 600) + 60 + 21_600 + 259_200 + 518_400)
+REGIONS = ("NA", "EU", "APAC")  # warehouse N is in REGIONS[(N - 1) % 3]
+COUNTRY_REGION = {"US": "NA", "CA": "NA", "GB": "EU", "DE": "EU", "FR": "EU", "AU": "APAC"}
+RESTOCK_EVERY = timedelta(days=7)
+UNITS_PER_100_ORDERS = 263  # expected units per order x 100: 1.88 lines x 1.4 units; sizes replenishments
 
 T = TypeVar("T")
 
@@ -161,6 +175,53 @@ class OutboxEvent(NamedTuple):
     run_id: str = ""  # lineage: the run (clock step) that wrote it, set by the loader
 
 
+class Warehouse(NamedTuple):
+    warehouse_id: str
+    name: str
+    region: str
+    capacity: int  # nominal units; not enforced against stock
+    created_at: datetime
+    updated_at: datetime
+
+
+class InventoryMovement(NamedTuple):
+    """One change of a warehouse's stock of a product; inventory (on_hand, reserved) is the sum of the deltas."""
+    movement_id: str  # mov_rcv_<wh>_<prd> | mov_rpl_<wh>_<prd>_<j> | mov_<order_item_id>_rsv|rel|shp
+    warehouse_id: str
+    product_id: str
+    movement_type: str  # RECEIPT | REPLENISHMENT | RESERVE | RELEASE | SHIP
+    quantity: int
+    on_hand_delta: int
+    reserved_delta: int
+    occurred_at: datetime
+    order_item_id: str | None
+    run_id: str = ""  # lineage, set by the loader
+
+
+class _Draws(NamedTuple):
+    placed: datetime
+    customer: Customer
+    items: list[OrderItem]
+    lines: list[tuple[OrderItem, int]]  # each item with the warehouse number it ships from
+    subtotal: Decimal
+    discount: Decimal
+    tax: Decimal
+    shipping: Decimal
+    total: Decimal
+    timeline: "_Timeline"
+
+
+# movement type -> (on_hand, reserved) delta per unit
+MOVE_DELTAS = {"RECEIPT": (1, 0), "REPLENISHMENT": (1, 0), "RESERVE": (0, 1), "RELEASE": (0, -1), "SHIP": (-1, -1)}
+
+
+def _move(movement_id: str, w: int, product_id: str, kind: str, qty: int, at: datetime,
+          order_item_id: str | None = None) -> InventoryMovement:
+    on_hand, reserved = MOVE_DELTAS[kind]
+    return InventoryMovement(movement_id, f"wh_{w}", product_id, kind, qty, on_hand * qty, reserved * qty, at,
+                             order_item_id)
+
+
 def _payload(**fields: object) -> str:
     return json.dumps(fields, sort_keys=True, separators=(",", ":"))
 
@@ -247,6 +308,7 @@ class World:
     products: int
     orders: int
     clickstream_events: int = 0  # browsing events in the clickstream feed (feeds.py), besides one per order
+    warehouses: int = 3
 
     def __post_init__(self) -> None:
         for name in ("clock_start", "clock_end"):
@@ -255,7 +317,7 @@ class World:
                 raise GenerationError(f"{name} must be a UTC timestamp, got {t!r}")
         if self.clock_end <= self.clock_start:
             raise GenerationError("clock_end must be after clock_start")
-        for name in ("sellers", "customers", "products", "orders"):
+        for name in ("sellers", "customers", "products", "orders", "warehouses"):
             if getattr(self, name) < 1:
                 raise GenerationError(f"{name} must be >= 1")
         if self.clickstream_events < 0:
@@ -266,11 +328,13 @@ class World:
         g = cfg.generator
         c = g.counts
         return cls(g.seed, g.clock_start, g.clock_end, c["sellers"], c["customers"], c["products"], c["orders"],
-                   c["clickstream_events"])
+                   c["clickstream_events"], c["warehouses"])
 
     def count(self, entity: str) -> int:
         if entity == "categories":
             return len(CATEGORIES)
+        if entity == "inventory":
+            return self.products  # chunked by product
         if entity not in ENTITY_ORDER:
             raise GenerationError(f"unknown entity {entity!r}")
         n: int = getattr(self, entity)
@@ -310,6 +374,44 @@ class World:
         return Product(f"prd_{n}", seller.seller_id, category.category_id, name, price, CURRENCY, active,
                        created, _between(rng, created, self.clock_start))
 
+    def warehouse(self, n: int) -> Warehouse:
+        rng = _rng(self.seed, "warehouses", n)
+        created = _between(rng, self.clock_start - MASTER_DATA_HISTORY, self.clock_start)
+        region = REGIONS[(n - 1) % len(REGIONS)]
+        return Warehouse(f"wh_{n}", f"{region} Fulfilment Center {n}", region, _int(rng, 50, 200) * 1000, created,
+                         _between(rng, created, self.clock_start))
+
+    def stocked_at(self, n: int) -> tuple[int, ...]:
+        """Warehouses stocking product N (1-3 consecutive numbers, so mostly different regions); first = primary."""
+        rng = _rng(self.seed, "stock", n)
+        k = min(self.warehouses, _pick(rng, ((1, 60), (2, 30), (3, 10))))
+        first = _int(rng, 1, self.warehouses)
+        return tuple((first - 1 + i) % self.warehouses + 1 for i in range(k))
+
+    def fulfils(self, product: int, country: str) -> int:
+        """The warehouse an order line ships from: the product's one in the customer's region, else its primary."""
+        stocked = self.stocked_at(product)
+        region = COUNTRY_REGION[country]
+        return next((w for w in stocked if REGIONS[(w - 1) % len(REGIONS)] == region), stocked[0])
+
+    def restock_times(self, w: int) -> list[datetime]:
+        """Warehouse W's replenishment deliveries in [clock_start, clock_end): weekly, staggered by warehouse."""
+        t = self.clock_start + timedelta(days=(w - 1) % 7, hours=6)
+        out = []
+        while t < self.clock_end:
+            out.append(t)
+            t += RESTOCK_EVERY
+        return out
+
+    def restock(self, w: int, product: int) -> tuple[int, list[int]]:
+        """(opening buffer, quantity of each of restock_times(w)) for the cell; 0 = no delivery that week. Sized
+        around the expected weekly demand per stocking warehouse (integer arithmetic only)."""
+        rng = _rng(self.seed, "restock", (product - 1) * self.warehouses + w)
+        span = int((self.clock_end - self.clock_start).total_seconds())
+        weekly = -(-self.orders * UNITS_PER_100_ORDERS * int(RESTOCK_EVERY.total_seconds())
+                   // (100 * span * self.products * len(self.stocked_at(product))))
+        return _int(rng, 1, 2 * weekly), [_int(rng, 0, 2 * weekly) for _ in self.restock_times(w)]
+
     def _placed(self, rng: random.Random, n: int) -> datetime:
         """Order N sits in slot N of the window (integer seconds), so placed_at never decreases with N."""
         span = int((self.clock_end - self.clock_start).total_seconds())
@@ -341,17 +443,36 @@ class World:
         return self.order_history(n, ends)[0]
 
     def order_history(self, n: int, ends: tuple[datetime, ...], window: tuple[datetime | None, datetime] | None = None
-                      ) -> tuple[list[tuple[Order, list[OrderItem], list[PaymentAttempt]]], list[OutboxEvent]]:
-        """order_at, plus the outbox events of the transitions in window [start, end) (start None: since placement;
-        window None: none). Events and states come from the same timeline, so they always agree."""
+                      ) -> tuple[list[tuple[Order, list[OrderItem], list[PaymentAttempt]]], list[OutboxEvent],
+                                 list[InventoryMovement]]:
+        """order_at, plus the outbox events and inventory movements of the transitions in window [start, end) (start
+        None: since placement; window None: none). All come from the same timeline, so they always agree."""
+        d = self._draws(n)
+        for end in ends:
+            if d.placed >= end:
+                raise GenerationError(f"order {n} is placed at {d.placed.isoformat()}, not before {end.isoformat()}")
+        oid = f"ord_{n}"
+        out = []
+        for end in ends:
+            status, updated, payments = d.timeline.state_at(end, n, d.total)
+            out.append((Order(oid, d.customer.customer_id, d.placed, status, CURRENCY, d.subtotal, d.discount, d.tax,
+                              d.shipping, d.total, updated), d.items, payments))
+        if window is None:
+            return out, [], []
+        def placed_payload() -> dict[str, object]:
+            return {"customer_id": d.customer.customer_id, "currency": CURRENCY, "subtotal": str(d.subtotal),
+                    "discount": str(d.discount), "tax": str(d.tax), "shipping": str(d.shipping), "total": str(d.total),
+                    "items": [{"order_item_id": i.order_item_id, "product_id": i.product_id, "quantity": i.quantity,
+                               "unit_price": str(i.unit_price), "line_total": str(i.line_total)} for i in d.items]}
+        return out, d.timeline.events(window, n, d.total, placed_payload), d.timeline.moves(window, d.lines)
+
+    def _draws(self, n: int) -> "_Draws":
+        """Every draw of order N, in its RNG's order (placement, customer, lines, lifecycle)."""
         if not 1 <= n <= self.orders:
             raise GenerationError(f"order {n} out of range 1..{self.orders}")
         rng = _rng(self.seed, "orders", n)
         oid = f"ord_{n}"
         placed = self._placed(rng, n)
-        for end in ends:
-            if placed >= end:
-                raise GenerationError(f"order {n} is placed at {placed.isoformat()}, not before {end.isoformat()}")
 
         found = _probe(rng, self.customers, self.customer, lambda c: c.status == "ACTIVE", set())
         if found is None:
@@ -359,6 +480,7 @@ class World:
         customer = found[1]
 
         items: list[OrderItem] = []
+        lines: list[tuple[OrderItem, int]] = []
         used: set[int] = set()
         tax_rate = COUNTRY_TAX[customer.country]
         for line_no in range(1, _pick(rng, ((1, 50), (2, 25), (3, 15), (4, 7), (5, 3))) + 1):
@@ -374,6 +496,7 @@ class World:
             tax = _money((gross - discount) * tax_rate)
             items.append(OrderItem(f"itm_{(n - 1) * MAX_LINES + line_no}", oid, line_no, product.product_id,
                                    qty, product.price, discount, tax, gross - discount + tax))
+            lines.append((items[-1], self.fulfils(found_p[0], customer.country)))  # no draw: other rows unchanged
         if not items:
             raise GenerationError("no active products to order")
 
@@ -381,22 +504,8 @@ class World:
         discount = sum((i.discount for i in items), Decimal("0.00"))
         tax = sum((i.tax for i in items), Decimal("0.00"))
         shipping = Decimal("0.00") if subtotal - discount >= FREE_SHIPPING_FROM else SHIPPING_FEE
-        total = subtotal - discount + tax + shipping
-
-        timeline = self._lifecycle(rng, placed)
-        out = []
-        for end in ends:
-            status, updated, payments = timeline.state_at(end, n, total)
-            out.append((Order(oid, customer.customer_id, placed, status, CURRENCY, subtotal, discount, tax, shipping,
-                              total, updated), items, payments))
-        if window is None:
-            return out, []
-        def placed_payload() -> dict[str, object]:
-            return {"customer_id": customer.customer_id, "currency": CURRENCY, "subtotal": str(subtotal),
-                    "discount": str(discount), "tax": str(tax), "shipping": str(shipping), "total": str(total),
-                    "items": [{"order_item_id": i.order_item_id, "product_id": i.product_id, "quantity": i.quantity,
-                               "unit_price": str(i.unit_price), "line_total": str(i.line_total)} for i in items]}
-        return out, timeline.events(window, n, total, placed_payload)
+        return _Draws(placed, customer, items, lines, subtotal, discount, tax, shipping,
+                      subtotal - discount + tax + shipping, self._lifecycle(rng, placed))
 
     def _lifecycle(self, rng: random.Random, placed: datetime) -> "_Timeline":
         """Simulate the whole order + payment timeline (every draw, always); cut it at any time with state_at."""
@@ -490,6 +599,19 @@ class _Timeline:
                                      {"from": states[seq - 2][0], "to": state, **money}))
         return out
 
+    def moves(self, window: tuple[datetime | None, datetime],
+              lines: list[tuple[OrderItem, int]]) -> list[InventoryMovement]:
+        """Each line's stock movements in window [start, end): RESERVE when the order is confirmed, then RELEASE if it
+        is cancelled or SHIP when it ships. An order never confirmed (payment failed) reserves nothing."""
+        start, end = window
+        at = dict(self.stages)
+        if "CONFIRMED" not in at:
+            return []
+        steps = [(kind, tag, at[status]) for status, kind, tag in (("CONFIRMED", "RESERVE", "rsv"),
+                 ("CANCELLED", "RELEASE", "rel"), ("SHIPPED", "SHIP", "shp")) if status in at]
+        return [_move(f"mov_{i.order_item_id}_{tag}", w, i.product_id, kind, i.quantity, t, i.order_item_id)
+                for i, w in lines for kind, tag, t in steps if (start is None or t >= start) and t < end]
+
 
 def _probe(
     rng: random.Random, count: int, make: Callable[[int], T], ok: Callable[[T], bool], exclude: set[int]
@@ -529,14 +651,65 @@ class Chunk:
     tables: dict[str, list[tuple[object, ...]]]  # table name -> rows; orders also carry items + payments
 
 
+@functools.lru_cache(maxsize=1)
+def _openings(world: World) -> dict[tuple[int, str], int]:
+    """Opening stock per (warehouse, product id): enough that on_hand - reserved >= 0 as of any time, plus the cell's
+    buffer. As of a time in (delivery j, delivery j+1], at most the units reserved before delivery j+1 are out and
+    exactly deliveries 1..j are in; the opening covers the worst j. One pass over every order (each step's chunks
+    write replenishments before reservations, so a committed state is never below this bound either).
+    shortcut: keeps every cell's weekly reserved units in memory (~3k cells x 5 weeks at 10k orders); stream by week
+    if clocks of many months with large catalogs make that big."""
+    times = {w: world.restock_times(w) for w in range(1, world.warehouses + 1)}
+    weekly: dict[tuple[int, str], dict[int, int]] = {}
+    for n in range(1, world.orders + 1):
+        d = world._draws(n)
+        confirmed = dict(d.timeline.stages).get("CONFIRMED")
+        if confirmed is None:
+            continue
+        for item, w in d.lines:
+            week = sum(1 for t in times[w] if t <= confirmed)  # deliveries at or before the reservation
+            cell = weekly.setdefault((w, item.product_id), {})
+            cell[week] = cell.get(week, 0) + item.quantity
+    out = {}
+    for pn in range(1, world.products + 1):
+        for w in world.stocked_at(pn):
+            buffer, deliveries = world.restock(w, pn)
+            weeks = weekly.get((w, f"prd_{pn}"), {})
+            need = reserved = delivered = 0
+            for j in range(len(deliveries) + 1):
+                reserved += weeks.get(j, 0)
+                need = max(need, reserved - delivered)
+                delivered += deliveries[j] if j < len(deliveries) else 0
+            out[(w, f"prd_{pn}")] = need + buffer
+    return out
+
+
+def _stock(world: World, ns: range, window: tuple[datetime | None, datetime]) -> list[InventoryMovement]:
+    """The receipts (first window only: start None) and replenishments in window [start, end) of products ns."""
+    start, end = window
+    moves = []
+    for pn in ns:
+        pid = f"prd_{pn}"
+        for w in world.stocked_at(pn):
+            if start is None:
+                received = max(world.product(pn).created_at, world.warehouse(w).created_at)
+                moves.append(_move(f"mov_rcv_wh_{w}_{pid}", w, pid, "RECEIPT", _openings(world)[(w, pid)], received))
+            for j, (t, qty) in enumerate(zip(world.restock_times(w), world.restock(w, pn)[1]), 1):
+                if qty and (start is None or t >= start) and t < end:
+                    moves.append(_move(f"mov_rpl_wh_{w}_{pid}_{j}", w, pid, "REPLENISHMENT", qty, t))
+    return moves
+
+
 def chunk_count(world: World, entity: str, chunk_rows: int) -> int:
     if chunk_rows < 1:
         raise GenerationError(f"chunk_rows must be >= 1, got {chunk_rows}")
     return -(-world.count(entity) // chunk_rows)
 
 
-def generate_chunk(world: World, entity: str, chunk_no: int, chunk_rows: int) -> Chunk:
-    """Rows for entity numbers [chunk_no*chunk_rows + 1, ...]; memory is bounded by chunk_rows."""
+def generate_chunk(world: World, entity: str, chunk_no: int, chunk_rows: int,
+                   window: tuple[datetime | None, datetime] | None = None) -> Chunk:
+    """Rows for entity numbers [chunk_no*chunk_rows + 1, ...]; memory is bounded by chunk_rows. window: the clock step
+    of an inventory chunk (default: the whole clock)."""
     total = world.count(entity)
     if not 0 <= chunk_no < chunk_count(world, entity, chunk_rows):
         raise GenerationError(f"{entity} chunk {chunk_no} out of range for {total} rows / {chunk_rows} per chunk")
@@ -546,17 +719,23 @@ def generate_chunk(world: World, entity: str, chunk_no: int, chunk_rows: int) ->
     tables: dict[str, list[tuple[object, ...]]]
     if entity == "categories":
         tables = {"categories": list(CATEGORIES[first - 1:last])}
+    elif entity == "inventory":
+        tables = {"inventory_movements": list(_stock(world, ns, window or (None, world.clock_end)))}
     elif entity == "orders":
-        tables = {"orders": [], "order_items": [], "payment_attempts": [], "outbox_events": []}
-        for n in ns:  # tables in FK order: orders, their items and payments, then the events about them
-            ((order, items, payments),), events = world.order_history(n, (world.clock_end,), (None, world.clock_end))
+        tables = {"orders": [], "order_items": [], "payment_attempts": [], "outbox_events": [],
+                  "inventory_movements": []}
+        for n in ns:  # tables in FK order: orders, their items and payments, then the events and stock moves
+            ((order, items, payments),), events, moves = world.order_history(n, (world.clock_end,),
+                                                                            (None, world.clock_end))
             tables["orders"].append(order)
             tables["order_items"].extend(items)
             tables["payment_attempts"].extend(payments)
             tables["outbox_events"].extend(events)
+            tables["inventory_movements"].extend(moves)
     else:
         make: Callable[[int], tuple[object, ...]] = {
             "sellers": world.seller, "customers": world.customer, "products": world.product,
+            "warehouses": world.warehouse,
         }[entity]
         tables = {entity: [make(n) for n in ns]}
     return Chunk(entity, chunk_no, first, last, tables)
@@ -606,7 +785,7 @@ class StepChunk:
     chunk_no: int
     first: int  # order numbers first..last inclusive
     last: int
-    inserts: dict[str, list[tuple[object, ...]]]  # orders, order_items, payment_attempts (new rows)
+    inserts: dict[str, list[tuple[object, ...]]]  # orders, order_items, payment_attempts, inventory_movements
     order_updates: list[tuple[Order, Order]]  # (as of previous, as of as_of): status/updated_at changed
     payment_updates: list[tuple[PaymentAttempt, PaymentAttempt]]  # likewise for state/updated_at
     events: list[OutboxEvent]  # every transition in [previous, as_of) of these orders and their payments
@@ -625,22 +804,26 @@ def step_chunk(world: World, plan: StepPlan, chunk_no: int, chunk_rows: int) -> 
         raise GenerationError(f"step chunk {chunk_no} out of range for {len(plan.orders)} orders / {chunk_rows} "
                               "per chunk")
     sub = plan.orders[chunk_no * chunk_rows:(chunk_no + 1) * chunk_rows]
-    inserts: dict[str, list[tuple[object, ...]]] = {"orders": [], "order_items": [], "payment_attempts": []}
+    inserts: dict[str, list[tuple[object, ...]]] = {"orders": [], "order_items": [], "payment_attempts": [],
+                                                    "inventory_movements": []}
     order_updates: list[tuple[Order, Order]] = []
     payment_updates: list[tuple[PaymentAttempt, PaymentAttempt]] = []
     events: list[OutboxEvent] = []
     window = (plan.previous, plan.as_of)
     for n in sub:
         if n > plan.known:
-            ((order, items, payments),), new = world.order_history(n, (plan.as_of,), window)
+            ((order, items, payments),), new, moves = world.order_history(n, (plan.as_of,), window)
             inserts["orders"].append(order)
             inserts["order_items"].extend(items)
             inserts["payment_attempts"].extend(payments)
+            inserts["inventory_movements"].extend(moves)
             events += new
             continue
         assert plan.previous is not None
-        ((before, _, earlier), (order, _, payments)), new = world.order_history(n, (plan.previous, plan.as_of), window)
+        ((before, _, earlier), (order, _, payments)), new, moves = world.order_history(
+            n, (plan.previous, plan.as_of), window)
         events += new
+        inserts["inventory_movements"].extend(moves)
         if (before.status, before.updated_at) != (order.status, order.updated_at):
             order_updates.append((before, order))
         old = {p.attempt_no: p for p in earlier}

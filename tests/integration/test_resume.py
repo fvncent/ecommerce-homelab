@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 import psycopg
@@ -27,10 +28,10 @@ CRASH = """
 import os, signal, sys, psycopg
 from ecomgen import config, generate, load
 real = generate.generate_chunk
-def crash(world, entity, chunk_no, chunk_rows):
+def crash(world, entity, chunk_no, chunk_rows, window=None):
     if entity == "orders" and chunk_no == 2:
         os.kill(os.getpid(), signal.SIGKILL)
-    return real(world, entity, chunk_no, chunk_rows)
+    return real(world, entity, chunk_no, chunk_rows, window)
 generate.generate_chunk = crash
 with psycopg.connect(sys.argv[2], autocommit=True) as conn:
     load.run(conn, config.load(sys.argv[1]), "smoke")
@@ -87,7 +88,7 @@ def test_resume_after_hard_crash(
         load.run(c, small_cfg, "smoke")  # generate still refuses and points to resume
 
     assert main(["resume", str(cfg_path)]) == 0
-    assert "2 chunks written, 7 already committed" in capsys.readouterr().out
+    assert "2 chunks written, 9 already committed" in capsys.readouterr().out
     assert digest(c) == expected  # identical to an uninterrupted run: no duplicates, nothing missing
     assert all(r.ok for r in validate.validate(c, small_cfg)[1])
     st = load.status(c, small_cfg)
@@ -103,10 +104,11 @@ def test_resume_after_failed_run(
     c = migrated(small_cfg)
     real = generate.generate_chunk
 
-    def boom(world: generate.World, entity: str, chunk_no: int, chunk_rows: int) -> generate.Chunk:
+    def boom(world: generate.World, entity: str, chunk_no: int, chunk_rows: int,
+             window: tuple[datetime | None, datetime] | None = None) -> generate.Chunk:
         if entity == "orders" and chunk_no == 3:
             raise RuntimeError("simulated failure")
-        return real(world, entity, chunk_no, chunk_rows)
+        return real(world, entity, chunk_no, chunk_rows, window)
 
     monkeypatch.setattr(generate, "generate_chunk", boom)
     with pytest.raises(RuntimeError):
@@ -116,8 +118,9 @@ def test_resume_after_failed_run(
 
     monkeypatch.setattr(generate, "generate_chunk", real)
     result = load.resume(c, small_cfg)
-    assert result is not None and (result.chunks_written, result.chunks_skipped) == (1, 8)
-    assert result.counts == {t: one(c, f"SELECT count(*) FROM commerce.{t}") for t in load.TABLES} | {
+    assert result is not None and (result.chunks_written, result.chunks_skipped) == (1, 10)
+    assert result.counts == {t: one(c, f"SELECT count(*) FROM commerce.{t}")
+                             for t in (*load.TABLES, *load.STOCK_TABLES)} | {
         load.OUTBOX: one(c, "SELECT count(*) FROM integration.outbox_events")}
     assert digest(c) == expected
     row = c.execute("SELECT state, error, finished_at IS NOT NULL FROM generator_meta.generation_runs").fetchone()

@@ -133,6 +133,13 @@ def has_outbox(conn: psycopg.Connection, cfg: Config) -> bool:
     return has_table(conn, cfg, "outbox_events", cfg.postgres.integration_schema)
 
 
+def has_migration(conn: psycopg.Connection, cfg: Config, version: int) -> bool:
+    """True if this schema set (its metadata schema) has applied migration `version`."""
+    return has_table(conn, cfg, "schema_migrations") and conn.execute(
+        q(cfg, "SELECT EXISTS (SELECT 1 FROM {meta}.schema_migrations WHERE version = %s)"),
+        (version,)).fetchone() == (True,)
+
+
 def clock_columns(conn: psycopg.Connection, cfg: Config) -> str:
     """SQL select list `previous_as_of, as_of` of generation_runs; typed NULLs before migration 0008 (an untyped NULL
     in a subquery becomes text, which can't be compared or coalesced with a timestamp)."""

@@ -1,7 +1,8 @@
 # Practice dataset runbook (for building your pipeline)
 
 A step-by-step setup of a **practice dataset**: a source system your ETL / ELT pipeline can read from. You get an
-e-commerce OLTP database that changes day by day, a transactional outbox (change log), and daily CSV / JSONL files.
+e-commerce OLTP database that changes day by day, a transactional outbox (change log), warehouse stock with its
+movement log, and daily CSV / JSONL files.
 Everything runs on the Ubuntu homelab; you type the commands yourself. Each step says whether it only **reads** or
 **changes** something.
 
@@ -14,7 +15,7 @@ same layout (an older dataset in `commerce` stayed byte-identical); the first Ub
 | | Practice dataset (this runbook) | Release benchmark (leave alone) |
 |---|---|---|
 | Database | `ecommerce_oltp` (owner `ecomgen_practice`) | `ecommerce_homelab_smoke`, `_test`, `_crash` (owner `ecomgen_app`) |
-| Schemas | `practice_commerce` (tables), `practice_integration` (outbox), `practice_meta` (run ledger) | `commerce`, `integration`, `generator_meta` in its own databases |
+| Schemas | `practice_commerce` (tables, inventory), `practice_integration` (outbox), `practice_meta` (run ledger) | `commerce`, `integration`, `generator_meta` in its own databases |
 | Files | `/srv/homelab/ecommerce/data/practice-pipeline` | `/srv/homelab/ecommerce/data/` (benchmark subfolders) |
 | Config / env | `/srv/homelab/ecommerce/practice/pipeline.yaml`, `pipeline.env` | set by `scripts/homelab_benchmark.sh` |
 
@@ -30,6 +31,8 @@ and its own data folder.
 | Master data | `practice_commerce.sellers`, `categories`, `customers`, `products` | written once (first step) |
 | Orders | `practice_commerce.orders`, `order_items`, `payment_attempts` | new orders every day; `status` / `state` and `updated_at` change as orders progress |
 | Outbox (change log) | `practice_integration.outbox_events` | one append-only row per state change, same transaction as the row |
+| Warehouses | `practice_commerce.warehouses` | written once (first step) |
+| Stock | `practice_commerce.inventory` (current), `inventory_movements` (append-only log) | opening receipts in the first step; weekly deliveries; reserve / release / ship as orders progress (v0.5.0 on) |
 | Settlement files | `data/practice-pipeline/source_feeds/payment_settlement/date=D/*.csv` | one set per day a payment settles |
 | Clickstream files | `data/practice-pipeline/clickstream/date=D/*.jsonl` | browsing + `order_placed` events per day |
 | Manifests | `data/practice-pipeline/manifests/run_id=R/manifest.json` | one per step: files, sha256, record counts, time window |
@@ -40,7 +43,8 @@ moves it forward: rows, outbox events and files of the window `[previous step, t
 
 ## Before you start
 
-Needs release **`v0.4.0-homelab`** or later (the outbox). Check on the server:
+Needs release **`v0.5.0-homelab`** or later (inventory; `v0.4.x` gives everything but warehouses and stock). Check
+on the server:
 
 ```bash
 cd /srv/homelab/projects/ecommerce-homelab && git describe --tags --always
@@ -52,12 +56,17 @@ touched; going back = `git checkout <old tag> && uv sync --frozen`):
 ```bash
 cd /srv/homelab/projects/ecommerce-homelab
 git fetch --tags origin
-git checkout v0.4.0-homelab
+git checkout v0.5.0-homelab
 uv sync --frozen
 git describe --tags --always
 ```
 
 Also confirm the NVMe is mounted (`findmnt /srv/homelab` shows `rw`).
+
+**A practice set you already started under `v0.4.x`** (data version 5) keeps working for reading, `status` and
+`validate`, but `v0.5.0` won't add days to it (`data_version … differ from the chain's`): a chain stays on the data
+version it started with. Either keep advancing it with `v0.4.1-homelab` checked out, or start a new set with its own
+three schema names and folder (see "Another dataset"; the same seed gives the same orders, now with stock).
 
 ## Step 1: config, data folder, connection file (changes: 3 new files / folders)
 
@@ -101,8 +110,8 @@ uv run ecomgen check-config $C
 uv run ecomgen init-db $C
 ```
 
-Expected: `config OK`; `applied: 0001_core_schema.sql, … 0009_outbox_events.sql` (all nine, into the new
-`practice_*` schemas only).
+Expected: `config OK`; `applied: 0001_core_schema.sql, … 0010_inventory.sql` (all ten, into the new `practice_*`
+schemas only).
 
 ## Step 3: the first business day (changes: the practice schemas and folder)
 
@@ -112,7 +121,7 @@ uv run ecomgen validate $C | tail -1
 ```
 
 Expected: `step run_… COMPLETED: clock start -> 2026-01-02T00:00:00+00:00`, `inserted sellers=100 categories=40
-customers=5000 products=2000 orders=…`; `24 passed, 0 failed`.
+customers=5000 products=2000 warehouses=3 orders=… inventory_movements=…`; `29 passed, 0 failed`.
 
 ## Step 4: one more day, any time you like (changes: the practice dataset)
 
@@ -157,6 +166,9 @@ sudo -u postgres psql -X -c '\password ecomgen_reader'
 | `order_items` | `order_item_id` (`order_id` FK) | arrive with their order; never change |
 | `payment_attempts` | `payment_id` (`order_id` FK) | `created_at` (new), `updated_at` (changed) |
 | `practice_integration.outbox_events` | `event_id` | `occurred_at`; per aggregate `aggregate_seq` |
+| `warehouses` | `warehouse_id` | static after the first step |
+| `inventory` | (`warehouse_id`, `product_id`) | `updated_at` (latest movement); a snapshot of current stock |
+| `inventory_movements` | `movement_id` | `occurred_at` (append-only; `order_item_id` for order movements) |
 
 **Watermark pattern** (what changed since your last load): take the previous step's `as_of` from
 `practice_meta.generation_runs` (or your own high-water mark) and select rows with `updated_at >= :watermark` (new and
@@ -180,6 +192,15 @@ FROM practice_integration.outbox_events
 WHERE occurred_at >= '2026-01-03T00:00:00Z' ORDER BY occurred_at, event_id LIMIT 20;
 ```
 
+**Stock.** `inventory` is the current state; `inventory_movements` is its log, so stock as of any past time is the
+sum of the movements before it, and `on_hand - reserved` (available) is never negative:
+
+```sql
+SELECT warehouse_id, sum(on_hand_delta) AS on_hand, sum(reserved_delta) AS reserved
+FROM practice_commerce.inventory_movements WHERE product_id = 'prd_42' AND occurred_at < '2026-01-03T00:00:00Z'
+GROUP BY 1 ORDER BY 1;
+```
+
 **Files.** Each day's files are under `date=YYYY-MM-DD` partitions. Read a step's manifest first: it lists every file
 with its `sha256`, size and record count, so your loader can verify before loading
 (`sha256sum <file>` must match). A file is never rewritten once published. To practise late or duplicated
@@ -195,7 +216,7 @@ uv run ecomgen replay-files $C --run-id "$R" --from 2026-01-02 --to 2026-01-02 -
 
 ```bash
 uv run ecomgen status $C          # latest step: state, clock window, progress (read-only)
-uv run ecomgen validate $C        # 24 checks: rows, ledger, outbox history, files (read-only)
+uv run ecomgen validate $C        # 29 checks: rows, ledger, outbox history, stock, files (read-only)
 psql "$ECOMMERCE_DATABASE_URL" -XAtc "SELECT count(*), max(as_of) FROM practice_meta.generation_runs"
 du -sh /srv/homelab/ecommerce/data/practice-pipeline
 ```
@@ -217,7 +238,8 @@ together and delete its data folder. Dropping only some of them leaves the other
 | `step run_… is RUNNING: finish it with ecomgen resume first` | the last step was interrupted: `uv run ecomgen resume $C` |
 | `a completed step already reached …` | that day is already done; nothing changed |
 | `… differ from the chain's …` | the config changed after the first step: restore it, or start another dataset |
-| `this schema predates the outbox (migration 0009)` | run `uv run ecomgen init-db $C` |
+| `this schema predates the outbox (migration 0009)` / `inventory (migration 0010)` | run `uv run ecomgen init-db $C` |
+| `data_version … differ from the chain's` | the set was started by an older release: see "Before you start" |
 | `integration schema … already holds outbox_events of another schema set` | give the config its own three schema names |
 | `as_of … is outside the simulation window` | the clock is past `2026-02-01`: the month is complete |
 | `event not found` in bash | a `!` inside double quotes; use the commands as written |

@@ -169,8 +169,56 @@ OUTBOX_CHECKS = (
         WHERE e.occurred_at < coalesce(r.previous_as_of, (r.resume_fields->'world'->>'clock_start')::timestamptz)
            OR e.occurred_at >= coalesce(r.as_of, (r.resume_fields->'world'->>'clock_end')::timestamptz)"""),
 )
+# Inventory (data version >= 6 with migration 0010). Ids, deltas per movement type and stock >= 0 at each commit are
+# constraints in the tables; these check the history as a whole.
+INVENTORY_SINCE = 6
+INVENTORY_CHECKS = (
+    Check("inventory_ledger_matches_tables", "ledger warehouses / inventory_movements totals (every run) equal the "
+          "table row counts", " UNION ALL ".join(f"""
+        SELECT '{t}: ledger ' || coalesce(l.n, 0) || ', table ' || c.n AS id
+        FROM (SELECT count(*) n FROM {{app}}.{t}) c,
+             (SELECT sum((table_rows->>'{t}')::bigint) n FROM {{meta}}.generation_chunks) l
+        WHERE coalesce(l.n, 0) <> c.n""" for t in load.STOCK_TABLES)),
+    Check("inventory_is_the_sum_of_movements", "each inventory row's on_hand, reserved and updated_at are the sums / "
+          "latest of its movements, and every row has movements", """
+        SELECT coalesce(i.warehouse_id || '/' || i.product_id, m.warehouse_id || '/' || m.product_id) AS id
+        FROM {app}.inventory i
+        FULL JOIN (SELECT warehouse_id, product_id, sum(on_hand_delta) h, sum(reserved_delta) r, max(occurred_at) t
+                   FROM {app}.inventory_movements GROUP BY 1, 2) m USING (warehouse_id, product_id)
+        WHERE (i.on_hand, i.reserved, i.updated_at) IS DISTINCT FROM (m.h, m.r, m.t)"""),
+    Check("movements_follow_order_history", "each order line has exactly a RESERVE at its order's confirmation, then "
+          "a RELEASE at a cancellation after it or a SHIP at shipping (times from the outbox), for its quantity", """
+        WITH expected AS (
+            SELECT i.order_item_id, i.product_id, i.quantity, e.occurred_at,
+                   CASE e.payload ->> 'to' WHEN 'CONFIRMED' THEN 'RESERVE' WHEN 'SHIPPED' THEN 'SHIP'
+                                           ELSE 'RELEASE' END AS movement_type
+            FROM {app}.order_items i JOIN {integration}.outbox_events e ON e.aggregate_id = i.order_id
+            WHERE e.event_type = 'OrderStatusChanged' AND (e.payload ->> 'to' IN ('CONFIRMED', 'SHIPPED')
+                  OR (e.payload ->> 'from' = 'CONFIRMED' AND e.payload ->> 'to' = 'CANCELLED'))),
+        actual AS (
+            SELECT order_item_id, product_id, quantity, occurred_at, movement_type FROM {app}.inventory_movements
+            WHERE order_item_id IS NOT NULL)
+        SELECT coalesce(x.order_item_id, a.order_item_id) || ' ' || coalesce(x.movement_type, a.movement_type) AS id
+        FROM expected x FULL JOIN actual a USING (order_item_id, movement_type)
+        WHERE (x.product_id, x.quantity, x.occurred_at) IS DISTINCT FROM (a.product_id, a.quantity, a.occurred_at)"""),
+    # Movements at one instant apply together (a reservation and a delivery at the same second may come in any order).
+    Check("stock_never_negative", "as of every movement time, each cell has on_hand >= reserved >= 0", """
+        SELECT warehouse_id || '/' || product_id || ' at ' || occurred_at AS id FROM (
+            SELECT warehouse_id, product_id, occurred_at,
+                   sum(sum(on_hand_delta)) OVER w AS h, sum(sum(reserved_delta)) OVER w AS r
+            FROM {app}.inventory_movements GROUP BY 1, 2, 3
+            WINDOW w AS (PARTITION BY warehouse_id, product_id ORDER BY occurred_at)) s
+        WHERE r < 0 OR h < r"""),
+    Check("movements_in_run_window", "each movement lies in the time window of the run (clock step) that wrote it: "
+          "[previous_as_of, as_of), the first step or a generate run from the opening receipts", """
+        SELECT m.movement_id AS id FROM {app}.inventory_movements m JOIN {meta}.generation_runs r USING (run_id)
+        WHERE m.occurred_at < coalesce(r.previous_as_of, '-infinity')
+           OR m.occurred_at >= coalesce(r.as_of, (r.resume_fields->'world'->>'clock_end')::timestamptz)
+           OR (m.movement_type = 'RECEIPT') <> (r.previous_as_of IS NULL AND m.occurred_at
+                                                < (r.resume_fields->'world'->>'clock_start')::timestamptz)"""),
+)
 # Step windows and browsing-session times last changed in data version 4, so a chain's files are checkable by this
-# release from that version on (5 only added the outbox).
+# release from that version on (5 only added the outbox, 6 inventory).
 CHAIN_FILES_SINCE = 4
 
 # Python-side checks on the files themselves; the query field is unused.
@@ -270,6 +318,9 @@ def validate(conn: psycopg.Connection, cfg: Config, run_id: str | None = None) -
                                         " FROM {meta}.generation_runs WHERE run_id = %s"), (run_id,)).fetchone()
             if db.has_outbox(conn, cfg) and version and (version[0] or 0) >= OUTBOX_SINCE:
                 results += [_run_check(conn, cfg, c, run_id) for c in OUTBOX_CHECKS]
+            if (db.has_table(conn, cfg, load.MOVEMENTS, cfg.postgres.application_schema) and version
+                    and (version[0] or 0) >= INVENTORY_SINCE):
+                results += [_run_check(conn, cfg, c, run_id) for c in INVENTORY_CHECKS]
             runs, as_of = _file_runs(conn, cfg, run_id)
             recorded = runs[0][1] if runs else {}
             published = recorded.get("feeds", {}).get("enabled") or []

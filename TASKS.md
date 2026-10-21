@@ -2,7 +2,8 @@
 
 ## Active
 - [ ] Optional, user-approved only: `init-db` (migration 0008) on `ecommerce_oltp` / benchmark DBs; dropping the disposable `ecomgen_v030_smoke` + `data/v030-*` when no longer wanted
-- [ ] 3D warehouses + inventory · 3E catch-up / `--follow` pacing
+- [ ] Phase 3D (branch `feat/inventory`, design approved 2026-10-20): `warehouses`, `inventory`, append-only `inventory_movements` (RECEIPT / weekly REPLENISHMENT / RESERVE / RELEASE / SHIP), one warehouse per line (customer region), opening stock sized so available >= 0 as of any time, deltas in the chunk transaction, migration 0010, DATA_VERSION 6, 5 validate checks; review, then release as `v0.5.0-homelab` after approval
+- [ ] 3E catch-up / `--follow` pacing
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 
 ## Next (Phase 1)
