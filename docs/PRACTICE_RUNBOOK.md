@@ -10,7 +10,7 @@ For the full reference (every command, all queries) see `docs/GENERATOR_USER_GUI
 `docs/FEEDS.md`. Rehearsed end to end on the Mac (2026-10-19, `feat/outbox`) in a throwaway PostgreSQL 18.6 with the
 same layout (an older dataset in `commerce` stayed byte-identical); the first Ubuntu run is yours. Re-rehearsed for
 inventory (2026-10-21, `feat/inventory`): a `practice2_*` set's first day inserts the same 323 orders / 636 items /
-404 payments / 1,756 events as before, plus 3 warehouses and 4,434 stock movements, `29 passed`; the reader grants
+404 payments / 1,756 events as before, plus 3 warehouses and 4,434 stock movements, `30 passed`; the reader grants
 below were run as written, with non-superuser `ecomgen_practice` / `ecomgen_reader` roles.
 
 ## What goes where (practice vs benchmark)
@@ -125,7 +125,7 @@ uv run ecomgen validate $C | tail -1
 
 Expected: `step run_… COMPLETED: clock start -> 2026-01-02T00:00:00+00:00`, `inserted sellers=100 categories=40
 customers=5000 products=2000 orders=323 … warehouses=3 inventory_movements=4434 outbox_events=1756` (default seed);
-`29 passed, 0 failed`.
+`30 passed, 0 failed`.
 
 ## Step 4: one more day, any time you like (changes: the practice dataset)
 
@@ -220,7 +220,7 @@ uv run ecomgen replay-files $C --run-id "$R" --from 2026-01-02 --to 2026-01-02 -
 
 ```bash
 uv run ecomgen status $C          # latest step: state, clock window, progress (read-only)
-uv run ecomgen validate $C        # 29 checks: rows, ledger, outbox history, stock, files (read-only)
+uv run ecomgen validate $C        # 30 checks: rows, ledger, outbox history, stock, files (read-only)
 psql "$ECOMMERCE_DATABASE_URL" -XAtc "SELECT count(*), max(as_of) FROM practice_meta.generation_runs"
 du -sh /srv/homelab/ecommerce/data/practice-pipeline
 ```

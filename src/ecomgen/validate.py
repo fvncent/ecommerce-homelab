@@ -172,6 +172,8 @@ OUTBOX_CHECKS = (
 # Inventory (data version >= 6 with migration 0010). Ids, deltas per movement type and stock >= 0 at each commit are
 # constraints in the tables; these check the history as a whole.
 INVENTORY_SINCE = 6
+_REGION_OF_COUNTRY = "CASE c.country " + " ".join(
+    f"WHEN '{country}' THEN '{region}'" for country, region in generate.COUNTRY_REGION.items()) + " END"
 INVENTORY_CHECKS = (
     Check("inventory_ledger_matches_tables", "ledger warehouses / inventory_movements totals (every run) equal the "
           "table row counts", " UNION ALL ".join(f"""
@@ -201,6 +203,20 @@ INVENTORY_CHECKS = (
         SELECT coalesce(x.order_item_id, a.order_item_id) || ' ' || coalesce(x.movement_type, a.movement_type) AS id
         FROM expected x FULL JOIN actual a USING (order_item_id, movement_type)
         WHERE (x.product_id, x.quantity, x.occurred_at) IS DISTINCT FROM (a.product_id, a.quantity, a.occurred_at)"""),
+    # The generator's rule, from generate.COUNTRY_REGION: a local warehouse when the product has one; which one
+    # otherwise (the product's primary) is not stored, so any warehouse stocking it passes then.
+    Check("movements_from_the_lines_warehouse", "each order line's movements are in one warehouse, in the "
+          "customer's region whenever the product is stocked there", f"""
+        SELECT l.order_item_id AS id FROM (
+            SELECT order_item_id, min(warehouse_id) AS warehouse_id, min(product_id) AS product_id,
+                   count(DISTINCT warehouse_id) AS n
+            FROM {{app}}.inventory_movements WHERE order_item_id IS NOT NULL GROUP BY 1) l
+        JOIN {{app}}.order_items i USING (order_item_id) JOIN {{app}}.orders o USING (order_id)
+        JOIN {{app}}.customers c USING (customer_id) JOIN {{app}}.warehouses w ON w.warehouse_id = l.warehouse_id
+        CROSS JOIN LATERAL (SELECT {_REGION_OF_COUNTRY} AS region) r
+        WHERE l.n > 1 OR (w.region IS DISTINCT FROM r.region AND EXISTS (
+            SELECT 1 FROM {{app}}.inventory s JOIN {{app}}.warehouses sw USING (warehouse_id)
+            WHERE s.product_id = l.product_id AND sw.region = r.region))"""),
     # Movements at one instant apply together (a reservation and a delivery at the same second may come in any order).
     Check("stock_never_negative", "as of every movement time, each cell has on_hand >= reserved >= 0", """
         SELECT warehouse_id || '/' || product_id || ' at ' || occurred_at AS id FROM (

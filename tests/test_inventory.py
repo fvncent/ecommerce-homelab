@@ -116,6 +116,9 @@ def test_receipts_open_every_cell_before_the_clock_and_replenishments_are_weekly
     receipts = {(m.warehouse_id, m.product_id): m for m in big if m.movement_type == "RECEIPT"}
     cells = {(f"wh_{w}", f"prd_{p}") for p in range(1, BIG.products + 1) for w in BIG.stocked_at(p)}
     assert set(receipts) == cells and all(m.quantity > 0 and m.occurred_at < START for m in receipts.values())
+    for (wh, prd), m in receipts.items():  # received once both the warehouse and the product exist
+        assert m.occurred_at == max(BIG.warehouse(int(wh.removeprefix("wh_"))).created_at,
+                                    BIG.product(int(prd.removeprefix("prd_"))).created_at)
     assert {(m.warehouse_id, m.product_id) for m in big} == cells  # every movement has its inventory row
     for m in big:
         if m.movement_type == "REPLENISHMENT":

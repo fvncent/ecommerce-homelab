@@ -124,6 +124,24 @@ INVENTORY_CORRUPTIONS = {
                                    WHERE (z.warehouse_id, z.product_id) = (p.warehouse_id, p.product_id)
                                      AND z.movement_type = 'REPLENISHMENT'));
         DROP TABLE pick""",
+    # a cancelled line (RESERVE + RELEASE, net zero) moved from its local warehouse to a non-local one stocking the
+    # product; inventory recomputed from the movements, so only the warehouse rule sees it
+    "movements_from_the_lines_warehouse": REPLICA + f"""
+        CREATE TEMP TABLE pick AS SELECT m.order_item_id, t.warehouse_id AS target
+        FROM commerce.inventory_movements m JOIN commerce.order_items i USING (order_item_id)
+        JOIN commerce.orders o USING (order_id) JOIN commerce.customers c USING (customer_id)
+        JOIN commerce.warehouses w ON w.warehouse_id = m.warehouse_id
+        JOIN commerce.inventory t ON t.product_id = m.product_id AND t.warehouse_id <> m.warehouse_id
+        JOIN commerce.warehouses tw ON tw.warehouse_id = t.warehouse_id
+        WHERE m.movement_type = 'RELEASE' AND w.region = {validate._REGION_OF_COUNTRY} AND tw.region <> w.region
+        ORDER BY 1, 2 LIMIT 1;
+        UPDATE commerce.inventory_movements m SET warehouse_id = p.target FROM pick p
+        WHERE m.order_item_id = p.order_item_id;
+        UPDATE commerce.inventory i SET on_hand = s.h, reserved = s.r, updated_at = s.t
+        FROM (SELECT warehouse_id, product_id, sum(on_hand_delta) h, sum(reserved_delta) r, max(occurred_at) t
+              FROM commerce.inventory_movements GROUP BY 1, 2) s
+        WHERE (i.warehouse_id, i.product_id) = (s.warehouse_id, s.product_id);
+        DROP TABLE pick""",
     # a delivery dated before the clock, where only opening receipts belong
     "movements_in_run_window": REPLICA + "UPDATE commerce.inventory_movements SET occurred_at = '2025-12-31Z'"
                                f" WHERE movement_id = {NOT_LATEST.format('REPLENISHMENT')}",
@@ -151,6 +169,17 @@ def test_outbox_corruption_is_caught_by_exactly_its_check(
     loaded.execute(OUTBOX_CORRUPTIONS[check].encode())
     loaded.execute("RESET session_replication_role")
     assert failing(loaded, small_cfg) == {check}
+
+
+def test_a_movement_quantity_unlike_its_lines_is_caught(loaded: psycopg.Connection, small_cfg: config.Config) -> None:
+    """A cancelled line's RESERVE and RELEASE both one unit larger: every cell's sums still hold, the line doesn't."""
+    loaded.execute((REPLICA + "UPDATE commerce.inventory_movements SET quantity = quantity + 1,"
+                    " reserved_delta = reserved_delta + sign(reserved_delta)::int WHERE order_item_id = (SELECT"
+                    " min(order_item_id) FROM commerce.inventory_movements WHERE movement_type = 'RELEASE')").encode())
+    assert loaded.execute("SELECT count(*) FROM commerce.inventory_movements WHERE quantity <> abs(reserved_delta)"
+                          " AND order_item_id IS NOT NULL").fetchone() == (0,)
+    loaded.execute("RESET session_replication_role")
+    assert failing(loaded, small_cfg) == {"movements_follow_order_history"}
 
 
 @pytest.mark.parametrize("check", sorted(INVENTORY_CORRUPTIONS))

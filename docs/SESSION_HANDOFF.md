@@ -36,9 +36,9 @@ user; on the Mac they auto-start with Docker Desktop (left alone).
   checked) then the movements, same transaction; every step writes its inventory chunks (replenishments) before its
   orders; `_require_loadable` needs migration 10 in the set's `schema_migrations` (`db.has_migration`);
   `recorded_world` defaults only fields added after the run's data version.
-- `validate.py`: 5 `INVENTORY_CHECKS` (ledger, inventory = sum of movements, movements follow the outbox history,
-  stock never negative as of any movement time, movements in run window) for data_version >= 6 with the table: 29
-  checks with both feeds. `status` lists only the entities a run planned or wrote.
+- `validate.py`: 6 `INVENTORY_CHECKS` (ledger, inventory = sum of movements, movements follow the outbox history,
+  line's warehouse (one, local when stocked locally), stock never negative as of any movement time, movements in
+  run window) for data_version >= 6 with the table: 30 checks with both feeds. `status` lists only the entities a run planned or wrote.
 - Bench: digest +3 lines (warehouses, inventory, movements without run_id); `digest_ok` 11; crash hook takes the
   window arg. `expected_mvp_digest.txt`: 8 lines unchanged + 3 new; feed references unchanged.
 - Docs: user guide section, data model, README, practice runbook (v0.5.0, older sets stay on their version, reader
@@ -50,6 +50,19 @@ user; on the Mac they auto-start with Docker Desktop (left alone).
 | 1 | `validate` crashed (malformed record) on any pre-v6 run with files: `recorded_world` required the new `warehouses` | defaults only for fields added after the run's data version (`WORLD_FIELD_SINCE`); required fields still refused; unit tests + DB test (fail on the old code); real v0.4.1 one-shot + 2-day chain validate 24/24 before and after `init-db`, rows and files byte-identical, advance refused |
 | 2 | runbook's "new practice set" left `ecomgen_reader` without access | grants as the set's owner (USAGE, SELECT ON ALL TABLES, ALTER DEFAULT PRIVILEGES), reader checks; `test_reader_role.py` runs the runbook's statements; rehearsed with non-superuser roles |
 | 3 | `stocked_at` recomputed per line | measured ~0.35 s of a 9.8 s 10k generate (~3.5%): deferred (TASKS), no cache |
+
+Independent passes (general-purpose agents with QA / data-reliability briefs, 2026-10-21). Data reliability: no
+must-fix; non-negativity held in 35 adversarial worlds x 4 step layouts x 2 chunk sizes and a double crash + resume;
+v0.4.1 datasets (git archive) behave as documented; validate at 100k orders (400k movements) 8.0 s. QA: 9 mutations.
+| # | Finding | Fix |
+|---|---|---|
+| R1 | validate never checked a line's warehouse (moved movements + adjusted rows passed) | check `movements_from_the_lines_warehouse` (one warehouse; local when stocked locally; primary not stored, so any stocking one otherwise); corruption test |
+| Q1 | `movements_in_run_window` bounds untested (mutations survived) | chain test shrinks step 3's start and step 2's end (replica mode past the chain FK) |
+| Q2 | movement quantity untested in `movements_follow_order_history` | corruption: a cancelled line's RESERVE + RELEASE one unit larger |
+| Q3 | `_has_rows` for the new tables untested | stray warehouse row → clean refusal, no run recorded |
+| Q4 | receipt time only guarded by the golden | unit test: receipt = max(warehouse, product created_at) |
+Mutations re-run with pytest exit codes: all of the above killed; the split-line clause (`n > 1`) has no isolated
+corruption (a split always moves reserved units, so the stock checks fire too).
 
 Verification so far: PG 17 446/0 and PG 18.6 446/0 before the fixes; benchmark 49/49 on PG 18.6 (references
 re-recorded, then verified); 10k: generate vs 31 daily steps identical in all 11 tables and both feeds, validate 29/29

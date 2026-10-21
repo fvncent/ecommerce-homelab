@@ -309,9 +309,11 @@ SELECT movement_id, movement_type, warehouse_id, product_id, quantity, occurred_
 WHERE occurred_at >= '2026-01-03T00:00:00Z' ORDER BY occurred_at, movement_id LIMIT 20;
 ```
 
-`validate` adds five checks for data-version-6 runs (29 for a run with both file feeds): ledger = rows, each inventory
-row is the sum of its movements, each order line's movements match its order's history in the outbox (times
-included), stock never negative as of any movement time, each movement in its run's window. Runs written before
+`validate` adds six checks for data-version-6 runs (30 for a run with both file feeds): ledger = rows, each inventory
+row is the sum of its movements, each order line's movements match its order's history in the outbox (times and
+quantity included), each line's movements are in one warehouse, in the customer's region whenever the product is
+stocked there (otherwise any warehouse stocking it: which one is the product's primary is not stored), stock never
+negative as of any movement time, each movement in its run's window. Runs written before
 data version 6 have no inventory: those checks are skipped, and an older chain or run can't be continued or resumed
 with this version (start a new schema set). A schema without migration 0010 still validates, but `generate` /
 `advance` / `resume` ask for `init-db` first.

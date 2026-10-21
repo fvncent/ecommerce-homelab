@@ -34,6 +34,12 @@ def count(c: psycopg.Connection, query: str) -> int:
     return int(row[0])
 
 
+def count_text(c: psycopg.Connection, query: str) -> str:
+    row = c.execute(query.encode()).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
 def failing(c: psycopg.Connection, cfg: config.Config) -> set[str]:
     return {r.check.name for r in validate.validate(c, cfg)[1] if not r.ok}
 
@@ -121,6 +127,27 @@ def test_each_step_leaves_inventory_as_of_its_time(migrated: Migrated, small_cfg
                          " ORDER BY 1, 2").fetchall() == expected
     assert load.advance(c, small_cfg, stops[1]) is None
     assert digest(c) == digest(one_shot) and failing(c, small_cfg) == set()
+    # each bound of a step's window, alone: step 3 recorded as starting an hour late (its 06:00 delivery and
+    # first hour fall before it), then step 2 as ending an hour early (its last hour falls after it)
+    # (replica mode: past the chain's FK previous_as_of -> previous step's as_of; test database only)
+    for column, as_of in (("previous_as_of", stops[2]), ("as_of", stops[1])):
+        run = count_text(c, f"SELECT run_id FROM generator_meta.generation_runs WHERE as_of = '{as_of.isoformat()}'")
+        shrink = "+" if column == "previous_as_of" else "-"
+        c.execute(f"SET session_replication_role = replica; UPDATE generator_meta.generation_runs"
+                  f" SET {column} = {column} {shrink} interval '1 hour' WHERE run_id = '{run}'".encode())
+        assert "movements_in_run_window" in failing(c, small_cfg), column
+        c.execute(f"UPDATE generator_meta.generation_runs SET {column} = {column} {'-' if shrink == '+' else '+'}"
+                  f" interval '1 hour' WHERE run_id = '{run}'; RESET session_replication_role".encode())
+    assert failing(c, small_cfg) == set()
+
+
+def test_a_schema_set_with_stray_stock_rows_is_refused(migrated: Migrated, small_cfg: config.Config) -> None:
+    """Rows no run recorded (here one warehouse) make generate refuse cleanly, before any chunk."""
+    c = migrated(small_cfg)
+    c.execute("INSERT INTO commerce.warehouses VALUES ('wh_1', 'x', 'NA', 1, '2025-01-01Z', '2025-01-01Z')")
+    with pytest.raises(load.LoadError, match="already hold rows that no run recorded"):
+        load.run(c, small_cfg, "smoke")
+    assert count(c, "SELECT count(*) FROM generator_meta.generation_runs") == 0
 
 
 def test_the_loader_refuses_movements_for_a_cell_without_a_row(migrated: Migrated, small_cfg: config.Config) -> None:
