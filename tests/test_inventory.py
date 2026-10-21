@@ -1,7 +1,8 @@
 """Inventory without a database: movements follow each order's history, stock is never negative as of any time or
 after any committed chunk, and clock steps together write exactly the one-shot movements (with PostgreSQL:
-integration/test_inventory_db.py)."""
+integration/test_inventory_db.py). Also: worlds recorded before warehouses existed still read."""
 
+import dataclasses
 import json
 from collections import defaultdict
 from dataclasses import replace
@@ -10,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from ecomgen import generate as g
+from ecomgen import load
 
 START, END = datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 15, tzinfo=UTC)
 WORLD = g.World(seed=42, clock_start=START, clock_end=END, sellers=12, customers=150, products=80, orders=400)
@@ -149,3 +151,35 @@ def test_later_steps_never_need_the_opening_pass() -> None:
     g._openings.cache_clear()
     g.generate_chunk(WORLD, "inventory", 0, 1000, (START + timedelta(days=1), START + timedelta(days=8)))
     assert g._openings.cache_info().misses == 0
+
+
+def record(world: g.World, version: int, *missing: str) -> dict[str, object]:
+    """A run's recorded resume fields as an older release wrote them: its data version, without the given fields."""
+    fields = {f.name: getattr(world, f.name) for f in dataclasses.fields(world) if f.name not in missing}
+    return {"data_version": version, "world": json.loads(json.dumps(fields, default=datetime.isoformat))}
+
+
+def test_a_world_recorded_before_a_field_existed_reads_with_its_default() -> None:
+    """validate (feeds) and status read old runs' records: a field added later takes its default."""
+    assert load.recorded_world(record(BIG, g.DATA_VERSION)) == BIG
+    assert load.recorded_world(record(BIG, 5, "warehouses")) == replace(BIG, warehouses=3)
+    assert load.recorded_world(record(BIG, 1, "warehouses", "clickstream_events")) == replace(
+        BIG, warehouses=3, clickstream_events=0)
+
+
+@pytest.mark.parametrize(("version", "missing"), [
+    (6, ("warehouses",)),  # data version 6 always records warehouses
+    (2, ("clickstream_events",)),
+    (5, ("seed",)),  # never optional
+    (5, ("orders", "warehouses")),
+])
+def test_a_field_the_runs_version_required_is_never_defaulted(version: int, missing: tuple[str, ...]) -> None:
+    with pytest.raises(load.LoadError, match="malformed"):
+        load.recorded_world(record(BIG, version, *missing))
+    with pytest.raises(load.LoadError, match="malformed"):  # nor without a data version to judge by
+        load.recorded_world({"world": record(BIG, version)["world"]})
+
+
+def test_every_defaulted_world_field_says_when_it_was_added() -> None:
+    defaulted = {f.name for f in dataclasses.fields(g.World) if f.default is not dataclasses.MISSING}
+    assert defaulted == set(g.WORLD_FIELD_SINCE) and max(g.WORLD_FIELD_SINCE.values()) <= g.DATA_VERSION

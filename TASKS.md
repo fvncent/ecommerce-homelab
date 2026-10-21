@@ -2,7 +2,8 @@
 
 ## Active
 - [ ] Optional, user-approved only: `init-db` (migration 0008) on `ecommerce_oltp` / benchmark DBs; dropping the disposable `ecomgen_v030_smoke` + `data/v030-*` when no longer wanted
-- [ ] Phase 3D (branch `feat/inventory`, design approved 2026-10-20): `warehouses`, `inventory`, append-only `inventory_movements` (RECEIPT / weekly REPLENISHMENT / RESERVE / RELEASE / SHIP), one warehouse per line (customer region), opening stock sized so available >= 0 as of any time, deltas in the chunk transaction, migration 0010, DATA_VERSION 6, 5 validate checks; review, then release as `v0.5.0-homelab` after approval
+- [ ] Phase 3D (branch `feat/inventory`, design approved 2026-10-20): `warehouses`, `inventory`, append-only `inventory_movements` (RECEIPT / weekly REPLENISHMENT / RESERVE / RELEASE / SHIP), one warehouse per line (customer region), opening stock sized so available >= 0 as of any time, deltas in the chunk transaction, migration 0010, DATA_VERSION 6, 5 validate checks; review findings 1 (old runs' records) and 2 (reader grants for a new practice set) fixed; push / PR on approval, then release as `v0.5.0-homelab` after approval
+- [ ] Follow-up (deferred, not needed for correctness): `World.stocked_at` is recomputed per order line (~0.35 s of a 9.8 s 10k generate, ~3.5%); if it matters at larger profiles, a bounded per-run cache
 - [ ] 3E catch-up / `--follow` pacing
 - [ ] Later: Parquet snapshots (optional), supplier/courier feeds (need warehouses, inventory, shipments)
 

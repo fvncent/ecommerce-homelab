@@ -1,128 +1,92 @@
 # Session Handoff
 
 Update before compaction or ending a significant session. Overwrite it: git history keeps the old versions (the full
-per-PR review tables up to PR #23 are in commit `03ee496`). Task list: `TASKS.md`.
+per-PR review tables up to PR #23 are in commit `03ee496`, the outbox review in `7bfea59`). Task list: `TASKS.md`.
 
-**Updated:** 2026-10-20
-**Branch:** `main` `4302a43` (PR #28 merged, CI 419/0). Released: `v0.4.1-homelab` → `4302a43` (validate fix, code only), `v0.4.0-homelab` → `877c216`, `v0.3.1-homelab` → `4632562`. Ubuntu on `v0.4.1-homelab` (user-run checkout 2026-10-20: old `commerce` set validates 20/20, practice set 24/24; VLSIM containers stopped/removed by the user).
-**Released:** `v0.3.0-homelab` → `0301e1f` (Phase 3A, 3B, session ordering, harness; tag pushed 2026-10-19).
-`v0.2.0-homelab` (`de90a6a`) unchanged, kept for rollback.
-**Deployed on Ubuntu:** `v0.3.0-homelab`, verified 2026-10-19 (`docs/BENCHMARKS.md`). Disposable DB
-`ecomgen_v030_smoke` (role `ecomgen_practice`): smoke run in `commerce`, 9-step chain in `commerce_stepped`;
-files in `data/v030-smoke`, `data/v030-stepped`; config `practice/v030-stepped.yaml`. `ecommerce_oltp` and the
-benchmark DBs are **not** migrated to 0008 yet (optional, user-approved step). v0.3.0 commands on them were not
-tried on Ubuntu; the Mac rehearsal showed a v0.2.0 run validating 20/20 after `init-db`.
+**Updated:** 2026-10-21
+**Branch:** `feat/inventory` (from `main` `7bfea59`), not pushed. Phase 3D, design approved 2026-10-20.
+**Released:** `v0.4.1-homelab` → `4302a43` (validate fix), `v0.4.0-homelab` → `877c216` (outbox), `v0.3.1-homelab`
+→ `4632562`, `v0.3.0-homelab` → `0301e1f`, `v0.2.0-homelab` → `de90a6a`. Tags are immutable (ruleset).
+**Ubuntu:** on `v0.4.1-homelab` (user-run checkout 2026-10-20): old `commerce` set in `ecommerce_oltp` validates 20/20,
+practice set (`practice_*`, data version 5, 2 days to 2026-01-03) 24/24. The user reads it as `ecomgen_reader`
+(`~/.pgpass`; the password was pasted in chat once and rotated). VLSIM containers on Ubuntu stopped/removed by the
+user; on the Mac they auto-start with Docker Desktop (left alone).
 
-## User's plan (2026-10-19)
-1. Done: session ordering (#23), v0.3.0 + Ubuntu verification + walkthrough, half-open windows (#26).
-2. `v0.3.1-homelab` → `4632562`: annotated tag created **locally only** after all checks (CI green, tag free, no
-   migration, rehearsed upgrade/rollback from v0.3.0); push waits for the user's explicit OK (tags are immutable).
-3. Now: Phase 3C outbox (design approved: order + payment events, one per transition, no `published_at`, no
-   broker). Push / PR only on approval; release later as `v0.4.0-homelab` (new migration 0009, reviewed).
-4. Then 3D (warehouses/inventory), 3E (catch-up / `--follow`).
+## User's plan
+1. Done: session ordering (#23), v0.3.0, half-open windows (#26), outbox (#27, v0.4.0), validate fix (#28, v0.4.1),
+   practice runbook, Ubuntu verification, handoff docs (#29).
+2. Now: Phase 3D on `feat/inventory`: review findings 1 and 2 fixed (user-approved 2026-10-21); push / PR only on
+   approval; release later as `v0.5.0-homelab`.
+3. Not before 3D is reviewed and approved: 3E (catch-up / `--follow`), Phase 4.
 
-## Upgrade facts for v0.3.0 (rehearsed on a throwaway PG 18.6 DB)
-- Migration 0008 only adds things. On v0.2.0 runs, `validate` gives 20/20, every file's sha256 is unchanged, and
-  `resume` of a COMPLETED run is a no-op.
-- Rollback = check out `v0.2.0-homelab`: `status` and `validate` (19/19) still work. Its `init-db` refuses
-  ("migrations this generator doesn't know: [8]"); that's harmless. v0.2.0 doesn't understand chains.
-- DATA_VERSION 3 changes clickstream bytes only (rows unchanged). An unfinished v2 run can't be resumed with v0.3.0;
-  all Ubuntu runs are COMPLETED.
+## Phase 3D: warehouses and inventory (`feat/inventory`)
+- Migration 0010: `warehouses` (`wh_N`, region NA/EU/APAC, nominal capacity), `inventory` (PK warehouse+product,
+  `0 <= reserved <= on_hand`), append-only `inventory_movements` (CHECK: id form, order line and deltas per type,
+  `IS TRUE`; FK to inventory, composite FK (order_item_id, product_id) via a new UNIQUE on `order_items`; index
+  (occurred_at, movement_id); UPDATE/DELETE/TRUNCATE triggers). DATA_VERSION 6; other tables and files unchanged
+  (guard test vs GOLDEN[5] / GOLDEN[4]).
+- `generate.py`: products stocked in 1-3 consecutive warehouses (`stocked_at`), a line ships from the customer's
+  region else the primary (`fulfils`, no draw from the order RNG); movements RECEIPT (before clock_start, first
+  window only), weekly REPLENISHMENT (`restock_times`, `restock`), RESERVE / RELEASE / SHIP at CONFIRMED / CANCELLED
+  after confirmation / SHIPPED (`_Timeline.moves`). `_openings` (one pass over every order, lru_cache 1) sizes the
+  opening so available >= 0 as of any time: as of (delivery j, j+1] at most the units reserved before j+1 are out.
+  `_draws` holds an order's draws (shared by `order_history` and `_openings`). Entity `inventory` (chunked by
+  product) between `warehouses` and `orders`. `WORLD_FIELD_SINCE` = when each defaulted World field was added.
+- `load.py`: `_insert` → `_apply_stock` (RECEIPT inserts the row; other deltas summed per cell, one UPDATE, rowcount
+  checked) then the movements, same transaction; every step writes its inventory chunks (replenishments) before its
+  orders; `_require_loadable` needs migration 10 in the set's `schema_migrations` (`db.has_migration`);
+  `recorded_world` defaults only fields added after the run's data version.
+- `validate.py`: 5 `INVENTORY_CHECKS` (ledger, inventory = sum of movements, movements follow the outbox history,
+  stock never negative as of any movement time, movements in run window) for data_version >= 6 with the table: 29
+  checks with both feeds. `status` lists only the entities a run planned or wrote.
+- Bench: digest +3 lines (warehouses, inventory, movements without run_id); `digest_ok` 11; crash hook takes the
+  window arg. `expected_mvp_digest.txt`: 8 lines unchanged + 3 new; feed references unchanged.
+- Docs: user guide section, data model, README, practice runbook (v0.5.0, older sets stay on their version, reader
+  grants for a new set).
 
-## Ubuntu facts (from the user)
-- Ryzen 5 5600, ~14 GiB RAM, user `serveradmin`.
-- NVMe UUID `d263e3fd-041a-4070-a72a-28e01126aa6f`, ext4 at `/srv/homelab`.
-- Clone `/srv/homelab/projects/ecommerce-homelab` (`.env` mode 600). Data `/srv/homelab/ecommerce/data`.
-- Host PostgreSQL 18.6 on 127.0.0.1:5432 only. Leave VLSIM + TMS, its PG 17 container (55432) and Redpanda alone.
-- Role `ecomgen_app` owns `ecommerce_homelab_{smoke,test,crash}`, which hold the benchmark data.
-- Practice dataset: role `ecomgen_practice` (no privileges) owns `ecommerce_oltp`; config and env in
-  `/srv/homelab/ecommerce/practice/` (`practice-10k.yaml`, `practice.env` mode 600); files in
-  `/srv/homelab/ecommerce/data/practice`; run `run_20261018T135727Z_72e31d`.
-- The user runs every command by hand, one step per message: purpose, read-only or modifying, exact commands,
-  expected result. No heredocs. No `!` in double quotes. Claude never SSHes and never drops anything.
-
-## Key decisions
-- One run per schema set; an `advance` chain needs its own schema set. The clock is as-of inside
-  `clock_start`..`clock_end`.
-- Outbox: one append-only event per order/payment transition, same transaction as the row (data version 5).
-- Step windows are `[previous_as_of, as_of)` (first step `[clock_start, as_of)`), data version 4; "as of T" =
-  everything strictly before T, in rows and files alike. Data version 3 (`v0.3.0`) used `(previous, as_of]`.
-- All steps together = the `generate` rows and records.
-- Data changes bump DATA_VERSION and add a golden entry, never edit one (`data-change` skill).
-- Homelab safety rests on PostgreSQL permissions: least-privilege roles, DBs created and dropped by hand.
-- Integration tests need CREATEDB, so they don't run on Ubuntu; the Mac and CI cover them.
-
-## Known limitations
-- The first step of a chain generates every browsing session up to its `as_of`.
-- Browse and order volume are nearly flat over time (no time-of-day shape).
-- Replay timing depends on the run id. The Ubuntu-only gates are exercised only by the Ubuntu run.
-- Not yet: Parquet, supplier/courier feeds, age-based retention, profiles above 10k, `workers: 2`.
-
-## Harness (PR #24, merged)
-Skills `implement-phase`, `data-change`, `homelab-release` (user-invoked); Bash guard hook `.claude/hooks/guard.py`
-(active, `onFailure: block`; it matches text, so commands that merely mention a blocked pattern are blocked too:
-edit such files with Edit, not Bash); GitHub rulesets on `main` (PR + 3 checks) and `v*-homelab` tags (immutable).
-
-## Previous: half-open windows (PR #26, merged)
-Windows `[previous, as_of)`, DATA_VERSION 4; `--to` whole seconds only; v<4 one-shot runs keep an inclusive end in
-the window check; v3 chains refused by advance/resume. Review table in git history (commit `01be891`).
-
-## This task: Phase 3C transactional outbox (`feat/outbox`)
-- `generate.py`: `OutboxEvent` (event_id `obx_<aggregate_id>_<seq>`, aggregate_type/id/seq, event_type,
-  schema_version `OUTBOX_SCHEMA_VERSION` 1, occurred_at, order_id, payment_id, canonical JSON payload with
-  from/to, run_id set by the loader); `World.order_history(n, ends, window)` = rows + events from one timeline
-  (`_Timeline.events`); `ORDER_TRANSITIONS` / `PAYMENT_TRANSITIONS`; generate_chunk adds `outbox_events`;
-  `StepChunk.events` = every transition in [previous, as_of). DATA_VERSION 5 (other tables + files unchanged).
-- Migration 0009: `{integration}.outbox_events`, FKs (order, payment, run), CHECKs (id form, aggregate, event
-  type per seq, the state machine), unique (aggregate_id, seq), indexes, append-only triggers (UPDATE/DELETE/
-  TRUNCATE refused).
-- `load.py`: `OUTBOX`, `_table` (schema per table), `_stamped` (run_id), events written in the chunk transaction
-  after the rows; ledger key `outbox_events`; `_require_loadable` refuses schemas without 0009.
-- `validate.py`: `OUTBOX_CHECKS` (ledger, reconstructs rows, chains contiguous, in run window) for data_version
-  >= 5 when the table exists; `CHAIN_FILES_SINCE = 4` (v4 chains' files still checkable). `db.q` knows
-  `{integration}`; `db.has_outbox`.
-- Benchmark digest includes the outbox (without run_id); `expected_mvp_digest.txt` gained one line.
-- Tests: `tests/test_outbox.py` (chains valid, every transition seen, reconstruct rows, payload reconciles,
-  deterministic, steps = one shot, multi-transition step, boundary, empty window),
-  `tests/integration/test_outbox_db.py` (rollback leaves neither, resume once, CHECKs refuse invalid events,
-  append-only, lineage + multi-transition step + repeat no-op, v4 run / no-0009 schema compatibility, payloads),
-  corruption tests for each outbox check. 412 tests / 0 skipped on PG 17 and 18.6; benchmark 49/49; 10k e2e
-  chain = generate incl. outbox, validate 24/24.
-
-## Outbox review (`/code-review high` + `/ponytail-review`) — 9 fixed, 1 kept
+## Phase 3D review (`/ponytail-review`) and fixes
 | # | Finding | Fix |
 |---|---|---|
-| 1 | transition CHECK let a payload without `from`/`to` (or a non-object) through: NULL passes a CHECK | `jsonb_typeof(payload) = 'object' AND (CASE …) IS TRUE`; tests |
-| 2 | reset hint / README: dropping app + meta schemas leaves the outbox, init-db then fails | "all three … application, integration and metadata schemas" |
-| 3 | two schema sets sharing an integration schema: confusing DuplicateTable | `db.migrate` refuses 0009 on an integration schema that already has an outbox; test |
-| 4 | a payment event's order not tied to the payment's order | UNIQUE (payment_id, order_id) on payment_attempts + composite FK; test |
-| 5 | payload JSON built for events outside the window | window tested first; payloads built only for kept events (goldens unchanged) |
-| 6 | `_stamped` silently dropped non-OutboxEvent rows | `cast` + unconditional `_replace` |
-| 7 | `has_outbox` duplicated the regclass lookup | `has_table(..., schema)` |
-| 8 | benchmark `sizes()` omitted the integration schema | lists app + integration tables |
-| 9 | unused indexes (run_id, order_id) on the largest table | dropped; kept PK, UNIQUE (aggregate_id, seq), (occurred_at, event_id) |
-| — | `order_at` "pass-through" | kept: public, used by tests (state at several times) |
+| 1 | `validate` crashed (malformed record) on any pre-v6 run with files: `recorded_world` required the new `warehouses` | defaults only for fields added after the run's data version (`WORLD_FIELD_SINCE`); required fields still refused; unit tests + DB test (fail on the old code); real v0.4.1 one-shot + 2-day chain validate 24/24 before and after `init-db`, rows and files byte-identical, advance refused |
+| 2 | runbook's "new practice set" left `ecomgen_reader` without access | grants as the set's owner (USAGE, SELECT ON ALL TABLES, ALTER DEFAULT PRIVILEGES), reader checks; `test_reader_role.py` runs the runbook's statements; rehearsed with non-superuser roles |
+| 3 | `stocked_at` recomputed per line | measured ~0.35 s of a 9.8 s 10k generate (~3.5%): deferred (TASKS), no cache |
 
-After fixes: 417 tests / 0 skipped on PG 17 and 18.6; mypy clean; benchmark 49/49 (references unchanged since part 3).
-Note for release: 0009 also adds a UNIQUE (payment_id, order_id) index to `payment_attempts` of existing schemas.
+Verification so far: PG 17 446/0 and PG 18.6 446/0 before the fixes; benchmark 49/49 on PG 18.6 (references
+re-recorded, then verified); 10k: generate vs 31 daily steps identical in all 11 tables and both feeds, validate 29/29
+each; 10k generate 9.8 s vs 6.8 s on v0.4.1 (same container).
 
-## Practice runbook (same branch, user request 2026-10-19)
-`docs/PRACTICE_RUNBOOK.md` + `config/practice.example.yaml`: practice dataset in `ecommerce_oltp` with its own
-schemas `practice_commerce` / `practice_integration` / `practice_meta`, folder `data/practice-pipeline`, env
-`practice/pipeline.env`; benchmark stays in its own `ecommerce_homelab_*` databases. Steps: config, init-db, first
-day, one-day-at-a-time (next day computed in SQL), read-only `ecomgen_reader` grants, watermark + outbox queries,
-replay, troubleshooting. Rehearsed on the Mac in a throwaway PG 18.6 (Ubuntu layout); older `commerce` dataset
-unchanged; watermark count = step inserted + updated.
+## Ubuntu facts (from the user)
+- Ryzen 5 5600, ~14 GiB RAM, user `serveradmin`. NVMe UUID `d263e3fd-041a-4070-a72a-28e01126aa6f`, ext4 at
+  `/srv/homelab`. Clone `/srv/homelab/projects/ecommerce-homelab`. Data `/srv/homelab/ecommerce/data`.
+- Host PostgreSQL 18.6 on 127.0.0.1:5432 only. Role `ecomgen_app` owns `ecommerce_homelab_{smoke,test,crash}`
+  (benchmark). Role `ecomgen_practice` owns `ecommerce_oltp`: old `commerce` set (`practice/practice-10k.yaml`,
+  `practice.env`, files `data/practice`) and the pipeline set (`practice/pipeline.yaml`, `pipeline.env`, files
+  `data/practice-pipeline`). Disposable `ecomgen_v030_smoke` + `data/v030-*`, `data/walk` (drop only on request).
+- The user runs every command by hand, one step per message: purpose, read-only or modifying, exact commands,
+  expected result. No heredocs. No `!` in double quotes. Claude never SSHes, never drops or resets anything, never
+  changes Ubuntu roles.
 
-## Fix: validate on pre-0008 schema sets
-Found on Ubuntu (v0.4.0 step 4): `validate` of `ecommerce_oltp`'s v0.2.0 `commerce` set (no migration 0008, files
-published) failed: `LATERAL (SELECT NULL, NULL)` makes text columns, `coalesce(text, timestamptz)` errors (since
-v0.3.0). `db.clock_columns` (shared by load/feeds/validate) returns typed NULLs; regression test in
-`test_publish.py` (drops 0008 columns + the outbox) reproduces the exact error on the old code.
+## Key decisions
+- One run per schema set; a chain needs its own set and stays on the data version it started with.
+- Windows `[previous_as_of, as_of)`; "as of T" = strictly before T; all steps together = `generate`.
+- Outbox and stock movements are written in the chunk transaction of the change they record; append-only.
+- Data changes bump DATA_VERSION and add a golden, never edit one (`data-change` skill).
+- Homelab safety rests on PostgreSQL permissions; DBs created and dropped by hand. Integration tests need
+  CREATEDB, so they run on the Mac and CI only.
+
+## Known limitations
+- One warehouse per order line (no split lines, no backorders); capacity is nominal; replenishment sized from
+  expected demand, not reorder points; no inventory events in the outbox; no shipments table yet.
+- `_openings` memory = cells x weeks (shortcut comment); its pass is ~1 s per 10k orders in the first step.
+- First step of a chain generates every browsing session up to its as_of; flat volume over time.
+- Not yet: Parquet, supplier/courier feeds, profiles above 10k, `workers: 2`.
+
+## Harness
+Skills `implement-phase`, `data-change`, `homelab-release`; Bash guard hook `.claude/hooks/guard.py` (matches text:
+edit files that mention blocked patterns with Edit); rulesets on `main` (PR + lint, test 17.11, test 18.6) and
+`v*-homelab` tags (immutable). "QA / Data Reliability agents" are not defined here: general-purpose agents with
+those briefs stand in.
 
 ## Next step
-Ubuntu v0.4.0 verified (`docs/BENCHMARKS.md`); the user builds a pipeline on the practice dataset (`practice_*` schemas
-in `ecommerce_oltp`, `practice/pipeline.yaml` + `pipeline.env`, one `advance` per business day, reads as
-`ecomgen_reader` via `~/.pgpass`; the reader password was pasted in chat once and rotated). The user connects to it
-(2026-10-20). Open: 3D (warehouses/inventory) when the user asks.
-Ponytail `lite`.
+Finish verification of the fixes (full suite PG 17 + 18, independent QA / data-reliability passes), then ask the user
+to approve pushing `feat/inventory` and opening the PR. Ponytail `lite`.

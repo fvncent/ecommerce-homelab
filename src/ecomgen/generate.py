@@ -52,6 +52,9 @@ MAX_ATTEMPTS = 3
 # 5: outbox_events (one per order / payment state transition); the other rows and the files are unchanged.
 # 6: warehouses and inventory_movements (inventory is their sum); the other rows and the files are unchanged.
 DATA_VERSION = 6
+# World fields added after data version 1, with the version that added them: a run recorded under an earlier version
+# has no such field (its generation never used one), so reading its record takes the field's default instead.
+WORLD_FIELD_SINCE = {"clickstream_events": 2, "warehouses": 6}
 OUTBOX_SCHEMA_VERSION = 1  # payload shape of outbox_events
 # The state machines _lifecycle follows (migration 0009 enforces the same pairs): (from, to) per aggregate type.
 ORDER_TRANSITIONS = frozenset({("CREATED", "CONFIRMED"), ("CREATED", "CANCELLED"), ("CONFIRMED", "CANCELLED"),
@@ -308,7 +311,7 @@ class World:
     products: int
     orders: int
     clickstream_events: int = 0  # browsing events in the clickstream feed (feeds.py), besides one per order
-    warehouses: int = 3
+    warehouses: int = 3  # new fields need a default and an entry in WORLD_FIELD_SINCE
 
     def __post_init__(self) -> None:
         for name in ("clock_start", "clock_end"):

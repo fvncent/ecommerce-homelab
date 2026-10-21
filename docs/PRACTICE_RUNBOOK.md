@@ -8,7 +8,10 @@ Everything runs on the Ubuntu homelab; you type the commands yourself. Each step
 
 For the full reference (every command, all queries) see `docs/GENERATOR_USER_GUIDE.md`; for file formats
 `docs/FEEDS.md`. Rehearsed end to end on the Mac (2026-10-19, `feat/outbox`) in a throwaway PostgreSQL 18.6 with the
-same layout (an older dataset in `commerce` stayed byte-identical); the first Ubuntu run is yours.
+same layout (an older dataset in `commerce` stayed byte-identical); the first Ubuntu run is yours. Re-rehearsed for
+inventory (2026-10-21, `feat/inventory`): a `practice2_*` set's first day inserts the same 323 orders / 636 items /
+404 payments / 1,756 events as before, plus 3 warehouses and 4,434 stock movements, `29 passed`; the reader grants
+below were run as written, with non-superuser `ecomgen_practice` / `ecomgen_reader` roles.
 
 ## What goes where (practice vs benchmark)
 
@@ -121,7 +124,8 @@ uv run ecomgen validate $C | tail -1
 ```
 
 Expected: `step run_… COMPLETED: clock start -> 2026-01-02T00:00:00+00:00`, `inserted sellers=100 categories=40
-customers=5000 products=2000 warehouses=3 orders=… inventory_movements=…`; `29 passed, 0 failed`.
+customers=5000 products=2000 orders=323 … warehouses=3 inventory_movements=4434 outbox_events=1756` (default seed);
+`29 passed, 0 failed`.
 
 ## Step 4: one more day, any time you like (changes: the practice dataset)
 
@@ -227,6 +231,44 @@ Never reuse or empty a schema set: IDs like `ord_1` are deterministic and would 
 `pipeline.yaml` to a new name, change **all three** schema names (e.g. `practice2_commerce`, `practice2_integration`,
 `practice2_meta`) and use a new data folder and env file, then repeat steps 1-4. `init-db` refuses an integration
 schema that already belongs to another dataset.
+
+**Let `ecomgen_reader` read the new set** (changes PostgreSQL permissions; once, after its first step). The reader
+role only sees schemas it was granted, so a new set needs three grants, run as the set's owner `ecomgen_practice`
+(the URL in its env file), not as the PostgreSQL superuser:
+
+- `GRANT USAGE ON SCHEMA` lets the role look inside the schemas (name lookup only; no data, no create rights);
+- `GRANT SELECT ON ALL TABLES IN SCHEMA` lets it read the tables that exist **now**;
+- `ALTER DEFAULT PRIVILEGES … GRANT SELECT ON TABLES` lets it read tables `ecomgen_practice` creates there **later**
+  (a future release's `init-db` adding a table), so you don't have to grant again.
+
+Print the three schema names from the new config and use exactly those (the example uses `practice2_*`):
+
+```bash
+grep "_schema:" /srv/homelab/ecommerce/practice/pipeline2.yaml
+```
+
+<!-- reader-grants: tests/integration/test_reader_role.py runs these statements -->
+```bash
+psql "$ECOMMERCE_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
+  -c "GRANT USAGE ON SCHEMA practice2_commerce, practice2_integration, practice2_meta TO ecomgen_reader" \
+  -c "GRANT SELECT ON ALL TABLES IN SCHEMA practice2_commerce, practice2_integration, practice2_meta TO ecomgen_reader" \
+  -c "ALTER DEFAULT PRIVILEGES IN SCHEMA practice2_commerce, practice2_integration, practice2_meta GRANT SELECT ON TABLES TO ecomgen_reader"
+```
+
+Nothing else is granted: no `INSERT` / `UPDATE` / `DELETE` / `TRUNCATE`, no `CREATE` on the schemas, and only the
+owner may alter or drop tables. Check as the reader (password from `~/.pgpass`); the first must print a count, the
+other two must fail with `permission denied` (each changes nothing even if it ran: `WHERE false`, `ROLLBACK`):
+
+```bash
+R=postgresql://ecomgen_reader@127.0.0.1:5432/ecommerce_oltp
+psql "$R" -XAtc "SELECT count(*) FROM practice2_commerce.inventory_movements"
+psql "$R" -XAtc "UPDATE practice2_commerce.orders SET status = status WHERE false"
+psql "$R" -XAtc "BEGIN; CREATE TABLE practice2_commerce.reader_probe (x int); ROLLBACK"
+```
+
+The same applies to a set that existed before the default privileges: after an `init-db` that adds tables (e.g.
+`v0.5.0` on a `v0.4.x` set), re-run the `GRANT SELECT ON ALL TABLES` line for its schemas (or the
+`ALTER DEFAULT PRIVILEGES` line once, before the upgrade).
 
 To remove a practice dataset you no longer want, decide it explicitly (it is your data): drop its three schemas
 together and delete its data folder. Dropping only some of them leaves the others behind and `init-db` then refuses.

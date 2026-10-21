@@ -160,11 +160,14 @@ def resume_fields(cfg: Config, world: generate.World) -> dict[str, object]:
 
 
 def recorded_world(recorded: dict[str, object]) -> generate.World:
-    w = recorded.get("world")
+    """The World a run recorded. A field may be missing only if it was added after the run's data version
+    (generate.WORLD_FIELD_SINCE); it then takes its default. Any other missing field makes the record malformed."""
+    w, version = recorded.get("world"), recorded.get("data_version")
     try:
-        assert isinstance(w, dict)
+        assert isinstance(w, dict) and isinstance(version, int)
         kwargs: dict[str, Any] = {f.name: datetime.fromisoformat(w[f.name]) if f.type is datetime else w[f.name]
-                                  for f in dataclasses.fields(generate.World)}
+                                  for f in dataclasses.fields(generate.World)
+                                  if f.name in w or version >= generate.WORLD_FIELD_SINCE.get(f.name, 0)}
         return generate.World(**kwargs)
     except (AssertionError, KeyError, TypeError, ValueError, generate.GenerationError) as e:
         raise LoadError(f"run's recorded world is malformed ({w!r}): {e}") from None
