@@ -196,7 +196,8 @@ def test_resume_after_sigkill_mid_step(migrated: Migrated, db_url: str, cfg_path
     with pytest.raises(load.LoadError, match="finish it with `ecomgen resume`"):
         load.advance(c, small_cfg, END)
     r = load.resume(c, small_cfg)
-    assert r is not None and r.chunks_skipped == 1 and r.as_of == END and r.previous_as_of == days(8)[0]
+    # skipped: the step's inventory chunk and orders chunk 0
+    assert r is not None and r.chunks_skipped == 2 and r.as_of == END and r.previous_as_of == days(8)[0]
     assert ok(c, small_cfg) == []
     c.execute("RESET TimeZone")  # the digest renders timestamps as text in the session time zone
     assert digest(c) == expected

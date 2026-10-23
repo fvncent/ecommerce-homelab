@@ -273,6 +273,58 @@ before data version 5 have no events; their outbox checks are skipped. A schema 
 validates, but `generate` / `advance` / `resume` ask for `init-db` first. Size: about 8.8 events per order (88,450 for
 the 10k example), roughly 2 s more for a 10k `generate`.
 
+## Warehouses and inventory (data version 6, migration 0010)
+
+`counts.warehouses` warehouses (`wh_N`, region `NA` / `EU` / `APAC` in turn) stock each product in 1-3 of them.
+Stock only ever changes through the append-only `inventory_movements`, written in the **same transaction** as the
+order change it comes from; `inventory` is their running sum, updated in that transaction too.
+
+| `movement_type` | When | `on_hand` | `reserved` | `movement_id` |
+|---|---|---|---|---|
+| `RECEIPT` | opening stock, before `clock_start` (written by the first step / a `generate`) | + qty | | `mov_rcv_<wh>_<prd>` |
+| `REPLENISHMENT` | weekly delivery per warehouse (06:00 UTC, staggered by warehouse) | + qty | | `mov_rpl_<wh>_<prd>_<week>` |
+| `RESERVE` | the order is confirmed (payment authorized) | | + qty | `mov_<order_item_id>_rsv` |
+| `RELEASE` | the order is cancelled after confirmation | | - qty | `mov_<order_item_id>_rel` |
+| `SHIP` | the order ships | - qty | - qty | `mov_<order_item_id>_shp` |
+
+Each order line ships from the product's warehouse in the customer's region (US/CA → NA, GB/DE/FR → EU, AU → APAC),
+else from its first one; an order whose payment fails never reserves. `available = on_hand - reserved` is never
+negative, as of **any** time: the opening stock is sized from the whole clock's demand (one pass over every order
+when the first step or a `generate` starts). The table refuses `reserved < 0` or `reserved > on_hand`, a movement
+whose deltas don't match its type, and (append-only) any update, delete or truncate. `warehouses.capacity` is a
+nominal figure, not enforced.
+
+**Lineage: what is stored and what is not.** Stored: every movement's warehouse, product, type, quantity, time and
+(for order movements) the order line, so stock as of any time and each line's warehouse can be rebuilt from the table.
+Not stored: which warehouses stock a product and which one is its primary (the generator derives both from the seed),
+and why a line went to its warehouse (local region or the primary fallback). Stock and money do not depend on that
+reason: each movement and its stock change are written together, and `validate` checks the sums and non-negativity
+from the stored rows alone. An explicit allocation or stocking table is a tracked enhancement (TASKS.md).
+
+```sql
+-- current stock of one product, per warehouse
+SELECT warehouse_id, on_hand, reserved, on_hand - reserved AS available, updated_at
+FROM commerce.inventory WHERE product_id = 'prd_42' ORDER BY warehouse_id;
+-- one order line's movements
+SELECT movement_type, quantity, occurred_at FROM commerce.inventory_movements
+WHERE order_item_id = 'itm_206' ORDER BY occurred_at;
+-- stock as of a past time T: the sum of the movements before T
+SELECT warehouse_id, sum(on_hand_delta) AS on_hand, sum(reserved_delta) AS reserved
+FROM commerce.inventory_movements WHERE product_id = 'prd_42' AND occurred_at < '2026-01-10T00:00:00Z' GROUP BY 1;
+-- everything since your watermark, in time order
+SELECT movement_id, movement_type, warehouse_id, product_id, quantity, occurred_at FROM commerce.inventory_movements
+WHERE occurred_at >= '2026-01-03T00:00:00Z' ORDER BY occurred_at, movement_id LIMIT 20;
+```
+
+`validate` adds six checks for data-version-6 runs (30 for a run with both file feeds): ledger = rows, each inventory
+row is the sum of its movements, each order line's movements match its order's history in the outbox (times and
+quantity included), each line's movements are in one warehouse, in the customer's region whenever the product is
+stocked there (otherwise any warehouse stocking it: which one is the product's primary is not stored), stock never
+negative as of any movement time, each movement in its run's window. Runs written before
+data version 6 have no inventory: those checks are skipped, and an older chain or run can't be continued or resumed
+with this version (start a new schema set). A schema without migration 0010 still validates, but `generate` /
+`advance` / `resume` ask for `init-db` first.
+
 ## Crashes and history
 
 - `status` shows the latest run (`--run-id` for another): `COMPLETED`, `FAILED` (with `last error`), or

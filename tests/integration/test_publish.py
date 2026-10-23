@@ -98,7 +98,8 @@ def test_run_publishes_files_manifest_and_ledger(published: psycopg.Connection, 
                             "clickstream": load.PROFILE_COUNTS["smoke"]["clickstream_events"] + 1000}
     results = validate.validate(published, small_cfg)[1]
     assert [r.check.name for r in results if not r.ok] == []
-    assert len(results) == len(validate.CHECKS) + len(validate.OUTBOX_CHECKS) + 2 + len(validate.FEED_CHECKS)
+    assert len(results) == (len(validate.CHECKS) + len(validate.OUTBOX_CHECKS) + len(validate.INVENTORY_CHECKS) + 2
+                            + len(validate.FEED_CHECKS))
 
 
 def test_publish_again_is_a_no_op(published: psycopg.Connection, small_cfg: config.Config, data_root: Path) -> None:
@@ -367,11 +368,28 @@ def test_cli_generate_reports_files(db_url: str, monkeypatch: pytest.MonkeyPatch
     assert main(["status", str(EXAMPLE)]) == 0  # commands that write nothing don't care
 
 
+def test_a_run_recorded_before_warehouses_still_validates_its_files(published: psycopg.Connection,
+                                                                    small_cfg: config.Config) -> None:
+    """A data-version-5 run (v0.4.x) recorded no warehouses: validate's file checks rebuild its world without that
+    field (it used to fail as malformed), skip the inventory checks, and resume still refuses the other version."""
+    published.execute("UPDATE generator_meta.generation_runs"
+                      " SET resume_fields = (resume_fields #- '{world,warehouses}') || '{\"data_version\": 5}'")
+    _, results = validate.validate(published, small_cfg)
+    names = {r.check.name for r in results}
+    assert [r.check.name for r in results if not r.ok] == [] and {"files_match_ledger", "clickstream_ids_exist"} <= names
+    assert not names & {c.name for c in validate.INVENTORY_CHECKS}
+    published.execute("UPDATE generator_meta.generation_runs SET state = 'FAILED'")
+    with pytest.raises(load.LoadError, match="data_version differ"):
+        load.resume(published, small_cfg)
+
+
 def test_a_schema_from_before_clock_steps_still_validates(published: psycopg.Connection, small_cfg: config.Config,
                                                          data_root: Path) -> None:
     """A schema set from v0.2.0 (no migration 0008: no as_of / previous_as_of) that published files: validate's file
     windows must use typed NULLs (an untyped NULL is text, and coalescing it with a timestamp failed)."""
-    published.execute("DROP TABLE integration.outbox_events")  # 0009 needs 0008: neither exists there
+    # 0009 and 0010 need 0008: none of them exists there
+    published.execute("DROP TABLE integration.outbox_events, commerce.inventory_movements, commerce.inventory,"
+                      " commerce.warehouses")
     published.execute("ALTER TABLE generator_meta.generation_runs DROP COLUMN previous_as_of CASCADE,"
                       " DROP COLUMN as_of CASCADE")
     _, results = validate.validate(published, small_cfg)

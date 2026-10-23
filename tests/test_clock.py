@@ -32,6 +32,8 @@ def apply_steps(world: g.World, stops: list[datetime], chunk_rows: int = 37,
         for c in range(g.step_chunk_count(plan, chunk_rows)):
             chunk = g.step_chunk(world, plan, c, chunk_rows)
             for table, rs in chunk.inserts.items():
+                if table not in KEYS:  # inventory movements: tests/test_inventory.py
+                    continue
                 for r in rs:
                     key = getattr(r, KEYS[table])
                     assert key not in state[table], f"{key} inserted twice"

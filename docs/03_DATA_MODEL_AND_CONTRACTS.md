@@ -10,8 +10,9 @@ Minimum tables; Claude should add indexes, check constraints, status enums / loo
 | sellers | seller_id | region, display_name, status |
 | categories | category_id | parent_category_id (nullable), name |
 | products | product_id | seller_id FK, category_id FK, price NUMERIC, currency, active |
-| warehouses | warehouse_id | region, capacity |
-| inventory | (warehouse_id, product_id) | on_hand, reserved, updated_at |
+| warehouses | warehouse_id (`wh_N`) | name, region (NA/EU/APAC), capacity (nominal), created_at, updated_at (implemented: migration 0010, data version 6) |
+| inventory | (warehouse_id, product_id) | on_hand, reserved, updated_at; `0 <= reserved <= on_hand`; the sum of its movements (implemented: 0010) |
+| inventory_movements | movement_id (`mov_…`, deterministic) | warehouse/product FK to inventory, movement_type (RECEIPT, REPLENISHMENT, RESERVE, RELEASE, SHIP), quantity, on_hand_delta, reserved_delta, occurred_at, order_item_id FK (with its product), run_id FK; append-only (implemented: 0010) |
 | orders | order_id | customer_id FK, placed_at, status, currency, subtotal, discount, tax, shipping, total |
 | order_items | order_item_id | order_id FK, product_id FK, quantity, unit_price, discount, tax, line_total |
 | payment_attempts | payment_id | order_id FK, attempt_no, provider, method, state, amount, currency |
@@ -31,7 +32,7 @@ Minimum tables; Claude should add indexes, check constraints, status enums / loo
 - Payment attempt: `INITIATED -> AUTHORIZED -> CAPTURED -> SETTLED`, or `FAILED` / `VOIDED` as valid branches; refunds separate.
 - Shipment: `CREATED -> PICKED -> IN_TRANSIT -> DELIVERED` (plus failure/return branches).
 - Return: `REQUESTED -> APPROVED -> RECEIVED -> INSPECTED -> REFUNDED`; may be rejected.
-- Inventory: moves in explicit purchase/reservation/release/replenishment transactions; non-negative quantities unless a configurable exceptional business rule permits otherwise.
+- Inventory: moves in explicit purchase/reservation/release/replenishment transactions; non-negative quantities unless a configurable exceptional business rule permits otherwise. Implemented (data version 6): opening RECEIPT before clock_start, weekly REPLENISHMENT, and per order line RESERVE at CONFIRMED, RELEASE at CANCELLED after confirmation, SHIP at SHIPPED; one warehouse per line (the customer's region if it stocks the product); available stock is never negative as of any time (no exceptional rule yet).
 
 Test legal transitions; don't assume every order has exactly one payment or one shipment.
 

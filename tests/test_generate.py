@@ -14,7 +14,7 @@ WORLD = g.World(seed=42, clock_start=datetime(2026, 1, 1, tzinfo=UTC), clock_end
                 sellers=12, customers=150, products=80, orders=400)
 # Same patterns as the CHECK constraints in 0001_core_schema.sql
 ID_PATTERNS = {"sellers": "sel", "categories": "cat", "customers": "cus", "products": "prd",
-               "orders": "ord", "order_items": "itm", "payment_attempts": "pay"}
+               "orders": "ord", "order_items": "itm", "payment_attempts": "pay", "warehouses": "wh"}
 # Sparse: few sellers/products, so inactive entities and distinct-line exclusions force _probe's fallback scan.
 SPARSE = replace(WORLD, seed=7, sellers=2, customers=5, products=3, orders=200)
 # fingerprint of rows(WORLD) + rows(SPARSE), per generate.DATA_VERSION. NEVER edit an existing entry for a data change:
@@ -24,7 +24,8 @@ GOLDEN = {1: "6747ce23f4146509c9294cb0b2a755c2a35ce2e3ddb10666f5ce9bbf516776d4",
           2: "6747ce23f4146509c9294cb0b2a755c2a35ce2e3ddb10666f5ce9bbf516776d4",  # 2 changed files only
           3: "6747ce23f4146509c9294cb0b2a755c2a35ce2e3ddb10666f5ce9bbf516776d4",  # 3 changed session times only
           4: "6747ce23f4146509c9294cb0b2a755c2a35ce2e3ddb10666f5ce9bbf516776d4",  # 4: step windows; one-shot same
-          5: "7669289ef8ef24e11966c390ce764eefcbd070f2471fd4983b5cd9db07787c50"}  # 5: + outbox_events
+          5: "7669289ef8ef24e11966c390ce764eefcbd070f2471fd4983b5cd9db07787c50",  # 5: + outbox_events
+          6: "bedf735392f4e39b4db4cde3ad55f725898305381825dcbd88c0c76cc80bbe14"}  # 6: + warehouses, inventory
 ORDER_FLOW = ["CREATED", "CONFIRMED", "PROCESSING", "SHIPPED", "DELIVERED"]
 
 
@@ -50,10 +51,13 @@ def test_same_seed_same_data_and_independent_of_chunk_size(data: dict[str, list[
     assert rows(chunk_rows=10_000) == data
 
 
-def test_outbox_leaves_the_other_tables_unchanged(data: dict[str, list[tuple[object, ...]]]) -> None:
-    """Data version 5 only adds outbox_events: every other table is still data version 4's."""
+def test_outbox_and_inventory_leave_the_other_tables_unchanged(data: dict[str, list[tuple[object, ...]]]) -> None:
+    """Data version 5 only added outbox_events, 6 only warehouses and inventory_movements: every other table is still
+    data version 4's."""
     both = {**data, **{f"sparse.{t}": r for t, r in rows(SPARSE).items()}}
-    assert fingerprint({k: v for k, v in both.items() if not k.endswith("outbox_events")}) == GOLDEN[4]
+    v5 = {k: v for k, v in both.items() if not k.endswith(("warehouses", "inventory_movements"))}
+    assert fingerprint(v5) == GOLDEN[5]
+    assert fingerprint({k: v for k, v in v5.items() if not k.endswith("outbox_events")}) == GOLDEN[4]
 
 
 def test_different_seed_different_data(data: dict[str, list[tuple[object, ...]]]) -> None:
