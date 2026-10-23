@@ -3,8 +3,8 @@
 Update before compaction or ending a significant session. Overwrite it: git history keeps the old versions (the full
 per-PR review tables up to PR #23 are in commit `03ee496`, the outbox review in `7bfea59`). Task list: `TASKS.md`.
 
-**Updated:** 2026-10-21
-**Branch:** `feat/inventory` (from `main` `7bfea59`), not pushed. Phase 3D, design approved 2026-10-20.
+**Updated:** 2026-10-23
+**Branch:** `feat/inventory` (from `main` `7bfea59`), push + PR approved 2026-10-23 (merge needs approval). Phase 3D, design approved 2026-10-20.
 **Released:** `v0.4.1-homelab` → `4302a43` (validate fix), `v0.4.0-homelab` → `877c216` (outbox), `v0.3.1-homelab`
 → `4632562`, `v0.3.0-homelab` → `0301e1f`, `v0.2.0-homelab` → `de90a6a`. Tags are immutable (ruleset).
 **Ubuntu:** on `v0.4.1-homelab` (user-run checkout 2026-10-20): old `commerce` set in `ecommerce_oltp` validates 20/20,
@@ -61,6 +61,7 @@ v0.4.1 datasets (git archive) behave as documented; validate at 100k orders (400
 | Q2 | movement quantity untested in `movements_follow_order_history` | corruption: a cancelled line's RESERVE + RELEASE one unit larger |
 | Q3 | `_has_rows` for the new tables untested | stray warehouse row → clean refusal, no run recorded |
 | Q4 | receipt time only guarded by the golden | unit test: receipt = max(warehouse, product created_at) |
+Lineage (user, 2026-10-23): the primary fallback is not stored; unit test `test_without_a_local_warehouse_a_line_falls_back_to_the_products_primary` (1/3/4 warehouses, mutant killed), user guide "Lineage" note, TASKS enhancement (stocking table + allocation reason). Stock and money don't depend on it.
 Mutations re-run with pytest exit codes: all of the above killed; the split-line clause (`n > 1`) has no isolated
 corruption (a split always moves reserved units, so the stock checks fire too).
 
@@ -101,5 +102,5 @@ edit files that mention blocked patterns with Edit); rulesets on `main` (PR + li
 those briefs stand in.
 
 ## Next step
-Finish verification of the fixes (full suite PG 17 + 18, independent QA / data-reliability passes), then ask the user
-to approve pushing `feat/inventory` and opening the PR. Ponytail `lite`.
+PR for `feat/inventory`: wait for CI (lint, PG 17.11, PG 18.6, 0 skipped), report, then the user approves the merge.
+Then (on approval) tag `v0.5.0-homelab` and the user-run Ubuntu upgrade. No 3E / Phase 4 before that. Ponytail `lite`.

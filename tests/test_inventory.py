@@ -111,6 +111,20 @@ def test_a_line_ships_from_a_stocking_warehouse_in_the_customers_region_when_the
             assert w == (local[0] if local else stocked[0])
 
 
+@pytest.mark.parametrize("warehouses", [1, 3, 4])  # 4: wh_1 and wh_4 are both NA
+def test_without_a_local_warehouse_a_line_falls_back_to_the_products_primary(warehouses: int) -> None:
+    world = replace(BIG, warehouses=warehouses)
+    paths = set()
+    for p in range(1, world.products + 1):
+        stocked = world.stocked_at(p)
+        assert stocked == replace(world).stocked_at(p) and len(set(stocked)) == len(stocked)
+        for country, region in g.COUNTRY_REGION.items():
+            local = [w for w in stocked if g.REGIONS[(w - 1) % 3] == region]
+            paths.add("local" if local else "primary")
+            assert world.fulfils(p, country) == (local[0] if local else stocked[0])
+    assert paths == {"local", "primary"}  # both rules exercised (wh_1 alone is NA: EU and AU customers fall back)
+
+
 def test_receipts_open_every_cell_before_the_clock_and_replenishments_are_weekly(big: list[g.InventoryMovement]
                                                                                 ) -> None:
     receipts = {(m.warehouse_id, m.product_id): m for m in big if m.movement_type == "RECEIPT"}

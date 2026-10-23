@@ -294,6 +294,13 @@ when the first step or a `generate` starts). The table refuses `reserved < 0` or
 whose deltas don't match its type, and (append-only) any update, delete or truncate. `warehouses.capacity` is a
 nominal figure, not enforced.
 
+**Lineage: what is stored and what is not.** Stored: every movement's warehouse, product, type, quantity, time and
+(for order movements) the order line, so stock as of any time and each line's warehouse can be rebuilt from the table.
+Not stored: which warehouses stock a product and which one is its primary (the generator derives both from the seed),
+and why a line went to its warehouse (local region or the primary fallback). Stock and money do not depend on that
+reason: each movement and its stock change are written together, and `validate` checks the sums and non-negativity
+from the stored rows alone. An explicit allocation or stocking table is a tracked enhancement (TASKS.md).
+
 ```sql
 -- current stock of one product, per warehouse
 SELECT warehouse_id, on_hand, reserved, on_hand - reserved AS available, updated_at
